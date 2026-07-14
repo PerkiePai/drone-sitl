@@ -29,7 +29,7 @@ v1 scope: LK flow-odom only (no DSMAC/relief-fix), baro-derived depth
 ## Global constraints
 
 - Reuse `pipeline.py`'s `_detect`, `_track_lk`, `_solve_translation` and
-  `frontend/flow-odom/flow_odometry.py`'s Mahony math **unchanged** — no
+  `flow_odometry.py`'s Mahony math **unchanged** — no
   forked copies of tracking/attitude math.
 - `vio-streamer-pai.py` is a new, separate script from `vio-recorder-pai.py`
   (per design decision) — do not modify the recorder.
@@ -63,7 +63,7 @@ v1 scope: LK flow-odom only (no DSMAC/relief-fix), baro-derived depth
 
 ## Task 1: `MahonyState` — incremental Mahony AHRS
 
-**File:** `frontend/flow-odom/flow_odometry.py` (modify)
+**File:** `flow_odometry.py` (modify)
 **Test:** `streaming/tests/test_mahony_state.py` (create)
 
 Extract the per-tick update math already inside `compute_ahrs_attitude`
@@ -73,7 +73,7 @@ implementation, and the unit test proves they're identical by construction.
 
 ### Step 1.1 — Add `MahonyState` class
 
-- [ ] In `frontend/flow-odom/flow_odometry.py`, add (just above
+- [ ] In `flow_odometry.py`, add (just above
   `compute_ahrs_attitude`):
 
   ```python
@@ -170,7 +170,7 @@ implementation, and the unit test proves they're identical by construction.
   import numpy as np
 
   ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-  sys.path.insert(0, os.path.join(ROOT, "frontend", "flow-odom"))
+  sys.path.insert(0, ROOT)
   import flow_odometry as fo
 
 
@@ -419,7 +419,7 @@ implementation, and the unit test proves they're identical by construction.
 
 ## Task 4: Extract `load_calib` for reuse outside `load_dataset`
 
-**File:** `frontend/flow-odom/flow_odometry.py` (modify)
+**File:** `flow_odometry.py` (modify)
 **Test:** `streaming/tests/test_load_calib.py` (create)
 
 `pipeline-streaming.py` needs `(K, R_CtoI)` from a `cam_calib.json` without a
@@ -429,7 +429,7 @@ function so both call sites share it.
 
 ### Step 4.1 — Refactor
 
-- [ ] In `frontend/flow-odom/flow_odometry.py`, add above `load_dataset`:
+- [ ] In `flow_odometry.py`, add above `load_dataset`:
 
   ```python
   def load_calib(calib_path):
@@ -459,7 +459,7 @@ function so both call sites share it.
   import os, sys
   import numpy as np
   ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-  sys.path.insert(0, os.path.join(ROOT, "frontend", "flow-odom"))
+  sys.path.insert(0, ROOT)
   import flow_odometry as fo
 
 
@@ -492,7 +492,7 @@ function so both call sites share it.
 
 ### Step 5.1 — Write the script
 
-- [ ] Create `/home/innovation/pai/drone-vio/pipeline-streaming.py`:
+- [ ] Create `pipeline-streaming.py` (repo root):
 
   ```python
   #!/usr/bin/env python3
@@ -529,7 +529,7 @@ function so both call sites share it.
   from pymavlink import mavutil
 
   ROOT = os.path.dirname(os.path.abspath(__file__))
-  sys.path.insert(0, os.path.join(ROOT, "frontend", "flow-odom"))
+  sys.path.insert(0, ROOT)
   sys.path.insert(0, os.path.join(ROOT, "streaming"))
   import flow_odometry as fo
   from zmq_proto import TOPIC_IMU, TOPIC_BARO, TOPIC_FRAME, unpack
@@ -687,7 +687,7 @@ vision source from before liftoff.
 
 ### Step 6.1 — Write the script
 
-- [ ] Create `/home/innovation/pai/drone-vio/vio-streamer-pai.py`:
+- [ ] Create `vio-streamer-pai.py` (repo root):
 
   ```python
   # ============================================================================
@@ -715,7 +715,7 @@ vision source from before liftoff.
   from PIL import Image
   import zmq
 
-  sys.path.insert(0, os.path.expanduser("~/pai/drone-vio/streaming"))
+  sys.path.insert(0, os.path.expanduser("~/Desktop/project/drone-sitl/streaming"))
   from zmq_proto import pack_imu, pack_baro, pack_frame  # noqa: E402
 
   ZMQ_BIND     = "tcp://*:5556"
@@ -950,3 +950,55 @@ Run all automated tests together once Tasks 1–5 are done:
 ```bash
 conda run -n drone pytest streaming/tests/ -v
 ```
+
+---
+
+## Addendum (2026-07-14): layout, initial state, commanding
+
+Reconciled with the actual repo + the design discussion. See
+`docs/superpowers/specs/2026-07-14-project-structure.md` for the file map.
+
+### Layout
+
+- `flow_odometry.py` and `pipeline.py` live at **repo root** (flat), not under
+  `frontend/flow-odom/`. All paths above are updated. Repo root on this machine:
+  `C:\Users\bower\Desktop\project\drone-sitl`.
+
+### Initial state (revises Task 5)
+
+`--start_lat/--start_lon` are **no longer log-only** once commanding exists — they
+are the single georef anchor. Add to `pipeline-streaming.py`:
+
+- `--start_alt` (origin altitude, metres) and `--start_yaw` (takeoff heading, ENU
+  rad), or a single `--takeoff_json` carrying lat/lon/alt/attitude (the recorder
+  already writes `takeoff.json`, see `vio-recorder-pai.py:389`).
+- **Fix the cold start:** seed `MahonyState` from `--start_yaw` (or `takeoff.json`
+  `attitude_xyzw`), NOT `np.eye(3)`. Identity is a 180° roll singularity for the
+  gravity correction (level FRD→ENU is `diag([1,-1,-1])`), so it will not settle.
+- Send `SET_GPS_GLOBAL_ORIGIN(start_lat, start_lon, start_alt)` once at startup so
+  PX4 has an absolute anchor (GPS is off) — this also makes the QGC map place the
+  drone, and lets targets be sent as either local NED or lat/lon.
+
+### V2a — commanding (new task, after v1 flies)
+
+- Add `SetpointSender` to `streaming/mavlink_bridge.py` (sibling of
+  `VisionPositionSender`, reuses `enu_to_ned`/`yaw_enu_to_ned` on the same `conn`).
+- Convert target lat/lon → local ENU using `start_lat/lon` (pipeline.py georef
+  convention) → NED, send `SET_POSITION_TARGET_LOCAL_NED` **every loop** (OFFBOARD
+  needs >2 Hz or PX4 drops offboard).
+- Startup handshake: `conn.wait_heartbeat()` → `set_gps_global_origin` → prime
+  setpoints → OFFBOARD (operator in QGC for first bring-up, not auto mode-switch).
+
+### V2b — climb-and-search (new task, after Layer 1 DSMAC + V2a)
+
+- **Prerequisite:** port DSMAC into streaming (`streaming/dsmac_live.py`, imports
+  DSMAC funcs from `pipeline.py` unchanged; needs an ortho-tile strategy since the
+  flight footprint isn't known ahead of time — pre-fetch around start_lat/lon).
+- `streaming/commander.py`: FSM NORMAL → SEARCH → GIVE-UP. Consecutive-reject
+  counter reuses the accept flag already in `pipeline.py`'s `fixes` list. On
+  threshold, ramp an altitude setpoint (bounded climb rate + hard ceiling);
+  exit on a fix clearing the confidence gate; GIVE-UP (hold last fix, stop
+  climbing, alert) on ceiling/timeout.
+- **Validate first:** on a known DSMAC-failure dataset with the *batch*
+  `pipeline.py`, confirm accept-rate actually trends up with altitude before
+  building the closed loop (design spec's open Exp10 question).

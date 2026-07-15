@@ -259,3 +259,41 @@ validated live before moving to the next:
   (does accept rate vs. altitude actually trend up on a real failure case?)
   before building the closed-loop climb behavior, not assumed from the
   design.
+
+## Addendum (2026-07-14): initial state, origin, and V2a mechanics
+
+### Initial state / origin (applies to v1 and up)
+
+`VISION_POSITION_ESTIMATE` carries **only local NED offsets** from the vision
+origin — no lat/lon. With GPS off, PX4 has no absolute anchor unless one is given.
+So:
+
+- The user inputs initial **position** via `--start_lat/--start_lon/--start_alt`
+  (v1's "log-only" note is superseded — these are the one georef anchor once
+  commanding exists). Initial **heading** must also be provided (`--start_yaw` or
+  `takeoff.json`), because the estimator's initial attitude was otherwise a
+  degenerate identity seed.
+- Push the anchor to PX4 once with `SET_GPS_GLOBAL_ORIGIN(lat, lon, alt)`. Benefits:
+  PX4 can map global↔local, the QGC map places the drone, and targets may be sent
+  as local NED *or* lat/lon interchangeably.
+- The anchor must be consistent across three things or the drone flies to the
+  wrong place: the `SET_GPS_GLOBAL_ORIGIN` value, the ENU origin the estimate
+  drifts from, and the origin targets are converted against.
+
+### V2a mechanics (concrete)
+
+- PX4 flies the path; the pipeline only names a destination — no pipeline-side
+  guidance. PX4's geofence/failsafe are the only bounds.
+- Message: `SET_POSITION_TARGET_LOCAL_NED` with a type_mask using x/y/z (+yaw),
+  ignoring velocity/accel/yaw_rate. Sent **every loop** (OFFBOARD needs >2 Hz).
+- `DO_REPOSITION` is a single-shot alternative that skips the offboard heartbeat,
+  but does NOT extend to V2b's continuous altitude commanding — use OFFBOARD
+  streaming if V2b is the goal.
+- Mode switch to OFFBOARD is a safety boundary: operator flips it in QGC for first
+  bring-up; auto `MAV_CMD_DO_SET_MODE` only after V2b's safety bounds exist.
+
+### Middleware decision
+
+Stay on **pymavlink** (matches the non-ROS stack, works on Windows). Revisit
+**PX4-ROS2 / uXRCE-DDS** (not MAVROS) only if the project moves to Ubuntu *and*
+grows into a multi-node autonomy stack.

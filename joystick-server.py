@@ -56,11 +56,24 @@ class SetpointLoop(threading.Thread):
             "alt_m": 0.0,
             "vz": 0.0,
             "heading_deg": 0.0,
+            # Commanded vs measured, so "it tilts but does not move" is
+            # observable rather than a guess: cmd high + actual ~0 means PX4
+            # is receiving the setpoint but not achieving it.
+            "cmd_vx": 0.0,
+            "cmd_yaw_rate": 0.0,
+            "gs": 0.0,
+            # PX4 SITL runs in lockstep with Isaac, so PX4's clock IS sim time.
+            # Ratio < 1 means the sim is running slower than wall clock and the
+            # drone only LOOKS sluggish -- it is accelerating correctly in sim
+            # seconds. Without this, slow rendering is indistinguishable from a
+            # control bug.
+            "sim_rate": 0.0,
             "ready_for_offboard": False,
             "streaming_s": 0.0,
         }
         self._stream_start = None
         self._params_sent = False
+        self._sim_ref = None          # (px4_boot_ms, wall_monotonic) baseline
 
     def telemetry(self):
         with self._telem_lock:
@@ -104,6 +117,19 @@ class SetpointLoop(threading.Thread):
                 with self._telem_lock:
                     self._telem["alt_m"] = -msg.z    # NED down -> altitude up
                     self._telem["vz"] = -msg.vz
+                    self._telem["gs"] = math.hypot(msg.vx, msg.vy)
+                # Sim clock vs wall clock, measured over a rolling 3 s window.
+                wall = time.monotonic()
+                if self._sim_ref is None:
+                    self._sim_ref = (msg.time_boot_ms, wall)
+                else:
+                    boot0, wall0 = self._sim_ref
+                    d_wall = wall - wall0
+                    if d_wall >= 3.0:
+                        d_sim = (msg.time_boot_ms - boot0) / 1000.0
+                        with self._telem_lock:
+                            self._telem["sim_rate"] = d_sim / d_wall
+                        self._sim_ref = (msg.time_boot_ms, wall)
             elif kind == "ATTITUDE":
                 with self._telem_lock:
                     self._telem["heading_deg"] = (
@@ -125,6 +151,8 @@ class SetpointLoop(threading.Thread):
                 self._stream_start = time.monotonic()
             streaming_s = time.monotonic() - self._stream_start
             with self._telem_lock:
+                self._telem["cmd_vx"] = vx
+                self._telem["cmd_yaw_rate"] = yaw_rate
                 self._telem["streaming_s"] = streaming_s
                 self._telem["ready_for_offboard"] = (
                     streaming_s >= self.warmup_s and self._telem["connected"])

@@ -54,6 +54,8 @@
     <span>armed <b id="t-armed">--</b></span>
     <span>alt <b id="t-alt">--</b> m</span>
     <span>hdg <b id="t-hdg">--</b>&deg;</span>
+    <span>speed <b id="t-gs">--</b>/<b id="t-cmd">--</b> m/s</span>
+    <span>sim <b id="t-sim">--</b></span>
   </div>
   <div id="controls">
     <div>
@@ -174,6 +176,21 @@ function paint(t) {
   el('t-armed').textContent = t.armed ? 'yes' : 'no';
   el('t-alt').textContent = t.alt_m.toFixed(1);
   el('t-hdg').textContent = t.heading_deg.toFixed(0);
+
+  // Measured ground speed against what we commanded. A large persistent gap
+  // means PX4 has the setpoint but is not achieving it -- usually because the
+  // sim is running slow, not because control is broken.
+  el('t-gs').textContent = t.gs.toFixed(1);
+  el('t-cmd').textContent = Math.abs(t.cmd_vx).toFixed(1);
+
+  // Sim time vs wall clock. Below ~0.8 the drone will look sluggish no matter
+  // how correct the commands are, because physics itself is running slow.
+  if (t.sim_rate > 0) {
+    el('t-sim').textContent = `${Math.round(t.sim_rate * 100)}%`;
+    el('t-sim').className = t.sim_rate > 0.8 ? 'good'
+                          : t.sim_rate > 0.4 ? 'wait' : 'bad';
+  }
+
   el('c-offboard').disabled = !t.ready_for_offboard;
   ['c-arm','c-takeoff','c-land','c-disarm'].forEach(
     id => el(id).disabled = !t.connected);

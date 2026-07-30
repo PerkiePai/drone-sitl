@@ -1,6 +1,7 @@
 # Design: web joystick → PX4 OFFBOARD velocity control (PoC)
 
-**Status:** approved, ready for implementation planning
+**Status:** implemented and flown 2026-07-31 — all six commands verified
+against PX4 in Isaac Sim
 **Date:** 2026-07-30
 
 ## Goal

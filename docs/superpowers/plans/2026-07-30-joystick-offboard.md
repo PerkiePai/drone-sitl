@@ -2,6 +2,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-30-joystick-offboard-design.md`
 **Branch:** `feat/joystick-offboard`
+**Status:** complete — Tasks 0-8 built and tested, Task 9 flown 2026-07-31
 **Date:** 2026-07-30
 
 ## Goal

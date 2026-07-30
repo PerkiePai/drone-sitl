@@ -7,9 +7,9 @@ flight control, not by moving the drone model directly.
 - **Design:** `docs/superpowers/specs/2026-07-30-joystick-offboard-design.md`
 - **Build plan:** `docs/superpowers/plans/2026-07-30-joystick-offboard.md`
 
-> **Status:** the software is built and 42 automated tests pass, but the
-> end-to-end flight has not been flown yet. The first run through this guide
-> *is* the acceptance test. Section 8 covers what to do when something breaks.
+> **Status:** flown and confirmed working on 2026-07-31 — ARM, TAKEOFF,
+> OFFBOARD and all six flight commands verified against PX4 in Isaac Sim.
+> 42 automated tests pass. Section 8 covers what to do when something breaks.
 
 ---
 
@@ -149,6 +149,8 @@ The telemetry row:
 | `armed` | Whether the motors are live. |
 | `alt` | Height above the launch point, metres. |
 | `hdg` | Compass heading, degrees. |
+| `speed` | Measured ground speed / what was commanded, m/s. A persistent gap means PX4 has the setpoint but is not achieving it. |
+| `sim` | Sim time vs wall clock. Green above 80%, red below 40%. **Read this before concluding anything is broken.** |
 
 `mode` shows what PX4 is really doing, not what you asked for. If PX4 drops out
 of OFFBOARD on its own, you see it here immediately and the joystick stops
@@ -212,8 +214,14 @@ itself. **DISARM** is there as a manual cut if you need it.
 
 Worth doing on the first flight:
 
-**Distance check.** Hold FWD for 3 seconds. The drone should travel about **6 m**
-(2 m/s × 3 s) and then stop. If it moves the wrong way or barely moves, see 8.4.
+**Distance check.** Hold FWD and watch `speed` climb toward 2.0 m/s, then stop
+on release.
+
+Distance depends on the `sim` figure. At 100% you get about **6 m** in 3
+seconds (2 m/s × 3 s). At 35% the same three seconds of your time is barely one
+second of the drone's, so expect roughly a third of that and a partial
+ramp-up — hold for 10 seconds or so instead. If it moves the wrong way or
+`speed` stays near zero while the commanded figure is 2.0, see 8.4.
 
 **Altitude check.** Hold ASCEND for 3 seconds. `alt` should rise about 3 m and
 hold.
@@ -260,10 +268,40 @@ PX4 rejected or abandoned it. Common causes:
   printed, this param never got set. Check in QGroundControl.
 - **The browser tab was closed** and the watchdog zeroed everything. Reload.
 
-### 8.4 It moves the wrong way, or not at all
+### 8.4 It tilts but barely moves
 
-- **Nothing moves, mode says OFFBOARD:** PX4 is receiving setpoints but ignoring
-  them. Check `armed` is `yes`.
+**Check the `sim` figure first.** This is the most common confusing symptom and
+it is usually not a fault at all.
+
+A multirotor tilts in order to accelerate horizontally, so tilting is the
+*correct* response to a forward command. If it tilts and then creeps forward,
+the drone is fine and the clock is the problem.
+
+PX4 SITL runs in **lockstep** with Isaac Sim: when rendering falls behind, the
+physics clock slows to match. At `sim 35%`, three seconds of your time is about
+one second of the drone's, so it has barely begun accelerating by the time you
+expected it to have travelled 6 m.
+
+Confirm with the telemetry: if `speed` reads something like `0.2/2.0`, the
+commanded value is right and the aircraft is simply still building up to it.
+Hold the button for 8–10 seconds and watch the measured figure climb.
+
+To make it responsive, reduce the rendering load — the biggest cost is usually
+the camera streaming (two MJPEG render products competing with physics):
+
+| Change | Effect |
+|---|---|
+| `STREAM_FPS = 5` (`:68`) | Keeps video, much cheaper. **Try this first.** |
+| `STREAM_W, STREAM_H = 320, 200` (`:67`) | Cheaper encode, smaller picture |
+| `STREAM_CAMERAS = False` (`:65`) | Fastest sim, no video panel |
+| Lower Cesium tile detail, close spare viewports | Frees GPU |
+
+Watch the `sim` figure while you change things — that is what it is there for.
+
+### 8.4b Genuinely no movement, or the wrong direction
+
+- **Nothing moves at all, mode says OFFBOARD:** PX4 is receiving setpoints but
+  ignoring them. Check `armed` is `yes`.
 - **Moves the wrong direction:** a frame or sign problem. Note exactly which
   button produced which motion and report it — the mapping is unit-tested, so
   this would point at PX4-side frame handling.

@@ -118,8 +118,8 @@ class SetpointLoop(threading.Thread):
                     self._run_command(self.commands.get_nowait())
                 except queue.Empty:
                     break
-            vx, vy, vz = self.state.velocity()
-            self.link.send_velocity(vx, vy, vz)
+            vx, vy, vz, yaw_rate = self.state.command()
+            self.link.send_velocity(vx, vy, vz, yaw_rate)
 
             if self._stream_start is None:
                 self._stream_start = time.monotonic()
@@ -196,6 +196,8 @@ def main():
                     help="Isaac MJPEG port from drone_setup_px4_cesium.py")
     ap.add_argument("--speed-fwd", type=float, default=2.0, help="m/s")
     ap.add_argument("--speed-up", type=float, default=1.0, help="m/s")
+    ap.add_argument("--yaw-rate", type=float, default=offboard.DEFAULT_YAW_RATE_DPS,
+                    help="turn rate for the left/right buttons, deg/s")
     ap.add_argument("--takeoff-alt", type=float, default=5.0, help="m")
     ap.add_argument("--watchdog", type=float, default=0.5,
                     help="seconds of silence before velocity is forced to zero")
@@ -207,14 +209,16 @@ def main():
     import uvicorn
 
     conn = mavutil.mavlink_connection(args.mavlink)
-    state = offboard.CommandState(args.speed_fwd, args.speed_up, args.watchdog)
+    state = offboard.CommandState(args.speed_fwd, args.speed_up, args.watchdog,
+                                  args.yaw_rate)
     loop_thread = SetpointLoop(conn, state, args.rate, args.takeoff_alt,
                                args.offboard_warmup)
     loop_thread.start()
 
     print(f">>> MAVLink offboard link: {args.mavlink}")
     print(f">>> setpoint loop at {args.rate:.0f} Hz "
-          f"({args.speed_fwd} m/s fwd, {args.speed_up} m/s climb)")
+          f"({args.speed_fwd} m/s fwd, {args.speed_up} m/s climb, "
+          f"{args.yaw_rate:.0f} deg/s turn)")
     print(f">>> open http://<box-ip>:{args.port}/")
     uvicorn.run(build_app(loop_thread, state, args.video_port),
                 host="0.0.0.0", port=args.port, log_level="warning")

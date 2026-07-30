@@ -64,21 +64,21 @@ def test_local_constants_match_pymavlink():
 def test_state_reports_held_velocity():
     s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
     s.set("fwd", True, now=100.0)
-    assert s.velocity(now=100.1) == (2.0, 0.0, 0.0)
+    assert s.command(now=100.1) == (2.0, 0.0, 0.0, 0.0)
 
 
 def test_state_release_returns_to_hover():
     s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
     s.set("fwd", True, now=100.0)
     s.set("fwd", False, now=100.2)
-    assert s.velocity(now=100.3) == (0.0, 0.0, 0.0)
+    assert s.command(now=100.3) == (0.0, 0.0, 0.0, 0.0)
 
 
 def test_watchdog_zeroes_stale_input():
     s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
     s.set("fwd", True, now=100.0)
-    assert s.velocity(now=100.4) == (2.0, 0.0, 0.0)   # still fresh
-    assert s.velocity(now=101.0) == (0.0, 0.0, 0.0)   # stale -> hover
+    assert s.command(now=100.4) == (2.0, 0.0, 0.0, 0.0)   # still fresh
+    assert s.command(now=101.0) == (0.0, 0.0, 0.0, 0.0)   # stale -> hover
 
 
 def test_touch_keeps_a_held_direction_alive():
@@ -87,14 +87,14 @@ def test_touch_keeps_a_held_direction_alive():
     s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
     s.set("fwd", True, now=100.0)
     s.touch(now=100.4)
-    assert s.velocity(now=100.7) == (2.0, 0.0, 0.0)
+    assert s.command(now=100.7) == (2.0, 0.0, 0.0, 0.0)
 
 
 def test_clear_drops_everything():
     s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
     s.set("fwd", True, now=100.0)
     s.clear()
-    assert s.velocity(now=100.1) == (0.0, 0.0, 0.0)
+    assert s.command(now=100.1) == (0.0, 0.0, 0.0, 0.0)
 
 
 def test_held_reports_current_set():
@@ -107,7 +107,7 @@ def test_held_reports_current_set():
 def test_out_of_scope_direction_is_rejected():
     s = offboard.CommandState()
     with pytest.raises(ValueError):
-        s.set("left", True)
+        s.set("strafe", True)
 
 
 # --- decode_px4_mode -------------------------------------------------------
@@ -205,3 +205,60 @@ def test_bind_target_adopts_ids_from_heartbeat():
     msg.get_srcComponent.return_value = 7
     link.bind_target(msg)
     assert (link.target_system, link.target_component) == (3, 7)
+
+
+# --- yaw (left/right turn the aircraft; they do NOT strafe) -----------------
+
+def test_yaw_right_is_positive_rate():
+    """NED yaw is positive clockwise seen from above, so right turn > 0."""
+    assert offboard.axes_to_yaw_rate({"yaw_right"}, 0.5) == 0.5
+
+
+def test_yaw_left_is_negative_rate():
+    assert offboard.axes_to_yaw_rate({"yaw_left"}, 0.5) == -0.5
+
+
+def test_opposing_yaw_cancels():
+    assert offboard.axes_to_yaw_rate({"yaw_left", "yaw_right"}, 0.5) == 0.0
+
+
+def test_no_turn_held_is_zero_yaw_rate():
+    assert offboard.axes_to_yaw_rate(set(), 0.5) == 0.0
+
+
+def test_yaw_does_not_produce_any_translation():
+    """Turning must not sneak in sideways motion -- the whole point of putting
+    yaw on left/right instead of strafe."""
+    assert offboard.axes_to_body_velocity({"yaw_left"}, 2.0, 1.0) == (0.0, 0.0, 0.0)
+    assert offboard.axes_to_body_velocity({"yaw_right"}, 2.0, 1.0) == (0.0, 0.0, 0.0)
+
+
+def test_command_combines_forward_climb_and_turn():
+    import math
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, yaw_rate_dps=45.0)
+    for d in ("fwd", "up", "yaw_right"):
+        s.set(d, True, now=100.0)
+    vx, vy, vz, yr = s.command(now=100.1)
+    assert (vx, vy, vz) == (2.0, 0.0, -1.0)
+    assert math.isclose(yr, math.radians(45.0))
+
+
+def test_watchdog_also_stops_the_turn():
+    """A stale link must not leave the aircraft spinning."""
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, yaw_rate_dps=45.0)
+    s.set("yaw_right", True, now=100.0)
+    assert s.command(now=101.0) == (0.0, 0.0, 0.0, 0.0)
+
+
+def test_send_velocity_forwards_yaw_rate():
+    conn = MagicMock()
+    offboard.OffboardLink(conn).send_velocity(1.0, 0.0, 0.0, yaw_rate=0.75)
+    args, _ = conn.mav.set_position_target_local_ned_send.call_args
+    assert args[15] == 0.75          # yaw_rate is the last field
+
+
+def test_send_velocity_defaults_to_holding_heading():
+    conn = MagicMock()
+    offboard.OffboardLink(conn).send_velocity(1.0, 0.0, 0.0)
+    args, _ = conn.mav.set_position_target_local_ned_send.call_args
+    assert args[15] == 0.0

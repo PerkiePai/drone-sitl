@@ -1,13 +1,13 @@
 # Joystick flight control — operator handbook
 
-Fly the Isaac Sim / Pegasus drone from a web page using four commands: climb,
-descend, forward, backward. Commands go through real PX4 flight control, not by
-moving the drone model directly.
+Fly the Isaac Sim / Pegasus drone from a web page using six commands: forward,
+backward, turn left, turn right, ascend, descend. Commands go through real PX4
+flight control, not by moving the drone model directly.
 
 - **Design:** `docs/superpowers/specs/2026-07-30-joystick-offboard-design.md`
 - **Build plan:** `docs/superpowers/plans/2026-07-30-joystick-offboard.md`
 
-> **Status:** the software is built and 30 automated tests pass, but the
+> **Status:** the software is built and 42 automated tests pass, but the
 > end-to-end flight has not been flown yet. The first run through this guide
 > *is* the acceptance test. Section 8 covers what to do when something breaks.
 
@@ -119,7 +119,7 @@ Expected output:
 
 ```
 >>> MAVLink offboard link: udpin:0.0.0.0:14540
->>> setpoint loop at 20 Hz (2.0 m/s fwd, 1.0 m/s climb)
+>>> setpoint loop at 20 Hz (2.0 m/s fwd, 1.0 m/s climb, 45 deg/s turn)
 >>> open http://<box-ip>:8090/
 >>> params: COM_RCL_EXCEPT=4 (offboard exempt from RC-loss failsafe), MIS_TAKEOFF_ALT=5.0
 ```
@@ -137,8 +137,8 @@ Find your box IP with `hostname -I | awk '{print $1}'`.
 Go to `http://<box-ip>:8090/` on your laptop or phone. Both work; the page
 figures out the video address from whatever host you loaded it from.
 
-You should see the camera feed, a telemetry row, a four-way pad, and five
-command buttons.
+You should see the camera feed, a telemetry row, a four-way move/turn pad, a
+separate two-button altitude column, and five command buttons.
 
 The telemetry row:
 
@@ -180,18 +180,25 @@ now live.
 
 | Control | Does |
 |---|---|
-| ▲ | Climb at 1 m/s |
-| ▼ | Descend at 1 m/s |
-| ▶ | Forward at 2 m/s (the direction the nose points) |
-| ◀ | Backward at 2 m/s |
+| ▲ FWD | Fly forward at 2 m/s (whichever way the nose points) |
+| ▼ BACK | Fly backward at 2 m/s |
+| ↺ TURN L | Rotate left at 45°/s |
+| ↻ TURN R | Rotate right at 45°/s |
+| ▲ ASCEND | Climb at 1 m/s |
+| ▼ DESCEND | Descend at 1 m/s |
 | release | Stop and hover |
 
-Hold to move, release to stop. Keyboard works too: **arrow keys** or **WASD**
-(`W` climb, `S` descend, `D` forward, `A` backward). Diagonals work — hold ▲
-and ▶ together to climb while moving forward.
+The left pad moves and turns; the separate two-button column on the right is
+altitude only.
 
-Heading never changes. "Forward" means the same physical direction for the
-whole flight.
+Hold to move, release to stop. Keyboard: **arrows** or **WASD** for the pad
+(`W` forward, `S` back, `A` turn left, `D` turn right), and **Q / E** for
+ascend / descend. Combinations work — hold FWD and TURN R together to fly a
+curve, or FWD and ASCEND to climb while advancing.
+
+"Forward" always means the direction the nose currently points, so turning
+changes where forward goes. PX4 resolves this every tick, so a turn takes
+effect immediately without needing to re-aim anything.
 
 ### Step 5 — LAND
 Press **LAND**. `mode` goes to `AUTO.LAND`, the drone descends and disarms
@@ -205,12 +212,17 @@ itself. **DISARM** is there as a manual cut if you need it.
 
 Worth doing on the first flight:
 
-**Distance check.** Hold ▶ for 3 seconds. The drone should travel about **6 m**
+**Distance check.** Hold FWD for 3 seconds. The drone should travel about **6 m**
 (2 m/s × 3 s) and then stop. If it moves the wrong way or barely moves, see 8.4.
 
-**Altitude check.** Hold ▲ for 3 seconds. `alt` should rise about 3 m and hold.
+**Altitude check.** Hold ASCEND for 3 seconds. `alt` should rise about 3 m and
+hold.
 
-**Watchdog check.** Hold ▶ and close the browser tab mid-press. The drone must
+**Turn check.** Hold TURN R for 2 seconds. `hdg` should increase by about 90°
+(45°/s × 2 s) and stay there. Then hold FWD and confirm the drone now travels
+in the new direction — that is the proof that forward tracks the nose.
+
+**Watchdog check.** Hold FWD and close the browser tab mid-press. The drone must
 stop within about half a second. If it keeps going, the safety watchdog isn't
 working and you should stop and investigate — that's the mechanism that saves
 you when wifi drops.
@@ -314,11 +326,12 @@ All optional:
 conda run -n drone python joystick-server.py \
   --speed-fwd 4.0 \        # faster forward/back (default 2.0 m/s)
   --speed-up 2.0 \         # faster climb/descend (default 1.0 m/s)
+  --yaw-rate 90.0 \        # faster turn (default 45 deg/s)
   --takeoff-alt 10.0 \     # higher takeoff (default 5.0 m)
   --port 9000              # different web port (default 8090)
 ```
 
-`--help` lists all nine flags.
+`--help` lists all ten flags.
 
 **Start slow.** 2 m/s is deliberately gentle so mistakes are recoverable and
 easy to see. Turn it up once you trust the setup.
@@ -339,8 +352,9 @@ cameras. Files land in `~/flight_recordings/`.
 
 ## 10. What this does not do
 
-Deliberately out of scope: strafing left/right, yaw/rotation, waypoints or
-autonomous flight, multiple drones, and any login or access control.
+Deliberately out of scope: strafing sideways (the left/right buttons rotate
+instead), waypoints or autonomous flight, multiple drones, and any login or
+access control.
 
 **There is no authentication.** Anyone who can reach port 8090 on your network
 can fly the drone. Fine on a trusted LAN, not fine on an open network.
@@ -361,7 +375,7 @@ hostname -I | awk '{print $1}'                                          # your I
 |---|---|
 | Web UI | `http://<box-ip>:8090/` |
 | Video | `http://<box-ip>:8080/detect` |
-| Controls | ▲ climb ▼ descend ▶ forward ◀ backward (or WASD / arrows) |
-| Speeds | 2 m/s horizontal, 1 m/s vertical |
+| Controls | pad: ▲ fwd ▼ back ↺↻ turn (WASD/arrows) · column: ascend/descend (Q/E) |
+| Speeds | 2 m/s horizontal, 1 m/s vertical, 45°/s turn |
 | Takeoff | 5 m |
 | Tests | `conda run -n drone pytest streaming/tests/ -q` |

@@ -8,6 +8,7 @@ Every MAVLink constant below was read out of ~/PX4-Autopilot rather than
 recalled; the source file and line are on each one. test_offboard.py also
 asserts they agree with pymavlink's dialect.
 """
+import math
 import threading
 import time
 
@@ -19,7 +20,8 @@ MAV_FRAME_BODY_NED = 8
 
 # type_mask: ignore position (bits 0-2), ignore acceleration (bits 6-8),
 # ignore yaw (bit 10). USE velocity (bits 3-5) and yaw_rate (bit 11 clear).
-# Sending yaw_rate = 0 with yaw ignored is what holds the heading.
+# yaw_rate = 0 holds the heading; non-zero turns. PX4 applies yawspeed outside
+# its frame switch (mavlink_receiver.cpp:1025), so this works in BODY_NED.
 VEL_YAWRATE_TYPE_MASK = 1479
 
 MAV_CMD_DO_SET_MODE = 176
@@ -44,14 +46,18 @@ PX4_SUB_MODE_AUTO_LAND = 6
 # mid-demo.
 COM_RCL_EXCEPT_OFFBOARD = 4
 
-DIRECTIONS = ("fwd", "back", "up", "down")
+DIRECTIONS = ("fwd", "back", "yaw_left", "yaw_right", "up", "down")
+
+DEFAULT_YAW_RATE_DPS = 45.0
 
 
 def axes_to_body_velocity(held, speed_fwd, speed_up):
     """Map held joystick directions to a body-NED velocity setpoint.
 
     NED means +vx is nose-forward and +vz is DOWN, so climbing is negative vz.
-    vy is always 0.0 -- strafe is out of scope. Opposing directions cancel.
+    vy is always 0.0 -- sideways strafe is out of scope; the left/right buttons
+    turn the aircraft instead (see axes_to_yaw_rate). Opposing directions
+    cancel.
     """
     vx = 0.0
     if "fwd" in held:
@@ -66,6 +72,24 @@ def axes_to_body_velocity(held, speed_fwd, speed_up):
     return vx, 0.0, vz
 
 
+def axes_to_yaw_rate(held, yaw_rate_rps):
+    """Map held turn directions to a yaw rate in rad/s.
+
+    NED yaw is positive clockwise viewed from above, so turning right is
+    positive. Opposing directions cancel.
+
+    Because setpoints go out in BODY_NED, turning also rotates what "forward"
+    means -- PX4 resolves vx against the current heading every tick, so
+    forward keeps tracking the nose with no extra work here.
+    """
+    rate = 0.0
+    if "yaw_right" in held:
+        rate += yaw_rate_rps
+    if "yaw_left" in held:
+        rate -= yaw_rate_rps
+    return rate
+
+
 class CommandState:
     """Thread-safe held-direction set with a staleness watchdog.
 
@@ -74,10 +98,12 @@ class CommandState:
     instead of latching the last command at full speed.
     """
 
-    def __init__(self, speed_fwd=2.0, speed_up=1.0, watchdog_s=0.5):
+    def __init__(self, speed_fwd=2.0, speed_up=1.0, watchdog_s=0.5,
+                 yaw_rate_dps=DEFAULT_YAW_RATE_DPS):
         self.speed_fwd = speed_fwd
         self.speed_up = speed_up
         self.watchdog_s = watchdog_s
+        self.yaw_rate_rps = math.radians(yaw_rate_dps)
         self._lock = threading.Lock()
         self._held = set()
         self._last_input = 0.0
@@ -108,14 +134,22 @@ class CommandState:
         with self._lock:
             return set(self._held)
 
-    def velocity(self, now=None):
+    def command(self, now=None):
+        """Everything one setpoint needs: (vx, vy, vz, yaw_rate).
+
+        Single method rather than separate velocity/yaw getters so both are
+        read under one lock against one staleness check -- otherwise a
+        watchdog expiry between two calls could zero the velocity while
+        leaving the aircraft still turning.
+        """
         now = time.monotonic() if now is None else now
         with self._lock:
             held = set(self._held)
             last = self._last_input
         if held and (now - last) > self.watchdog_s:
-            return 0.0, 0.0, 0.0
-        return axes_to_body_velocity(held, self.speed_fwd, self.speed_up)
+            return 0.0, 0.0, 0.0, 0.0
+        vx, vy, vz = axes_to_body_velocity(held, self.speed_fwd, self.speed_up)
+        return vx, vy, vz, axes_to_yaw_rate(held, self.yaw_rate_rps)
 
 
 PX4_MODE_NAMES = {
@@ -158,7 +192,7 @@ class OffboardLink:
         self.target_system = msg.get_srcSystem()
         self.target_component = msg.get_srcComponent()
 
-    def send_velocity(self, vx, vy, vz):
+    def send_velocity(self, vx, vy, vz, yaw_rate=0.0):
         self.conn.mav.set_position_target_local_ned_send(
             0,                                  # time_boot_ms (PX4 ignores)
             self.target_system, self.target_component,
@@ -168,7 +202,7 @@ class OffboardLink:
             vx, vy, vz,
             0.0, 0.0, 0.0,                      # afx, afy, afz -- masked off
             0.0,                                # yaw        -- masked off
-            0.0)                                # yaw_rate=0 -> hold heading
+            yaw_rate)                           # rad/s; 0 holds heading
 
     def _command_long(self, command, *params):
         padded = list(params) + [0.0] * (7 - len(params))

@@ -21,8 +21,24 @@ offboard.py` is intended to be the thing V2a's `SetpointSender` grows out of.
 
 ## Non-goals (YAGNI)
 
-Strafe (left/right translation), yaw control, waypoints, multi-vehicle, auth,
-HTTPS, WebRTC, recording control, and the Gamepad API are all out of scope.
+Strafe (left/right translation), waypoints, multi-vehicle, auth, HTTPS, WebRTC,
+recording control, and the Gamepad API are all out of scope.
+
+> **Amended 2026-07-30 — yaw is now in scope.** After first use, the original
+> mapping proved confusing: a D-pad's horizontal axis reads as turn or strafe,
+> not as reverse/forward. Remapped to six commands — pad ▲▼ = forward/backward,
+> pad ◀▶ = turn left/right, plus a separate two-button column for
+> ascend/descend.
+>
+> This cost almost nothing. `type_mask` 1479 already leaves bit 11 clear, so
+> `yaw_rate` was always being transmitted; holding heading was just a hardcoded
+> `0.0`. PX4 applies `yawspeed` outside its coordinate-frame switch
+> (`mavlink_receiver.cpp:1025`), so it works in `BODY_NED` unchanged — verified
+> in source before implementing.
+>
+> Consequence: heading is no longer fixed, so "forward" tracks the nose. PX4
+> resolves `vx` against current yaw every tick, so this needs no extra maths.
+> The sections below that describe a fixed heading are superseded by this note.
 
 ## Architecture
 

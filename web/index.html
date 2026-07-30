@@ -16,11 +16,19 @@
            font-variant-numeric:tabular-nums; }
   #telem b { color:#fff; font-weight:600; }
   .bad { color:#f66; } .good { color:#6f6; } .wait { color:#fc6; }
-  #pad { display:grid; grid-template-columns:repeat(3,72px);
-         grid-template-rows:repeat(3,72px); gap:6px; }
-  #pad button { font-size:26px; border-radius:10px; border:1px solid #444;
-                background:#222; color:#eee; }
-  #pad button.on { background:#2a6; border-color:#6f6; }
+  #controls { display:flex; gap:22px; align-items:center; }
+  #pad { display:grid; grid-template-columns:repeat(3,74px);
+         grid-template-rows:repeat(3,74px); gap:6px; }
+  #alt { display:grid; grid-template-rows:repeat(2,74px); gap:6px; width:74px; }
+  #controls button { border-radius:10px; border:1px solid #444;
+                     background:#222; color:#eee; display:flex;
+                     flex-direction:column; align-items:center;
+                     justify-content:center; gap:2px; line-height:1; }
+  #controls button .g { font-size:24px; }
+  #controls button .t { font-size:10px; letter-spacing:.5px; color:#9a9a9a; }
+  #controls button.on { background:#2a6; border-color:#6f6; }
+  #controls button.on .t { color:#dff; }
+  .cap { font-size:11px; color:#888; text-align:center; margin-top:4px; }
   #cmds { display:flex; gap:6px; flex-wrap:wrap; justify-content:center; }
   #cmds button { padding:9px 14px; border-radius:8px; border:1px solid #444;
                  background:#222; color:#eee; font-size:14px; }
@@ -47,10 +55,28 @@
     <span>alt <b id="t-alt">--</b> m</span>
     <span>hdg <b id="t-hdg">--</b>&deg;</span>
   </div>
-  <div id="pad">
-    <span></span><button data-dir="up">&#9650;</button><span></span>
-    <button data-dir="back">&#9664;</button><span></span><button data-dir="fwd">&#9654;</button>
-    <span></span><button data-dir="down">&#9660;</button><span></span>
+  <div id="controls">
+    <div>
+      <div id="pad">
+        <span></span>
+        <button data-dir="fwd"><span class="g">&#9650;</span><span class="t">FWD</span></button>
+        <span></span>
+        <button data-dir="yaw_left"><span class="g">&#8634;</span><span class="t">TURN L</span></button>
+        <span></span>
+        <button data-dir="yaw_right"><span class="g">&#8635;</span><span class="t">TURN R</span></button>
+        <span></span>
+        <button data-dir="back"><span class="g">&#9660;</span><span class="t">BACK</span></button>
+        <span></span>
+      </div>
+      <div class="cap">move &amp; turn</div>
+    </div>
+    <div>
+      <div id="alt">
+        <button data-dir="up"><span class="g">&#9650;</span><span class="t">ASCEND</span></button>
+        <button data-dir="down"><span class="g">&#9660;</span><span class="t">DESCEND</span></button>
+      </div>
+      <div class="cap">altitude</div>
+    </div>
   </div>
   <div id="cmds">
     <button id="c-arm">ARM</button>
@@ -136,7 +162,7 @@ function connect() {
 function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
 
 function paintPad() {
-  document.querySelectorAll('#pad button').forEach(
+  document.querySelectorAll('#controls button').forEach(
     b => b.classList.toggle('on', held.has(b.dataset.dir)));
 }
 
@@ -161,7 +187,7 @@ function press(dir, on) {
   paintPad();
 }
 
-document.querySelectorAll('#pad button').forEach(b => {
+document.querySelectorAll('#controls button').forEach(b => {
   const d = b.dataset.dir;
   b.addEventListener('pointerdown', e => {
     e.preventDefault(); b.setPointerCapture(e.pointerId); press(d, true); });
@@ -170,8 +196,14 @@ document.querySelectorAll('#pad button').forEach(b => {
   b.addEventListener('contextmenu', e => e.preventDefault());
 });
 
-const KEYS = {ArrowUp:'up', ArrowDown:'down', ArrowRight:'fwd', ArrowLeft:'back',
-              w:'up', s:'down', d:'fwd', a:'back'};
+// Arrows/WASD mirror the pad: up-down = move, left-right = turn.
+// Q/E take altitude, matching the separate column on screen.
+const KEYS = {ArrowUp:'fwd', ArrowDown:'back',
+              ArrowLeft:'yaw_left', ArrowRight:'yaw_right',
+              w:'fwd', s:'back', a:'yaw_left', d:'yaw_right',
+              q:'up', e:'down',
+              W:'fwd', S:'back', A:'yaw_left', D:'yaw_right',
+              Q:'up', E:'down'};
 addEventListener('keydown', e => {
   if (KEYS[e.key]) { e.preventDefault(); press(KEYS[e.key], true); } });
 addEventListener('keyup', e => {

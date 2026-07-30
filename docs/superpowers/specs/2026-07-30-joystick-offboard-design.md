@@ -159,6 +159,11 @@ Telemetry decodes `HEARTBEAT.custom_mode` as `main = (cm >> 16) & 0xFF`,
 
 - **Input watchdog** — no WS message for more than `--watchdog` seconds forces
   zero velocity. Covers browser crash, wifi drop, and backgrounded tabs.
+- **Keepalive ping** — the watchdog measures time since the last message of *any*
+  kind, and a held button produces exactly one message. So the page must send
+  `{"type":"ping"}` every 150 ms while anything is held, refreshing the stamp via
+  `CommandState.touch()`. Without it, holding a direction would cut out after
+  `--watchdog` seconds and hold-to-move would be broken rather than safe.
 - **WS disconnect** — clears all held directions immediately.
 - **Setpoint continuity** — the loop never stops once started. Zeros are a valid
   hover setpoint; stopping the stream would drop OFFBOARD.

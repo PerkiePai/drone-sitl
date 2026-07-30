@@ -48,6 +48,27 @@ cd ~/pai/drone-sitl
 git branch --show-current      # feat/joystick-offboard
 ```
 
+### Open the firewall (only if flying from another machine)
+
+`ufw` is active on this box and drops unlisted ports silently, which a browser
+reports as a **timeout**, not a refusal. Skip this if you only ever browse from
+the box itself.
+
+```bash
+sudo ufw allow from 192.168.20.0/24 to any port 8090 proto tcp   # joystick UI
+sudo ufw allow from 192.168.20.0/24 to any port 8080 proto tcp   # camera video
+sudo ufw status numbered                                          # confirm
+```
+
+**Both ports are required.** The page is served from 8090, but the video is a
+separate request your browser makes straight to 8080. Open only 8090 and you
+get a working joystick with a permanently blank video panel — which looks like
+a camera fault rather than a firewall one.
+
+Scoping the rules to the LAN (`from 192.168.20.0/24`) rather than opening them
+outright is worth doing: there is no authentication on either port (see
+section 10).
+
 ---
 
 ## 3. Start Isaac Sim
@@ -253,7 +274,21 @@ conda run -n drone python joystick-server.py --watchdog 2.0
 That is a *diagnostic*, not a fix — a longer watchdog means the drone keeps
 flying longer after you lose contact with it.
 
-### 8.7 `Address already in use`
+### 8.7 Page times out from another machine (works on the box)
+
+Firewall. `ufw` drops unlisted ports silently, so the browser reports a timeout
+rather than a refusal. See the firewall step in section 2.
+
+Note that testing with `curl` **on the box** does not prove external
+reachability — that traffic never crosses the network. Test from the machine
+you actually want to fly from.
+
+A quick way to tell how much is blocked, from the remote machine:
+
+- `http://192.168.20.141:8080/` shows video → only 8090 is blocked.
+- It also times out → both ports are blocked.
+
+### 8.8 `Address already in use`
 
 An old server is still running:
 

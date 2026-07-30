@@ -15,7 +15,7 @@
   #telem { display:flex; gap:14px; flex-wrap:wrap; justify-content:center;
            font-variant-numeric:tabular-nums; }
   #telem b { color:#fff; font-weight:600; }
-  .bad { color:#f66; } .good { color:#6f6; }
+  .bad { color:#f66; } .good { color:#6f6; } .wait { color:#fc6; }
   #pad { display:grid; grid-template-columns:repeat(3,72px);
          grid-template-rows:repeat(3,72px); gap:6px; }
   #pad button { font-size:26px; border-radius:10px; border:1px solid #444;
@@ -25,6 +25,17 @@
   #cmds button { padding:9px 14px; border-radius:8px; border:1px solid #444;
                  background:#222; color:#eee; font-size:14px; }
   #cmds button:disabled { opacity:.35; }
+  /* Instant local feedback that the click landed, independent of the network:
+     it fires even if the WebSocket is dead. */
+  button:active:not(:disabled) { transform:translateY(1px); filter:brightness(1.5); }
+  /* Only on real pointers -- :hover on a touchscreen sticks after tapping. */
+  @media (hover:hover) {
+    button:hover:not(:disabled) { border-color:#888; }
+  }
+  /* Flashes when the command actually goes out over the WebSocket, so a
+     registered click is distinguishable from a dropped one. */
+  #cmds button.sent { background:#2a6; border-color:#6f6; }
+  #status { min-height:1.3em; font-size:13px; text-align:center; }
 </style>
 </head>
 <body>
@@ -48,10 +59,59 @@
     <button id="c-land">LAND</button>
     <button id="c-disarm">DISARM</button>
   </div>
+  <div id="status"></div>
 <script>
 const held = new Set();
 let ws = null;
 const el = id => document.getElementById(id);
+
+// What each command should do to the telemetry, so the page can report whether
+// PX4 actually ACTED on a press rather than only that the click was registered.
+// PX4 silently ignores commands it won't accept (arming refused, OFFBOARD
+// rejected), so "sent" and "worked" are genuinely different states.
+const EXPECT = {
+  arm:      t => t.armed,
+  disarm:   t => !t.armed,
+  takeoff:  t => t.mode === 'AUTO.TAKEOFF',
+  offboard: t => t.mode === 'OFFBOARD',
+  land:     t => t.mode === 'AUTO.LAND',
+};
+const CONFIRM_TIMEOUT_MS = 3000;
+let pending = null;          // {name, sentAt} awaiting confirmation
+
+function setStatus(text, cls) {
+  el('status').textContent = text;
+  el('status').className = cls || '';
+}
+
+function flash(btn) {
+  btn.classList.add('sent');
+  setTimeout(() => btn.classList.remove('sent'), 250);
+}
+
+function sendCmd(name) {
+  if (!ws || ws.readyState !== 1) {
+    setStatus(`${name.toUpperCase()} NOT sent — no connection to server`, 'bad');
+    return;
+  }
+  send({type:'cmd', name:name});
+  flash(el(`c-${name}`));
+  pending = {name: name, sentAt: Date.now()};
+  setStatus(`${name.toUpperCase()} sent, waiting for PX4…`, 'wait');
+}
+
+function checkPending(t) {
+  if (!pending) return;
+  const expect = EXPECT[pending.name];
+  if (expect && expect(t)) {
+    setStatus(`${pending.name.toUpperCase()} confirmed by PX4`, 'good');
+    pending = null;
+  } else if (Date.now() - pending.sentAt > CONFIRM_TIMEOUT_MS) {
+    setStatus(`${pending.name.toUpperCase()} — no response from PX4 after `
+              + `${CONFIRM_TIMEOUT_MS / 1000} s (command refused?)`, 'bad');
+    pending = null;
+  }
+}
 
 // The video comes from the Isaac MJPEG server on a different port, so derive
 // the host from the page rather than hard-coding an IP -- this has to work
@@ -62,8 +122,15 @@ fetch('/config').then(r => r.json()).then(c => {
 
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => setStatus('connected to server', 'good');
   ws.onmessage = e => paint(JSON.parse(e.data));
-  ws.onclose = () => { held.clear(); paintPad(); setTimeout(connect, 1000); };
+  ws.onclose = () => {
+    held.clear();
+    paintPad();
+    pending = null;          // a queued confirmation can never arrive now
+    setStatus('lost connection to server — reconnecting…', 'bad');
+    setTimeout(connect, 1000);
+  };
 }
 
 function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
@@ -84,6 +151,7 @@ function paint(t) {
   el('c-offboard').disabled = !t.ready_for_offboard;
   ['c-arm','c-takeoff','c-land','c-disarm'].forEach(
     id => el(id).disabled = !t.connected);
+  checkPending(t);
 }
 
 function press(dir, on) {
@@ -113,9 +181,8 @@ addEventListener('keyup', e => {
 // has tabbed away from and can no longer see or cancel.
 addEventListener('blur', () => { [...held].forEach(d => press(d, false)); });
 
-[['c-arm','arm'], ['c-takeoff','takeoff'], ['c-offboard','offboard'],
- ['c-land','land'], ['c-disarm','disarm']].forEach(([id, name]) =>
-  el(id).addEventListener('click', () => send({type:'cmd', name:name})));
+['arm','takeoff','offboard','land','disarm'].forEach(name =>
+  el(`c-${name}`).addEventListener('click', () => sendCmd(name)));
 
 // Keepalive: the server zeroes velocity after 0.5 s of silence, and holding a
 // button sends exactly one message, so a held direction must be refreshed.

@@ -37,9 +37,16 @@ Three ports matter:
 Already done on this machine — listed so you can rebuild elsewhere.
 
 ```bash
-conda run -n drone pip install fastapi uvicorn
-conda run -n drone python -c "import fastapi, uvicorn, pymavlink; print('ok')"
+conda run -n drone pip install fastapi uvicorn websockets
+conda run -n drone python -c "import fastapi, uvicorn, websockets, pymavlink; print('ok')"
 ```
+
+`websockets` is **not optional**. Bare `uvicorn` ships without a WebSocket
+implementation, and the joystick's entire control path is a WebSocket. Without
+it the page still loads and the camera still works, but no telemetry arrives
+and no button does anything — a failure that looks like a dead drone rather
+than a missing library. The tell is repeated
+`No supported WebSocket library detected` in the server console.
 
 Confirm you're on the right branch:
 

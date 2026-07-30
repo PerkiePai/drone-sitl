@@ -69,11 +69,14 @@ Direction strings are exactly `"fwd"`, `"back"`, `"up"`, `"down"`.
 
 - [ ] Install:
   ```bash
-  conda run -n drone pip install fastapi uvicorn
+  conda run -n drone pip install fastapi uvicorn websockets
   ```
+  `websockets` is required, not optional: bare `uvicorn` has no WebSocket
+  implementation and silently refuses the `/ws` upgrade while HTTP endpoints
+  keep returning 200.
 - [ ] Verify:
   ```bash
-  conda run -n drone python -c "import fastapi, uvicorn, pymavlink, pytest; print('ok')"
+  conda run -n drone python -c "import fastapi, uvicorn, websockets, pymavlink, pytest; print('ok')"
   ```
   Expected: `ok`
 - [ ] Commit: `chore: add fastapi/uvicorn to the drone env for the joystick server`

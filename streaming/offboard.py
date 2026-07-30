@@ -116,3 +116,26 @@ class CommandState:
         if held and (now - last) > self.watchdog_s:
             return 0.0, 0.0, 0.0
         return axes_to_body_velocity(held, self.speed_fwd, self.speed_up)
+
+
+PX4_MODE_NAMES = {
+    (1, 0): "MANUAL", (2, 0): "ALTCTL", (3, 0): "POSCTL",
+    (4, 1): "AUTO.READY", (4, 2): "AUTO.TAKEOFF", (4, 3): "AUTO.LOITER",
+    (4, 4): "AUTO.MISSION", (4, 5): "AUTO.RTL", (4, 6): "AUTO.LAND",
+    (5, 0): "ACRO", (6, 0): "OFFBOARD", (7, 0): "STABILIZED",
+}
+
+
+def decode_px4_mode(custom_mode):
+    """HEARTBEAT.custom_mode -> readable PX4 mode name.
+
+    PX4 packs main mode at bits 16-23 and sub mode at bits 24-31. Unknown
+    combinations render as mode(main.sub) so an unexpected failsafe shows up
+    in the UI as something specific rather than as a blank.
+    """
+    main = (custom_mode >> 16) & 0xFF
+    sub = (custom_mode >> 24) & 0xFF
+    name = PX4_MODE_NAMES.get((main, sub))
+    if name is None:
+        name = PX4_MODE_NAMES.get((main, 0), f"mode({main}.{sub})")
+    return name

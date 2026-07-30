@@ -108,3 +108,25 @@ def test_out_of_scope_direction_is_rejected():
     s = offboard.CommandState()
     with pytest.raises(ValueError):
         s.set("left", True)
+
+
+# --- decode_px4_mode -------------------------------------------------------
+
+def test_decode_offboard_mode():
+    assert offboard.decode_px4_mode(6 << 16) == "OFFBOARD"
+
+
+def test_decode_auto_takeoff_mode():
+    assert offboard.decode_px4_mode((2 << 24) | (4 << 16)) == "AUTO.TAKEOFF"
+
+
+def test_decode_auto_land_mode():
+    assert offboard.decode_px4_mode((6 << 24) | (4 << 16)) == "AUTO.LAND"
+
+
+def test_decode_posctl_mode():
+    assert offboard.decode_px4_mode(3 << 16) == "POSCTL"
+
+
+def test_decode_unknown_mode_is_readable_not_a_crash():
+    assert "99" in offboard.decode_px4_mode(99 << 16)

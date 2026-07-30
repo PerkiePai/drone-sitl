@@ -135,3 +135,90 @@ class SetpointLoop(threading.Thread):
                 time.sleep(nap)
             else:
                 next_tick = time.monotonic()   # fell behind; resync
+
+
+async def _push_telemetry(sock, loop_thread, hz=5.0):
+    try:
+        while True:
+            await sock.send_text(json.dumps(loop_thread.telemetry()))
+            await asyncio.sleep(1.0 / hz)
+    except Exception:
+        pass          # socket closed; the /ws handler cleans up
+
+
+def build_app(loop_thread, state, video_port):
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi.responses import FileResponse, JSONResponse
+
+    app = FastAPI()
+
+    @app.get("/")
+    def index():
+        return FileResponse(os.path.join(ROOT, "web", "index.html"))
+
+    @app.get("/config")
+    def config():
+        return JSONResponse({"video_port": video_port})
+
+    @app.websocket("/ws")
+    async def ws(sock: WebSocket):
+        await sock.accept()
+        state.clear()
+        pusher = asyncio.create_task(_push_telemetry(sock, loop_thread))
+        try:
+            while True:
+                msg = json.loads(await sock.receive_text())
+                kind = msg.get("type")
+                if kind == "axis":
+                    state.set(msg["dir"], bool(msg.get("pressed")))
+                elif kind == "cmd":
+                    loop_thread.submit(msg["name"])
+                elif kind == "ping":
+                    state.touch()
+        except (WebSocketDisconnect, json.JSONDecodeError, KeyError, ValueError):
+            pass
+        finally:
+            pusher.cancel()
+            # A dropped socket must not latch the last commanded velocity.
+            state.clear()
+
+    return app
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Web joystick -> PX4 OFFBOARD velocity control")
+    ap.add_argument("--mavlink", default="udpin:0.0.0.0:14540",
+                    help="PX4 offboard link. MUST be udpin: PX4 binds 14580 "
+                         "and sends TO 14540, so udpout never receives.")
+    ap.add_argument("--port", type=int, default=8090, help="web UI port")
+    ap.add_argument("--video-port", type=int, default=8080,
+                    help="Isaac MJPEG port from drone_setup_px4_cesium.py")
+    ap.add_argument("--speed-fwd", type=float, default=2.0, help="m/s")
+    ap.add_argument("--speed-up", type=float, default=1.0, help="m/s")
+    ap.add_argument("--takeoff-alt", type=float, default=5.0, help="m")
+    ap.add_argument("--watchdog", type=float, default=0.5,
+                    help="seconds of silence before velocity is forced to zero")
+    ap.add_argument("--rate", type=float, default=20.0, help="setpoint Hz")
+    ap.add_argument("--offboard-warmup", type=float, default=1.0,
+                    help="seconds of streaming before OFFBOARD is offered")
+    args = ap.parse_args()
+
+    import uvicorn
+
+    conn = mavutil.mavlink_connection(args.mavlink)
+    state = offboard.CommandState(args.speed_fwd, args.speed_up, args.watchdog)
+    loop_thread = SetpointLoop(conn, state, args.rate, args.takeoff_alt,
+                               args.offboard_warmup)
+    loop_thread.start()
+
+    print(f">>> MAVLink offboard link: {args.mavlink}")
+    print(f">>> setpoint loop at {args.rate:.0f} Hz "
+          f"({args.speed_fwd} m/s fwd, {args.speed_up} m/s climb)")
+    print(f">>> open http://<box-ip>:{args.port}/")
+    uvicorn.run(build_app(loop_thread, state, args.video_port),
+                host="0.0.0.0", port=args.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

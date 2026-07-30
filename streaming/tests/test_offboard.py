@@ -57,3 +57,54 @@ def test_local_constants_match_pymavlink():
     assert offboard.MAV_PARAM_TYPE_REAL32 == m.MAV_PARAM_TYPE_REAL32
     assert (offboard.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
             == m.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED)
+
+
+# --- CommandState ----------------------------------------------------------
+
+def test_state_reports_held_velocity():
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
+    s.set("fwd", True, now=100.0)
+    assert s.velocity(now=100.1) == (2.0, 0.0, 0.0)
+
+
+def test_state_release_returns_to_hover():
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
+    s.set("fwd", True, now=100.0)
+    s.set("fwd", False, now=100.2)
+    assert s.velocity(now=100.3) == (0.0, 0.0, 0.0)
+
+
+def test_watchdog_zeroes_stale_input():
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
+    s.set("fwd", True, now=100.0)
+    assert s.velocity(now=100.4) == (2.0, 0.0, 0.0)   # still fresh
+    assert s.velocity(now=101.0) == (0.0, 0.0, 0.0)   # stale -> hover
+
+
+def test_touch_keeps_a_held_direction_alive():
+    """The page pings every 150 ms while a button is down; without that the
+    watchdog would cut hold-to-move off after watchdog_s."""
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
+    s.set("fwd", True, now=100.0)
+    s.touch(now=100.4)
+    assert s.velocity(now=100.7) == (2.0, 0.0, 0.0)
+
+
+def test_clear_drops_everything():
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
+    s.set("fwd", True, now=100.0)
+    s.clear()
+    assert s.velocity(now=100.1) == (0.0, 0.0, 0.0)
+
+
+def test_held_reports_current_set():
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
+    s.set("fwd", True, now=100.0)
+    s.set("up", True, now=100.0)
+    assert s.held() == {"fwd", "up"}
+
+
+def test_out_of_scope_direction_is_rejected():
+    s = offboard.CommandState()
+    with pytest.raises(ValueError):
+        s.set("left", True)

@@ -64,3 +64,55 @@ def axes_to_body_velocity(held, speed_fwd, speed_up):
     if "down" in held:
         vz += speed_up
     return vx, 0.0, vz
+
+
+class CommandState:
+    """Thread-safe held-direction set with a staleness watchdog.
+
+    The web thread writes; the setpoint thread reads. If the browser stops
+    talking -- crash, wifi drop, backgrounded tab -- velocity decays to zero
+    instead of latching the last command at full speed.
+    """
+
+    def __init__(self, speed_fwd=2.0, speed_up=1.0, watchdog_s=0.5):
+        self.speed_fwd = speed_fwd
+        self.speed_up = speed_up
+        self.watchdog_s = watchdog_s
+        self._lock = threading.Lock()
+        self._held = set()
+        self._last_input = 0.0
+
+    def set(self, direction, pressed, now=None):
+        if direction not in DIRECTIONS:
+            raise ValueError(
+                f"unknown direction {direction!r}; expected one of {DIRECTIONS}")
+        with self._lock:
+            if pressed:
+                self._held.add(direction)
+            else:
+                self._held.discard(direction)
+            self._last_input = time.monotonic() if now is None else now
+
+    def touch(self, now=None):
+        """Keepalive. The watchdog measures time since the last message of any
+        kind, and holding a button produces exactly one message, so the page
+        must refresh the stamp periodically."""
+        with self._lock:
+            self._last_input = time.monotonic() if now is None else now
+
+    def clear(self):
+        with self._lock:
+            self._held.clear()
+
+    def held(self):
+        with self._lock:
+            return set(self._held)
+
+    def velocity(self, now=None):
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            held = set(self._held)
+            last = self._last_input
+        if held and (now - last) > self.watchdog_s:
+            return 0.0, 0.0, 0.0
+        return axes_to_body_velocity(held, self.speed_fwd, self.speed_up)

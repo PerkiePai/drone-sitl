@@ -130,3 +130,78 @@ def test_decode_posctl_mode():
 
 def test_decode_unknown_mode_is_readable_not_a_crash():
     assert "99" in offboard.decode_px4_mode(99 << 16)
+
+
+# --- OffboardLink ----------------------------------------------------------
+
+def test_send_velocity_uses_body_ned_frame_and_velocity_mask():
+    conn = MagicMock()
+    offboard.OffboardLink(conn).send_velocity(2.0, 0.0, -1.0)
+    args, _ = conn.mav.set_position_target_local_ned_send.call_args
+    (_ms, _sys, _comp, frame, mask,
+     _x, _y, _z, vx, vy, vz, _ax, _ay, _az, _yaw, yaw_rate) = args
+    assert frame == offboard.MAV_FRAME_BODY_NED
+    assert mask == offboard.VEL_YAWRATE_TYPE_MASK
+    assert (vx, vy, vz) == (2.0, 0.0, -1.0)
+    assert yaw_rate == 0.0      # zero yaw_rate is what holds the heading
+
+
+def test_offboard_sets_custom_main_mode_6():
+    conn = MagicMock()
+    offboard.OffboardLink(conn).offboard()
+    args, _ = conn.mav.command_long_send.call_args
+    _sys, _comp, command, _conf, p1, p2, p3, _p4, _p5, _p6, _p7 = args
+    assert command == offboard.MAV_CMD_DO_SET_MODE
+    assert p1 == float(offboard.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED)
+    assert p2 == float(offboard.PX4_MAIN_MODE_OFFBOARD)
+    assert p3 == 0.0
+
+
+def test_takeoff_uses_auto_takeoff_submode():
+    conn = MagicMock()
+    offboard.OffboardLink(conn).takeoff()
+    args, _ = conn.mav.command_long_send.call_args
+    assert args[5] == float(offboard.PX4_MAIN_MODE_AUTO)
+    assert args[6] == float(offboard.PX4_SUB_MODE_AUTO_TAKEOFF)
+
+
+def test_land_uses_auto_land_submode():
+    conn = MagicMock()
+    offboard.OffboardLink(conn).land()
+    args, _ = conn.mav.command_long_send.call_args
+    assert args[5] == float(offboard.PX4_MAIN_MODE_AUTO)
+    assert args[6] == float(offboard.PX4_SUB_MODE_AUTO_LAND)
+
+
+def test_arm_then_disarm():
+    conn = MagicMock()
+    link = offboard.OffboardLink(conn)
+    link.arm()
+    args, _ = conn.mav.command_long_send.call_args
+    assert args[2] == offboard.MAV_CMD_COMPONENT_ARM_DISARM
+    assert args[4] == 1.0
+    link.disarm()
+    args, _ = conn.mav.command_long_send.call_args
+    assert args[4] == 0.0
+
+
+def test_rc_loss_exception_param_is_sent_as_int32():
+    conn = MagicMock()
+    offboard.OffboardLink(conn).set_param(
+        "COM_RCL_EXCEPT", offboard.COM_RCL_EXCEPT_OFFBOARD,
+        offboard.MAV_PARAM_TYPE_INT32)
+    args, _ = conn.mav.param_set_send.call_args
+    _sys, _comp, param_id, value, param_type = args
+    assert param_id == b"COM_RCL_EXCEPT"
+    assert value == 4.0
+    assert param_type == offboard.MAV_PARAM_TYPE_INT32
+
+
+def test_bind_target_adopts_ids_from_heartbeat():
+    conn = MagicMock()
+    link = offboard.OffboardLink(conn)
+    msg = MagicMock()
+    msg.get_srcSystem.return_value = 3
+    msg.get_srcComponent.return_value = 7
+    link.bind_target(msg)
+    assert (link.target_system, link.target_component) == (3, 7)

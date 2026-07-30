@@ -139,3 +139,67 @@ def decode_px4_mode(custom_mode):
     if name is None:
         name = PX4_MODE_NAMES.get((main, 0), f"mode({main}.{sub})")
     return name
+
+
+class OffboardLink:
+    """Every MAVLink write for the joystick PoC.
+
+    Single-threaded by contract: pymavlink connections are not thread-safe,
+    so only the setpoint thread may call these methods.
+    """
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.target_system = 1
+        self.target_component = 1
+
+    def bind_target(self, msg):
+        """Adopt sysid/compid from a received HEARTBEAT."""
+        self.target_system = msg.get_srcSystem()
+        self.target_component = msg.get_srcComponent()
+
+    def send_velocity(self, vx, vy, vz):
+        self.conn.mav.set_position_target_local_ned_send(
+            0,                                  # time_boot_ms (PX4 ignores)
+            self.target_system, self.target_component,
+            MAV_FRAME_BODY_NED,
+            VEL_YAWRATE_TYPE_MASK,
+            0.0, 0.0, 0.0,                      # x, y, z    -- masked off
+            vx, vy, vz,
+            0.0, 0.0, 0.0,                      # afx, afy, afz -- masked off
+            0.0,                                # yaw        -- masked off
+            0.0)                                # yaw_rate=0 -> hold heading
+
+    def _command_long(self, command, *params):
+        padded = list(params) + [0.0] * (7 - len(params))
+        self.conn.mav.command_long_send(
+            self.target_system, self.target_component, command, 0, *padded)
+
+    def set_mode(self, main_mode, sub_mode=0):
+        self._command_long(
+            MAV_CMD_DO_SET_MODE,
+            float(MAV_MODE_FLAG_CUSTOM_MODE_ENABLED),
+            float(main_mode),
+            float(sub_mode))
+
+    def arm(self):
+        self._command_long(MAV_CMD_COMPONENT_ARM_DISARM, 1.0)
+
+    def disarm(self):
+        self._command_long(MAV_CMD_COMPONENT_ARM_DISARM, 0.0)
+
+    def takeoff(self):
+        """AUTO.TAKEOFF climbs to MIS_TAKEOFF_ALT, set at startup."""
+        self.set_mode(PX4_MAIN_MODE_AUTO, PX4_SUB_MODE_AUTO_TAKEOFF)
+
+    def land(self):
+        self.set_mode(PX4_MAIN_MODE_AUTO, PX4_SUB_MODE_AUTO_LAND)
+
+    def offboard(self):
+        self.set_mode(PX4_MAIN_MODE_OFFBOARD)
+
+    def set_param(self, name, value, param_type):
+        self.conn.mav.param_set_send(
+            self.target_system, self.target_component,
+            name.encode() if isinstance(name, str) else name,
+            float(value), param_type)

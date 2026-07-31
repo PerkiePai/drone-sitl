@@ -28,6 +28,7 @@ from pymavlink import mavutil
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, "streaming"))
 import offboard  # noqa: E402
+import waypoints  # noqa: E402
 
 
 class SetpointLoop(threading.Thread):
@@ -39,12 +40,19 @@ class SetpointLoop(threading.Thread):
     else ever touches `conn`.
     """
 
+    # Mission verbs go through the same queue as arm/takeoff so that nothing
+    # but the setpoint thread ever mutates flight state mid-tick.
+    MISSION_COMMANDS = {"mission_fly": "fly",
+                        "mission_pause": "pause",
+                        "mission_clear": "clear"}
+
     def __init__(self, conn, state, rate_hz=20.0, takeoff_alt=5.0, warmup_s=1.0,
                  mission_speed=3.0, arrival_radius=2.0):
         super().__init__(daemon=True)
         self.conn = conn
         self.state = state
         self.link = offboard.OffboardLink(conn)
+        self.mission = waypoints.Mission(arrival_radius)
         self.dt = 1.0 / rate_hz
         self.takeoff_alt = takeoff_alt
         self.mission_speed = mission_speed
@@ -66,6 +74,8 @@ class SetpointLoop(threading.Thread):
             # setpoints and returns SILENTLY without one
             # (mavlink_receiver.cpp:1107-1110). FLY is gated on this.
             "home_valid": False,
+            "mission": {"state": "IDLE", "index": 0, "count": 0,
+                        "dist_m": None},
             # Commanded vs measured, so "it tilts but does not move" is
             # observable rather than a guess: cmd high + actual ~0 means PX4
             # is receiving the setpoint but not achieving it.
@@ -108,13 +118,36 @@ class SetpointLoop(threading.Thread):
             if msg.hdg != 65535:
                 self._telem["heading_deg"] = msg.hdg / 100.0
 
+    def load_mission(self, points, alt_m):
+        """Called from the web thread. Mission carries its own lock and
+        touches no MAVLink, so this needs neither the queue nor _telem_lock."""
+        self.mission.load(points, alt_m)
+
+    def _note_mode(self, mode):
+        """Record PX4's actual mode, auto-pausing a mission that has lost its
+        only means of flying.
+
+        PX4 accepts setpoints outside OFFBOARD and then discards them
+        (mavlink_receiver.cpp:1163), so a mission left RUNNING after a mode
+        change would report progress it is not making.
+        """
+        with self._telem_lock:
+            self._telem["mode"] = mode
+        if mode != "OFFBOARD":
+            self.mission.pause()
+
     def submit(self, name):
         """Called from the web thread. Queue only -- never touches `conn`."""
-        if name in ("arm", "disarm", "takeoff", "land", "offboard"):
+        if (name in ("arm", "disarm", "takeoff", "land", "offboard")
+                or name in self.MISSION_COMMANDS):
             self.commands.put(name)
 
     def _run_command(self, name):
-        getattr(self.link, name)()
+        method = self.MISSION_COMMANDS.get(name)
+        if method is not None:
+            getattr(self.mission, method)()
+        else:
+            getattr(self.link, name)()
         print(f">>> command: {name}")
 
     def _send_startup_params(self):
@@ -145,7 +178,7 @@ class SetpointLoop(threading.Thread):
                 with self._telem_lock:
                     self._telem["connected"] = True
                     self._telem["armed"] = armed
-                    self._telem["mode"] = mode
+                self._note_mode(mode)
                 if not self._params_sent:
                     self._send_startup_params()
             elif kind == "LOCAL_POSITION_NED":
@@ -180,16 +213,31 @@ class SetpointLoop(threading.Thread):
                     self._run_command(self.commands.get_nowait())
                 except queue.Empty:
                     break
-            vx, vy, vz, yaw_rate = self.state.command()
-            self.link.send_velocity(vx, vy, vz, yaw_rate)
+            # The whole autonomous/manual split. A target from advance() means
+            # fly the route; None means the operator has it. Either way exactly
+            # one setpoint goes out this tick -- a gap drops PX4 out of
+            # OFFBOARD.
+            lat, lon = self._position()
+            target = self.mission.advance(lat, lon)
+            if target is not None:
+                wp_lat, wp_lon, wp_alt, wp_yaw = target
+                self.link.send_position_global(wp_lat, wp_lon, wp_alt, wp_yaw)
+                vx, yaw_rate = 0.0, 0.0
+            else:
+                vx, vy, vz, yaw_rate = self.state.command()
+                self.link.send_velocity(vx, vy, vz, yaw_rate)
 
             if self._stream_start is None:
                 self._stream_start = time.monotonic()
             streaming_s = time.monotonic() - self._stream_start
+            # Taken before _telem_lock, never inside it: Mission has its own
+            # lock and nesting the two would introduce a cycle.
+            mission_status = self.mission.status()
             with self._telem_lock:
                 self._telem["cmd_vx"] = vx
                 self._telem["cmd_yaw_rate"] = yaw_rate
                 self._telem["streaming_s"] = streaming_s
+                self._telem["mission"] = mission_status
                 self._telem["ready_for_offboard"] = (
                     streaming_s >= self.warmup_s and self._telem["connected"])
 

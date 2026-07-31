@@ -143,3 +143,75 @@ def test_startup_params_clamp_the_mission_speed():
     assert sent["MPC_XY_VEL_MAX"] == 3.0
     assert sent["COM_RCL_EXCEPT"] == offboard.COM_RCL_EXCEPT_OFFBOARD
     assert "MIS_TAKEOFF_ALT" in sent
+
+
+def _fake_gpi(lat_int, lon_int, hdg=0):
+    return type("M", (), {"lat": lat_int, "lon": lon_int, "hdg": hdg,
+                          "get_type": lambda s: "GLOBAL_POSITION_INT"})()
+
+
+def test_a_running_mission_sends_global_position_setpoints():
+    """The dispatch: a target from advance() means a position setpoint, not
+    the velocity one the manual path sends."""
+    js = _load_server()
+    port = FAKE_PX4_PORT + 9
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{port}")
+        state = offboard.CommandState(2.0, 1.0, watchdog_s=10.0)
+        loop = js.SetpointLoop(conn, state, rate_hz=20.0)
+        loop._handle_global_position(_fake_gpi(400000000, -740000000))
+        loop.load_mission([[40.0010, -74.0]], 12.0)
+        loop.mission.fly()
+        loop.start()
+
+        seen = _collect(px4, 1.0, kind="SET_POSITION_TARGET_GLOBAL_INT")
+        assert len(seen) >= 10, f"expected >=10 position setpoints, got {len(seen)}"
+        last = seen[-1]
+        assert last.coordinate_frame == offboard.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+        assert last.type_mask == offboard.POS_YAW_TYPE_MASK
+        assert last.lat_int == 400010000
+        assert abs(last.alt - 12.0) < 1e-4
+    finally:
+        px4.close()
+
+
+def test_pausing_a_mission_hands_control_back_to_the_joystick():
+    """Takeover: after a pause the very next setpoints are velocity ones
+    carrying the held direction, and the stream never stops."""
+    js = _load_server()
+    port = FAKE_PX4_PORT + 10
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{port}")
+        state = offboard.CommandState(2.0, 1.0, watchdog_s=10.0)
+        loop = js.SetpointLoop(conn, state, rate_hz=20.0)
+        loop._handle_global_position(_fake_gpi(400000000, -740000000))
+        loop.load_mission([[40.0010, -74.0]], 12.0)
+        loop.mission.fly()
+        loop.start()
+        _collect(px4, 0.5, kind="SET_POSITION_TARGET_GLOBAL_INT")
+
+        state.set("fwd", True)
+        loop.submit("mission_pause")
+
+        seen = _collect(px4, 1.0, kind="SET_POSITION_TARGET_LOCAL_NED")
+        assert len(seen) >= 10, f"joystick did not take over: {len(seen)} sent"
+        assert abs(seen[-1].vx - 2.0) < 1e-6
+        assert loop.mission.status()["state"] == "PAUSED"
+    finally:
+        px4.close()
+
+
+def test_leaving_offboard_auto_pauses_a_running_mission():
+    """PX4 accepts and discards setpoints outside OFFBOARD
+    (mavlink_receiver.cpp:1163). A mission left RUNNING there would look fine
+    and do nothing."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 11}")
+    loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0), rate_hz=20.0)
+    loop.load_mission([[40.0010, -74.0]], 12.0)
+    loop.mission.fly()
+
+    loop._note_mode("AUTO.LAND")
+    assert loop.mission.status()["state"] == "PAUSED"

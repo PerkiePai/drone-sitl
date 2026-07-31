@@ -49,3 +49,90 @@ def test_bearing_is_always_a_positive_compass_angle():
     for lat, lon in [(1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0)]:
         b = waypoints.bearing_deg(0.0, 0.0, lat, lon)
         assert 0.0 <= b < 360.0
+
+
+ROUTE = [(40.0000, -74.0000), (40.0010, -74.0000), (40.0010, -74.0010)]
+
+
+def test_a_fresh_mission_is_idle_and_empty():
+    m = waypoints.Mission()
+    s = m.status()
+    assert s["state"] == waypoints.Mission.IDLE
+    assert s["count"] == 0
+    assert s["dist_m"] is None
+
+
+def test_load_stores_the_route_but_does_not_start_it():
+    """Planning must never move the aircraft -- FLY is a separate press."""
+    m = waypoints.Mission()
+    m.load(ROUTE, 12.0)
+    s = m.status()
+    assert s["state"] == waypoints.Mission.IDLE
+    assert s["count"] == 3
+    assert s["index"] == 0
+
+
+def test_fly_starts_a_loaded_route():
+    m = waypoints.Mission()
+    m.load(ROUTE, 12.0)
+    m.fly()
+    assert m.status()["state"] == waypoints.Mission.RUNNING
+
+
+def test_fly_with_no_waypoints_is_a_no_op():
+    m = waypoints.Mission()
+    m.fly()
+    assert m.status()["state"] == waypoints.Mission.IDLE
+
+
+def test_pause_only_applies_to_a_running_mission():
+    m = waypoints.Mission()
+    m.load(ROUTE, 12.0)
+    m.pause()
+    assert m.status()["state"] == waypoints.Mission.IDLE   # not PAUSED
+    m.fly()
+    m.pause()
+    assert m.status()["state"] == waypoints.Mission.PAUSED
+
+
+def test_pause_is_idempotent():
+    """Every axis press submits a pause; holding a direction sends one, but
+    tapping four buttons sends four. They must not stack into anything."""
+    m = waypoints.Mission()
+    m.load(ROUTE, 12.0)
+    m.fly()
+    m.pause(); m.pause(); m.pause()
+    assert m.status()["state"] == waypoints.Mission.PAUSED
+
+
+def test_fly_after_pause_resumes_without_losing_progress():
+    m = waypoints.Mission()
+    m.load(ROUTE, 12.0)
+    m.fly()
+    m.advance(40.0010, -74.0000)      # arrive at wp 1 -> index steps to 1
+    m.pause()
+    m.fly()
+    assert m.status()["state"] == waypoints.Mission.RUNNING
+    assert m.status()["index"] == 1   # resumed, not restarted
+
+
+def test_clear_drops_the_route_and_returns_to_idle():
+    m = waypoints.Mission()
+    m.load(ROUTE, 12.0)
+    m.fly()
+    m.clear()
+    s = m.status()
+    assert s["state"] == waypoints.Mission.IDLE
+    assert s["count"] == 0
+
+
+def test_load_replaces_a_previous_route_and_resets_progress():
+    m = waypoints.Mission()
+    m.load(ROUTE, 12.0)
+    m.fly()
+    m.advance(40.0010, -74.0000)
+    m.load([(41.0, -75.0)], 20.0)
+    s = m.status()
+    assert s["count"] == 1
+    assert s["index"] == 0
+    assert s["state"] == waypoints.Mission.IDLE

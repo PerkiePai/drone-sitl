@@ -16,7 +16,7 @@ pad mid-route takes over in about two-thirds of a second with no mode switch.
 > **Status:** flown and confirmed working on 2026-07-31 — ARM, TAKEOFF,
 > OFFBOARD, all six flight commands, and full waypoint missions (fly, take
 > over, resume, complete, re-fly, clear) verified against PX4 in Isaac Sim.
-> 88 automated tests pass. Section 9 covers what to do when something breaks.
+> 94 automated tests pass. Section 9 covers what to do when something breaks.
 
 ---
 
@@ -46,7 +46,7 @@ tiles). Leaflet itself is vendored into `web/vendor/` and served from port
 page still loads and flies, you just get a black map.
 
 The map lines up with the Cesium terrain because
-`drone_setup_px4_cesium.py:669` sets the PX4 GPS origin from the Cesium
+`drone_setup_px4_cesium.py:703` sets the PX4 GPS origin from the Cesium
 georeference, so PX4's idea of where it is and the satellite imagery agree
 without any extra alignment.
 
@@ -100,14 +100,82 @@ section 11).
 
 ## 3. Start Isaac Sim
 
+```bash
+./sim/launch-sitl.sh
+```
+
+That builds the stage, waits for the Cesium tiles, runs
+`drone_setup_px4_cesium.py` and presses Play — the whole click-path in one
+command. It wraps `~/isaac-sim6/isaac-sim.streaming.sh` rather than editing it,
+so a plain `isaac-sim.streaming.sh` run still behaves as it always did.
+
+### 3.1 One-time setup
+
+Export your Cesium ion token — the stage build needs it to stream tiles:
+
+```bash
+export CESIUM_ION_TOKEN='<your token>'    # add to ~/.bashrc
+```
+
+Get one at <https://ion.cesium.com/tokens>. The launcher refuses to start
+without it, rather than bringing up a stage that silently streams nothing.
+
+**There is no stage file to build.** `sim/sites.py` holds the georeference
+origin, the ion tileset, the map model's globe anchor, the ground height and the
+takeoff pose; the stage is authored fresh, **Z-up**, on every launch.
+
+That last detail is not incidental. Isaac's
+`SimulationContext._initialize_stage_async` calls `set_stage_up_axis("z")`
+unconditionally, so a *saved* Y-up stage gets its up-axis rewritten the moment
+the setup script runs — which reinterprets every transform in it and rotates all
+Cesium content 90°. Authoring the stage Z-up from the start makes that call a
+no-op. `sim/stage_builder.py` asserts the up-axis after the setup script has
+run, so any recurrence fails loudly instead of silently.
+
+### 3.2 Per-flight overrides
+
+No file editing needed for the things that change between flights:
+
+```bash
+SITE=bangkok-survey-040 ./sim/launch-sitl.sh           # which site (this is the default)
+SPAWN_XYZ='[12.0, -4.0, -26.5]' ./sim/launch-sitl.sh   # takeoff point (x=E, y=N, z=Up)
+HEADING_DEG=90 ./sim/launch-sitl.sh                    # compass heading
+AUTOPLAY=0 ./sim/launch-sitl.sh                        # spawn, but leave it stopped
+```
+
+`SPAWN_XYZ`'s z is **absolute**, so an override has to account for the ground
+plane — `ground_z = -26.99` at this site, so `z = 0.5` would drop the drone 27 m
+on Play. Prefer editing `spawn_agl_m` in `sim/sites.py`, which is measured from
+the ground and cannot drift away from it.
+
+Any tunable in `drone_setup_px4_cesium.py`'s block at the top works the same
+way, prefixed with `DRONE_SETUP_` — e.g. `DRONE_SETUP_ADD_WIND=True`.
+
+### 3.2.1 Adding a site
+
+Add a `Site` to `SITES` in `sim/sites.py` and launch with `SITE=<name>`. The map
+model is placed by lat/lon through a Cesium globe anchor, not by dragging, so
+there is nothing to align by hand. `python -m pytest sim/tests/test_sites.py`
+checks that every model path still resolves.
+
+### 3.3 By hand, when debugging
+
+The setup script is unchanged and still pastes straight into the Script Editor,
+which is the faster loop when you are changing the script itself:
+
 1. Open Isaac Sim and load your Cesium stage.
 2. **Leave the simulation STOPPED.**
 3. `Window > Script Editor`, paste the whole of `drone_setup_px4_cesium.py`,
    and press `Ctrl+Enter`.
 4. **Press Play.**
 
-The console should report the drone spawning and a line about the MJPEG server
-on port 8080.
+On a hand-built **Y-up** stage, set `FIX_GROUND_FLIP = True`
+(`drone_setup_px4_cesium.py:37`) — that is the case it was written for. Leave it
+`False` for the launcher path, where the plane is already authored flat and
+re-flipping it would break it.
+
+Either way, the console should report the drone spawning and a line about the
+MJPEG server on port 8080.
 
 Check the video is alive before going further:
 
@@ -381,7 +449,7 @@ PX4 isn't answering. In order of likelihood:
 
 1. **Play isn't pressed** in Isaac Sim. Pegasus only launches PX4 on Play.
 2. **PX4 didn't start.** Look in the Isaac console for PX4 output. Check
-   `PX4_AUTOLAUNCH = True` at `drone_setup_px4_cesium.py:56`.
+   `PX4_AUTOLAUNCH = True` at `drone_setup_px4_cesium.py:62`.
 3. **Something else already owns 14540:**
    ```bash
    ss -ulnp | grep 14540
@@ -442,7 +510,7 @@ Watch the `sim` figure while you change things — that is what it is there for.
   button produced which motion and report it — the mapping is unit-tested, so
   this would point at PX4-side frame handling.
 - **Drifts sideways while holding forward:** wind. It's off by default now
-  (`ADD_WIND = False`, `drone_setup_px4_cesium.py:41`); if you turned it back
+  (`ADD_WIND = False`, `drone_setup_px4_cesium.py:47`); if you turned it back
   on, that's your answer.
 
 ### 9.4c FLY is greyed out
@@ -484,7 +552,7 @@ missing and needs re-fetching (see the plan's Task 0).
 
 ### 9.5 Video is black or missing
 
-1. Check `STREAM_CAMERAS = True` at `drone_setup_px4_cesium.py:65`.
+1. Check `STREAM_CAMERAS = True` at `drone_setup_px4_cesium.py:71`.
 2. Test directly: `curl -I http://127.0.0.1:8080/detect`
 3. Missing Pillow in Isaac's Python prints a warning in the Isaac console:
    ```bash
@@ -564,7 +632,7 @@ drone can overshoot a waypoint between ticks. Raise `--arrival-radius` with it.
 
 Wind is currently disabled so the basic proof reads clearly. Once forward
 reliably means forward, set `ADD_WIND = True` at
-`drone_setup_px4_cesium.py:41`. Holding heading and speed through 5 m/s gusts
+`drone_setup_px4_cesium.py:47`. Holding heading and speed through 5 m/s gusts
 is a considerably stronger demo than flying in dead air.
 
 ### Recording video
@@ -594,7 +662,8 @@ can fly the drone. Fine on a trusted LAN, not fine on an open network.
 ## Quick reference
 
 ```bash
-# Isaac Sim: load stage, run drone_setup_px4_cesium.py, press Play
+export CESIUM_ION_TOKEN='<token>'                                       # once, in ~/.bashrc
+./sim/launch-sitl.sh                                                    # stage + drone + Play
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/detect   # 200
 conda run -n drone python joystick-server.py                            # wait for line 4
 hostname -I | awk '{print $1}'                                          # your IP

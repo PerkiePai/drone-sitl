@@ -189,6 +189,22 @@ having any effect — by design, so a dead stick is never silent.
 Press the buttons in this order. Each one needs the previous to have taken
 effect — watch the telemetry between steps.
 
+The status line under the buttons reports three different things, and the
+difference matters:
+
+| Message | Means |
+|---|---|
+| `ARM NOT sent — no connection to server` | The click never left the browser. |
+| `ARM sent, waiting for PX4…` | It went out; PX4 hasn't acted yet. |
+| `ARM confirmed by PX4` | Telemetry shows PX4 actually did it. |
+| `ARM — no response from PX4 after 8.6 s (command refused?)` | It went out and nothing changed. PX4 ignores commands it won't accept, so this is the only sign of a refusal. |
+
+That deadline is **3 seconds of sim time**, not wall clock, so the number in the
+message changes with the `sim` figure — 3 s at full speed, ~8.6 s at 35%. PX4
+only advances when Isaac does, so a fixed wall-clock deadline would expire while
+PX4 still had most of a second to go and report a perfectly good command as
+refused.
+
 ### Step 1 — ARM
 Press **ARM**. `armed` turns to `yes`. Propellers spin up; the drone stays put.
 

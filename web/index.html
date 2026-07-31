@@ -4,14 +4,46 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <title>Drone joystick</title>
+<link rel="stylesheet" href="/vendor/leaflet.css">
 <style>
   :root { color-scheme: dark; }
   body { margin:0; background:#111; color:#ddd; font:14px system-ui,sans-serif;
          display:flex; flex-direction:column; align-items:center; gap:10px;
          padding:10px; touch-action:none; user-select:none;
          -webkit-user-select:none; }
+  #panels { display:flex; gap:10px; flex-wrap:wrap; justify-content:center;
+            width:100%; }
   #video { width:min(92vw,640px); aspect-ratio:16/10; background:#000;
            border:1px solid #333; object-fit:cover; }
+  #mapwrap { width:min(92vw,640px); display:flex; flex-direction:column;
+             gap:6px; }
+  #map { width:100%; aspect-ratio:16/10; background:#000;
+         border:1px solid #333; }
+  /* Leaflet ships light-themed controls that glare on a dark flight page. */
+  .leaflet-container { background:#000; font:12px system-ui,sans-serif; }
+  .leaflet-control-attribution { background:rgba(0,0,0,.6); color:#888; }
+  .leaflet-control-attribution a { color:#aaa; }
+  /* The drone: a triangle rotated to the live heading. A divIcon, not an
+     image marker -- vendored Leaflet has no image sprites to 404 on. */
+  .drone-icon { display:flex; align-items:center; justify-content:center; }
+  .drone-arrow { width:0; height:0; border-left:9px solid transparent;
+                 border-right:9px solid transparent; border-bottom:22px solid #6f6;
+                 filter:drop-shadow(0 0 3px #000); transform-origin:50% 65%; }
+  .wp-icon { display:flex; align-items:center; justify-content:center;
+             width:22px; height:22px; border-radius:50%; background:#fc6;
+             color:#111; font:bold 12px system-ui,sans-serif;
+             border:2px solid #111; cursor:pointer; }
+  .wp-icon.active { background:#6f6; }
+  #mapbar { display:flex; gap:6px; align-items:center; flex-wrap:wrap;
+            justify-content:center; }
+  #mapbar button { padding:9px 14px; border-radius:8px; border:1px solid #444;
+                   background:#222; color:#eee; font-size:14px; }
+  #mapbar button:disabled { opacity:.35; }
+  #mapbar input { width:62px; padding:7px; border-radius:6px;
+                  border:1px solid #444; background:#222; color:#eee;
+                  font-size:14px; }
+  #mstat { min-height:1.3em; font-size:13px; text-align:center; color:#9a9a9a;
+           font-variant-numeric:tabular-nums; }
   #telem { display:flex; gap:14px; flex-wrap:wrap; justify-content:center;
            font-variant-numeric:tabular-nums; }
   #telem b { color:#fff; font-weight:600; }
@@ -47,7 +79,19 @@
 </style>
 </head>
 <body>
-  <img id="video" alt="sim camera feed">
+  <div id="panels">
+    <img id="video" alt="sim camera feed">
+    <div id="mapwrap">
+      <div id="map"></div>
+      <div id="mapbar">
+        <label>alt <input id="m-alt" type="number" step="1" value="5"></label>
+        <button id="m-fly" disabled>FLY</button>
+        <button id="m-pause" disabled>PAUSE</button>
+        <button id="m-clear" disabled>CLEAR</button>
+      </div>
+      <div id="mstat">click the map to add waypoints</div>
+    </div>
+  </div>
   <div id="telem">
     <span>link <b id="t-link" class="bad">--</b></span>
     <span>mode <b id="t-mode">--</b></span>
@@ -88,10 +132,39 @@
     <button id="c-disarm">DISARM</button>
   </div>
   <div id="status"></div>
+<script src="/vendor/leaflet.js"></script>
 <script>
 const held = new Set();
 let ws = null;
 const el = id => document.getElementById(id);
+
+// ---- map ------------------------------------------------------------------
+// Esri World Imagery: no API key, and the same place on Earth as the Cesium
+// tiles the drone is flying over, because drone_setup_px4_cesium.py sets the
+// PX4 GPS origin from the Cesium georeference.
+const map = L.map('map', {zoomControl: true}).setView([0, 0], 2);
+L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  {maxZoom: 19, attribution: 'Imagery &copy; Esri'}).addTo(map);
+
+const droneIcon = L.divIcon({
+  className: 'drone-icon', iconSize: [24, 24], iconAnchor: [12, 12],
+  html: '<div class="drone-arrow"></div>'});
+const droneMarker = L.marker([0, 0], {icon: droneIcon, interactive: false});
+let droneOnMap = false;
+let centredOnce = false;      // first fix centres; after that the operator pans
+
+function paintDrone(t) {
+  if (t.lat === null || t.lon === null) return;
+  const p = [t.lat, t.lon];
+  if (!droneOnMap) { droneMarker.addTo(map); droneOnMap = true; }
+  droneMarker.setLatLng(p);
+  if (!centredOnce) { map.setView(p, 18); centredOnce = true; }
+  const arrow = droneMarker.getElement()
+    && droneMarker.getElement().querySelector('.drone-arrow');
+  // The triangle is drawn pointing north, so heading is a plain rotation.
+  if (arrow) arrow.style.transform = `rotate(${t.heading_deg}deg)`;
+}
 
 // What each command should do to the telemetry, so the page can report whether
 // PX4 actually ACTED on a press rather than only that the click was registered.
@@ -194,6 +267,7 @@ function paint(t) {
   el('c-offboard').disabled = !t.ready_for_offboard;
   ['c-arm','c-takeoff','c-land','c-disarm'].forEach(
     id => el(id).disabled = !t.connected);
+  paintDrone(t);
   checkPending(t);
 }
 

@@ -258,7 +258,7 @@ async def _push_telemetry(sock, loop_thread, hz=5.0):
         pass          # socket closed; the /ws handler cleans up
 
 
-def build_app(loop_thread, state, video_port):
+def build_app(loop_thread, state, video_port, mission_speed):
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     from fastapi.responses import FileResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
@@ -274,7 +274,8 @@ def build_app(loop_thread, state, video_port):
 
     @app.get("/config")
     def config():
-        return JSONResponse({"video_port": video_port})
+        return JSONResponse({"video_port": video_port,
+                             "mission_speed": mission_speed})
 
     @app.websocket("/ws")
     async def ws(sock: WebSocket):
@@ -287,8 +288,30 @@ def build_app(loop_thread, state, video_port):
                 kind = msg.get("type")
                 if kind == "axis":
                     state.set(msg["dir"], bool(msg.get("pressed")))
+                    # An EDGE, not a level. Polling held() at 20 Hz would miss
+                    # a press-release inside one tick -- the drone would twitch
+                    # and the mission would keep flying. Only presses pause: if
+                    # releases did too, the mission would re-pause forever and
+                    # RESUME could never take.
+                    if msg.get("pressed"):
+                        loop_thread.submit("mission_pause")
                 elif kind == "cmd":
                     loop_thread.submit(msg["name"])
+                elif kind == "mission":
+                    action = msg.get("action")
+                    if action == "fly":
+                        # Overloaded on purpose: points present means FLY (new
+                        # route from waypoint 1), points absent means RESUME
+                        # (continue the loaded one). Start and continue are the
+                        # same transition, so they are the same action.
+                        if "points" in msg:
+                            loop_thread.load_mission(msg["points"],
+                                                     msg.get("alt", 0.0))
+                        loop_thread.submit("mission_fly")
+                    elif action == "pause":
+                        loop_thread.submit("mission_pause")
+                    elif action == "clear":
+                        loop_thread.submit("mission_clear")
                 elif kind == "ping":
                     state.touch()
         except (WebSocketDisconnect, json.JSONDecodeError, KeyError, ValueError):
@@ -342,7 +365,8 @@ def main():
           f"({args.speed_fwd} m/s fwd, {args.speed_up} m/s climb, "
           f"{args.yaw_rate:.0f} deg/s turn)")
     print(f">>> open http://<box-ip>:{args.port}/")
-    uvicorn.run(build_app(loop_thread, state, args.video_port),
+    uvicorn.run(build_app(loop_thread, state, args.video_port,
+                          args.mission_speed),
                 host="0.0.0.0", port=args.port, log_level="warning")
 
 

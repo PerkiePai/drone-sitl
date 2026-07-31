@@ -3,6 +3,7 @@
 **Spec:** `docs/superpowers/specs/2026-07-31-map-waypoints-design.md`
 **Branch:** `feat/map-waypoints` (off `feat/joystick-offboard`)
 **Date:** 2026-07-31
+**Status:** complete -- Tasks 0-10 built and tested, Task 11 flown 2026-07-31
 **Baseline:** 42 tests passing in ~3 s (`conda run -n drone python -m pytest streaming/tests -q`)
 
 ## Goal

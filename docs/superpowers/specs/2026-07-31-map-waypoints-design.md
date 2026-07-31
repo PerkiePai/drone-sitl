@@ -1,6 +1,8 @@
 # Design: satellite map + autonomous waypoint missions
 
-**Status:** designed, not yet built
+**Status:** implemented and flown 2026-07-31 -- full mission cycle
+(fly, take over, resume, complete, re-fly, clear) verified against PX4 in
+Isaac Sim; 88 automated tests pass
 **Date:** 2026-07-31
 **Builds on:** `2026-07-30-joystick-offboard-design.md` (implemented and flown)
 

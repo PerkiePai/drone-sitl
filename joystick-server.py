@@ -177,8 +177,12 @@ async def _push_telemetry(sock, loop_thread, hz=5.0):
 def build_app(loop_thread, state, video_port):
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     from fastapi.responses import FileResponse, JSONResponse
+    from fastapi.staticfiles import StaticFiles
 
     app = FastAPI()
+    app.mount("/vendor",
+              StaticFiles(directory=os.path.join(ROOT, "web", "vendor")),
+              name="vendor")
 
     @app.get("/")
     def index():

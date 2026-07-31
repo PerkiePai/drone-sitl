@@ -1,4 +1,5 @@
 """Unit tests for streaming/offboard.py. No PX4 and no Isaac Sim required."""
+import math
 import os
 import sys
 
@@ -262,3 +263,51 @@ def test_send_velocity_defaults_to_holding_heading():
     offboard.OffboardLink(conn).send_velocity(1.0, 0.0, 0.0)
     args, _ = conn.mav.set_position_target_local_ned_send.call_args
     assert args[15] == 0.0
+
+
+def test_position_constants_match_pymavlink():
+    from pymavlink.dialects.v20 import common as m
+    assert (offboard.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+            == m.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT)
+    # position and yaw USED; velocity, acceleration and yaw_rate ignored
+    expected = (m.POSITION_TARGET_TYPEMASK_VX_IGNORE
+                | m.POSITION_TARGET_TYPEMASK_VY_IGNORE
+                | m.POSITION_TARGET_TYPEMASK_VZ_IGNORE
+                | m.POSITION_TARGET_TYPEMASK_AX_IGNORE
+                | m.POSITION_TARGET_TYPEMASK_AY_IGNORE
+                | m.POSITION_TARGET_TYPEMASK_AZ_IGNORE
+                | m.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE)
+    assert offboard.POS_YAW_TYPE_MASK == expected == 2552
+    assert not (offboard.POS_YAW_TYPE_MASK
+                & m.POSITION_TARGET_TYPEMASK_YAW_IGNORE)
+    assert not (offboard.POS_YAW_TYPE_MASK
+                & m.POSITION_TARGET_TYPEMASK_X_IGNORE)
+
+
+def test_send_position_global_scales_degrees_to_1e7():
+    conn = MagicMock()
+    link = offboard.OffboardLink(conn)
+    link.send_position_global(40.7128, -74.0060, 12.0, 90.0)
+    args = conn.mav.set_position_target_global_int_send.call_args[0]
+    assert args[3] == offboard.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    assert args[4] == offboard.POS_YAW_TYPE_MASK
+    assert args[5] == 407128000        # lat_int
+    assert args[6] == -740060000       # lon_int
+    assert args[7] == 12.0             # alt, relative to home
+
+
+def test_send_position_global_converts_yaw_to_radians():
+    conn = MagicMock()
+    link = offboard.OffboardLink(conn)
+    link.send_position_global(40.0, -74.0, 5.0, 90.0)
+    args = conn.mav.set_position_target_global_int_send.call_args[0]
+    assert abs(args[14] - math.pi / 2) < 1e-9    # yaw
+    assert args[15] == 0.0                       # yaw_rate, masked off
+
+
+def test_send_position_global_zeroes_the_masked_fields():
+    conn = MagicMock()
+    link = offboard.OffboardLink(conn)
+    link.send_position_global(40.0, -74.0, 5.0, 0.0)
+    args = conn.mav.set_position_target_global_int_send.call_args[0]
+    assert args[8:14] == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)   # vx..afz

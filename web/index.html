@@ -275,8 +275,29 @@ const EXPECT = {
   offboard: t => t.mode === 'OFFBOARD',
   land:     t => t.mode === 'AUTO.LAND',
 };
+// Budget for PX4 to act, expressed in SIM seconds -- because PX4 SITL runs in
+// lockstep with Isaac, so sim time is the only clock it experiences.
 const CONFIRM_TIMEOUT_MS = 3000;
+// Floor on the rate used for scaling. A sim crawling at 5% would otherwise turn
+// the deadline into a minute-long wait that never usefully fires.
+const MIN_SIM_RATE = 0.15;
 let pending = null;          // {name, sentAt} awaiting confirmation
+
+// Wall-clock deadline equivalent to CONFIRM_TIMEOUT_MS of sim time.
+//
+// Date.now() measures wall clock, but PX4 only advances when Isaac does. At a
+// measured 0.3 -- routine under render load -- a fixed 3 s wall deadline
+// expires after PX4 has had less than one second of its own to respond, so a
+// command that worked perfectly gets reported as "refused". That false alarm is
+// indistinguishable from a real refusal, which defeats the point of confirming
+// at all.
+//
+// sim_rate is 0 until the server's first 3 s measurement window closes; treat
+// that as "unknown" and fall back to wall clock rather than scaling by zero.
+function confirmBudgetMs(t) {
+  const rate = t.sim_rate > 0 ? Math.max(t.sim_rate, MIN_SIM_RATE) : 1.0;
+  return CONFIRM_TIMEOUT_MS / rate;
+}
 
 function setStatus(text, cls) {
   el('status').textContent = text;
@@ -305,10 +326,15 @@ function checkPending(t) {
   if (expect && expect(t)) {
     setStatus(`${pending.name.toUpperCase()} confirmed by PX4`, 'good');
     pending = null;
-  } else if (Date.now() - pending.sentAt > CONFIRM_TIMEOUT_MS) {
-    setStatus(`${pending.name.toUpperCase()} — no response from PX4 after `
-              + `${CONFIRM_TIMEOUT_MS / 1000} s (command refused?)`, 'bad');
-    pending = null;
+  } else {
+    const budget = confirmBudgetMs(t);
+    if (Date.now() - pending.sentAt > budget) {
+      // Report the wall-clock figure actually waited, not the nominal 3 s --
+      // otherwise the message contradicts the operator's own stopwatch.
+      setStatus(`${pending.name.toUpperCase()} — no response from PX4 after `
+                + `${(budget / 1000).toFixed(1)} s (command refused?)`, 'bad');
+      pending = null;
+    }
   }
 }
 

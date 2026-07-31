@@ -126,3 +126,20 @@ def test_position_telemetry_starts_null_and_fills_in():
     assert abs(loop.telemetry()["lon"] + 74.0060) < 1e-7
     assert loop._position() == (loop.telemetry()["lat"],
                                 loop.telemetry()["lon"])
+
+
+def test_startup_params_clamp_the_mission_speed():
+    """The pad does 2 m/s; PX4's default position-setpoint ceiling is 12.
+    Pressing FLY must not be a step change in how the aircraft behaves."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 8}")
+    loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0),
+                           rate_hz=20.0, mission_speed=3.0)
+    sent = {}
+    loop.link.set_param = lambda name, value, ptype: sent.__setitem__(name, value)
+
+    loop._send_startup_params()
+
+    assert sent["MPC_XY_VEL_MAX"] == 3.0
+    assert sent["COM_RCL_EXCEPT"] == offboard.COM_RCL_EXCEPT_OFFBOARD
+    assert "MIS_TAKEOFF_ALT" in sent

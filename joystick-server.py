@@ -39,13 +39,15 @@ class SetpointLoop(threading.Thread):
     else ever touches `conn`.
     """
 
-    def __init__(self, conn, state, rate_hz=20.0, takeoff_alt=5.0, warmup_s=1.0):
+    def __init__(self, conn, state, rate_hz=20.0, takeoff_alt=5.0, warmup_s=1.0,
+                 mission_speed=3.0, arrival_radius=2.0):
         super().__init__(daemon=True)
         self.conn = conn
         self.state = state
         self.link = offboard.OffboardLink(conn)
         self.dt = 1.0 / rate_hz
         self.takeoff_alt = takeoff_alt
+        self.mission_speed = mission_speed
         self.warmup_s = warmup_s
         self.commands = queue.Queue()
         self._telem_lock = threading.Lock()
@@ -120,9 +122,15 @@ class SetpointLoop(threading.Thread):
                             offboard.MAV_PARAM_TYPE_INT32)
         self.link.set_param("MIS_TAKEOFF_ALT", self.takeoff_alt,
                             offboard.MAV_PARAM_TYPE_REAL32)
+        # PX4's default MPC_XY_VEL_MAX is 12 m/s (mc_pos_control_params.c:412)
+        # against the pad's 2 m/s. Unclamped, FLY would send the aircraft off
+        # six times faster than anything the operator has seen it do.
+        self.link.set_param("MPC_XY_VEL_MAX", self.mission_speed,
+                            offboard.MAV_PARAM_TYPE_REAL32)
         self._params_sent = True
         print(f">>> params: COM_RCL_EXCEPT=4 (offboard exempt from RC-loss "
-              f"failsafe), MIS_TAKEOFF_ALT={self.takeoff_alt}")
+              f"failsafe), MIS_TAKEOFF_ALT={self.takeoff_alt}, "
+              f"MPC_XY_VEL_MAX={self.mission_speed}")
 
     def _drain_mavlink(self):
         while True:
@@ -259,6 +267,11 @@ def main():
     ap.add_argument("--yaw-rate", type=float, default=offboard.DEFAULT_YAW_RATE_DPS,
                     help="turn rate for the left/right buttons, deg/s")
     ap.add_argument("--takeoff-alt", type=float, default=5.0, help="m")
+    ap.add_argument("--mission-speed", type=float, default=3.0,
+                    help="waypoint cruise, m/s. Clamps PX4's MPC_XY_VEL_MAX, "
+                         "whose 12 m/s default dwarfs the pad's 2 m/s")
+    ap.add_argument("--arrival-radius", type=float, default=2.0,
+                    help="metres; a waypoint counts as reached inside this")
     ap.add_argument("--watchdog", type=float, default=0.5,
                     help="seconds of silence before velocity is forced to zero")
     ap.add_argument("--rate", type=float, default=20.0, help="setpoint Hz")
@@ -272,7 +285,8 @@ def main():
     state = offboard.CommandState(args.speed_fwd, args.speed_up, args.watchdog,
                                   args.yaw_rate)
     loop_thread = SetpointLoop(conn, state, args.rate, args.takeoff_alt,
-                               args.offboard_warmup)
+                               args.offboard_warmup, args.mission_speed,
+                               args.arrival_radius)
     loop_thread.start()
 
     print(f">>> MAVLink offboard link: {args.mavlink}")

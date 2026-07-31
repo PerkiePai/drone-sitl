@@ -75,3 +75,54 @@ def test_loop_keeps_streaming_zeros_when_nothing_is_held():
         assert all(m.vx == 0.0 and m.vy == 0.0 and m.vz == 0.0 for m in seen)
     finally:
         px4.close()
+
+
+def test_heading_ignores_the_unknown_sentinel():
+    """GLOBAL_POSITION_INT.hdg is centidegrees, but 65535 means UNKNOWN.
+    Dividing that by 100 points the map arrow at 655 deg on every frame
+    before a heading estimate exists."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 6}")
+    loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0), rate_hz=20.0)
+
+    class Msg:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+        def get_type(self):
+            return "GLOBAL_POSITION_INT"
+
+    loop._handle_global_position(
+        Msg(lat=407128000, lon=-740060000, hdg=9000))
+    assert loop.telemetry()["heading_deg"] == 90.0
+
+    loop._handle_global_position(
+        Msg(lat=407128000, lon=-740060000, hdg=65535))
+    assert loop.telemetry()["heading_deg"] == 90.0      # unchanged, not 655.35
+
+
+def test_position_telemetry_starts_null_and_fills_in():
+    """The map must show 'waiting for position' rather than centring on
+    lat/lon 0,0 in the Gulf of Guinea."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 7}")
+    loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0), rate_hz=20.0)
+
+    t = loop.telemetry()
+    assert t["lat"] is None and t["lon"] is None
+    assert t["home_valid"] is False
+    assert loop._position() == (None, None)
+
+    class Msg:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+        def get_type(self):
+            return "GLOBAL_POSITION_INT"
+
+    loop._handle_global_position(
+        Msg(lat=407128000, lon=-740060000, hdg=0))
+    assert abs(loop.telemetry()["lat"] - 40.7128) < 1e-7
+    assert abs(loop.telemetry()["lon"] + 74.0060) < 1e-7
+    assert loop._position() == (loop.telemetry()["lat"],
+                                loop.telemetry()["lon"])

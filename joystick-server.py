@@ -56,6 +56,14 @@ class SetpointLoop(threading.Thread):
             "alt_m": 0.0,
             "vz": 0.0,
             "heading_deg": 0.0,
+            # Map feed. None until the first GLOBAL_POSITION_INT, so the page
+            # can say "waiting for position" instead of centring on 0,0.
+            "lat": None,
+            "lon": None,
+            # PX4 needs a valid home altitude to accept GLOBAL_RELATIVE_ALT
+            # setpoints and returns SILENTLY without one
+            # (mavlink_receiver.cpp:1107-1110). FLY is gated on this.
+            "home_valid": False,
             # Commanded vs measured, so "it tilts but does not move" is
             # observable rather than a guess: cmd high + actual ~0 means PX4
             # is receiving the setpoint but not achieving it.
@@ -78,6 +86,25 @@ class SetpointLoop(threading.Thread):
     def telemetry(self):
         with self._telem_lock:
             return dict(self._telem)
+
+    def _position(self):
+        """Current (lat, lon), either may be None. For the setpoint thread."""
+        with self._telem_lock:
+            return self._telem["lat"], self._telem["lon"]
+
+    def _handle_global_position(self, msg):
+        """GLOBAL_POSITION_INT -> map position and heading.
+
+        Heading comes from here rather than ATTITUDE so the map arrow and the
+        telemetry row are the same number and cannot disagree.
+        """
+        with self._telem_lock:
+            self._telem["lat"] = msg.lat / 1e7
+            self._telem["lon"] = msg.lon / 1e7
+            # hdg is centidegrees 0-35999, with 65535 meaning UNKNOWN. Keep
+            # the last good heading rather than reporting 655 degrees.
+            if msg.hdg != 65535:
+                self._telem["heading_deg"] = msg.hdg / 100.0
 
     def submit(self, name):
         """Called from the web thread. Queue only -- never touches `conn`."""
@@ -130,10 +157,11 @@ class SetpointLoop(threading.Thread):
                         with self._telem_lock:
                             self._telem["sim_rate"] = d_sim / d_wall
                         self._sim_ref = (msg.time_boot_ms, wall)
-            elif kind == "ATTITUDE":
+            elif kind == "GLOBAL_POSITION_INT":
+                self._handle_global_position(msg)
+            elif kind == "HOME_POSITION":
                 with self._telem_lock:
-                    self._telem["heading_deg"] = (
-                        math.degrees(msg.yaw) + 360.0) % 360.0
+                    self._telem["home_valid"] = True
 
     def run(self):
         next_tick = time.monotonic()

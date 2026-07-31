@@ -78,7 +78,8 @@ about eight numbers, all recoverable from it:
 ```
 georeference   lat 13.66156872  lon 100.298235  height 0.0
 tileset        Google Photorealistic 3D Tiles, ionAssetId 2275207   (present twice — stray duplicate)
-map model      payload ../../../metashape/output/survey_040_max_converted/survey_mesh_obj.usd
+map model      payload ../../../metashape/.../survey_mesh_obj.usd  (relative to sim/stages/;
+               resolves to /home/innovation/pai/metashape/output/survey_040_max_converted/)
                globe anchor: lat 13.662013797285455  lon 100.29186024766956  height -27.141119462205456
 ground plane   visibility invisible, height -26.99
 ```
@@ -133,7 +134,7 @@ flipping afterwards is precisely the bug being fixed.
 
 ## Components
 
-### `sim/site.py`
+### `sim/sites.py`
 
 ```python
 @dataclass(frozen=True)
@@ -157,11 +158,20 @@ class Site:
     tilesets: tuple[Tileset, ...]
     models: tuple[ModelAnchor, ...]
     ground_z: float        # metres, Z-up, relative to the georeference origin
-    spawn_xyz: tuple[float, float, float]
+    spawn_xy: tuple[float, float]
+    spawn_agl_m: float     # takeoff clearance ABOVE ground_z, not above origin
     heading_deg: float
 
 SITES: dict[str, Site]     # keyed by name; "bangkok-survey-040" is the first
 ```
+
+The module is `sites.py`, not `site.py`: `site` is a stdlib module that Kit's
+own interpreter imports, and shadowing it on `sys.path` is a trap.
+
+Spawn altitude is expressed as clearance **above the ground plane**, and the
+builder derives `spawn_z = ground_z + spawn_agl_m`. Storing an absolute z
+invites exactly the mismatch the baked stage had: `SPAWN_XYZ = (0, 0, 0.5)`
+against a ground plane at `z = -26.99` is a 27 m drop on Play.
 
 No token field. The ion token is a live secret and reaches the build only via
 `CESIUM_ION_TOKEN` in the environment.
@@ -250,7 +260,7 @@ attached to inspect a half-built stage.
 The honest constraint: `bootstrap.py` and `stage_builder.py` cannot run outside
 Kit, and this box's only GPU is the one Isaac needs. So the split is:
 
-**Unit tests, `sim/tests/test_site.py`** — real pytest, runs anywhere, follows
+**Unit tests, `sim/tests/test_sites.py`** — real pytest, runs anywhere, follows
 the existing `streaming/tests/` pattern:
 
 - `SITES` contains the bangkok site with the coordinates in this doc
@@ -258,6 +268,9 @@ the existing `streaming/tests/` pattern:
 - no `Site` carries anything token-shaped (guards against a secret being pasted
   into config later)
 - `Site` is frozen — config is not mutated at runtime
+- `spawn_z` lands just above `ground_z`, never at an absolute altitude that
+  ignores the ground plane
+- `get_site` raises a `KeyError` naming the known sites
 
 **Manual verification, once, on the box** — the parts only a real run can prove:
 

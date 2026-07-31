@@ -115,3 +115,41 @@ class Mission:
                     "index": self._index,
                     "count": len(self._points),
                     "dist_m": self._dist_m}
+
+    def advance(self, lat, lon):
+        """The target for this tick, or None if the loop should fly manually.
+
+        Returning None -- rather than raising or holding some sentinel -- is
+        what lets the setpoint loop stay ignorant of the state machine: it
+        sends a position setpoint when it gets a target and a velocity
+        setpoint when it does not.
+        """
+        with self._lock:
+            # No fix means no navigation. Stay RUNNING: nothing about the
+            # operator's intent changed, so the route resumes when GPS returns.
+            if lat is None or lon is None or not self._points:
+                return None
+
+            if self._state == self.RUNNING:
+                while self._index < len(self._points):
+                    wp_lat, wp_lon = self._points[self._index]
+                    dist = haversine_m(lat, lon, wp_lat, wp_lon)
+                    if dist > self.arrival_radius_m:
+                        self._dist_m = dist
+                        # Recorded every tick while the target is far enough
+                        # away for a bearing to mean something. On arrival the
+                        # last good value is what DONE holds.
+                        self._hold_yaw = bearing_deg(lat, lon, wp_lat, wp_lon)
+                        return (wp_lat, wp_lon, self._alt_m, self._hold_yaw)
+                    # Inside the radius: consume it and look at the next one in
+                    # the same tick, so two nearby clicks do not cost two ticks.
+                    self._index += 1
+                self._state = self.DONE
+                self._index = len(self._points) - 1
+                self._dist_m = 0.0
+
+            if self._state == self.DONE:
+                wp_lat, wp_lon = self._points[-1]
+                return (wp_lat, wp_lon, self._alt_m, self._hold_yaw)
+
+            return None

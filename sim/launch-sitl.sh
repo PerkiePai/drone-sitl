@@ -35,6 +35,28 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Secrets live outside git. Sourced before the checks below so a fresh terminal
+# needs no setup; an already-exported CESIUM_ION_TOKEN still wins, which keeps
+# `CESIUM_ION_TOKEN=... ./sim/launch-sitl.sh` working for a one-off token.
+SECRETS_FILE="${SECRETS_FILE:-$REPO_DIR/sim/secrets.env}"
+TOKEN_SOURCE="unset"
+if [[ -n "${CESIUM_ION_TOKEN:-}" ]]; then
+    TOKEN_SOURCE="environment"
+fi
+if [[ -f "$SECRETS_FILE" ]]; then
+    _token_before="${CESIUM_ION_TOKEN:-}"
+    # shellcheck source=/dev/null
+    source "$SECRETS_FILE"
+    if [[ -n "$_token_before" ]]; then
+        export CESIUM_ION_TOKEN="$_token_before"      # environment wins
+    elif [[ -n "${CESIUM_ION_TOKEN:-}" ]]; then
+        TOKEN_SOURCE="$SECRETS_FILE"
+    fi
+    unset _token_before
+fi
+# Report the SOURCE, never the token itself.
+echo "launch-sitl: ion token  $TOKEN_SOURCE"
+
 ISAAC_DIR="${ISAAC_DIR:-$HOME/isaac-sim6}"
 SITE="${SITE:-bangkok-survey-040}"
 SETUP_SCRIPT="${SETUP_SCRIPT:-$REPO_DIR/drone_setup_px4_cesium.py}"
@@ -50,8 +72,9 @@ die() { echo "launch-sitl: $*" >&2; exit 1; }
 [[ -d "$PEGASUS_EXTS"    ]] || die "Pegasus extensions not found at $PEGASUS_EXTS (set PEGASUS_EXTS=)"
 [[ -d "$CESIUM_EXTS"     ]] || die "Cesium extensions not found at $CESIUM_EXTS (set CESIUM_EXTS=)"
 [[ -n "${CESIUM_ION_TOKEN:-}" ]] || die "CESIUM_ION_TOKEN is not set.
-  Cesium cannot stream tiles without it. Export it once in your shell profile:
-    export CESIUM_ION_TOKEN='<your ion token>'
+  Cesium cannot stream tiles without it. Put it in a gitignored secrets file:
+    cp sim/secrets.env.example sim/secrets.env && chmod 600 sim/secrets.env
+    \$EDITOR sim/secrets.env
   Get one at https://ion.cesium.com/tokens"
 
 # --- consumed by sim/bootstrap.py -------------------------------------------

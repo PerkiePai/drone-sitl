@@ -1,3 +1,6 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Secrets sourced by sim/launch-sitl.sh. Never commit — see sim/secrets.env.example
+sim/secrets.env

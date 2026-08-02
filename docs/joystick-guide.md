@@ -111,14 +111,31 @@ so a plain `isaac-sim.streaming.sh` run still behaves as it always did.
 
 ### 3.1 One-time setup
 
-Export your Cesium ion token — the stage build needs it to stream tiles:
+Put your Cesium ion token in a gitignored secrets file — the stage build needs
+it to stream tiles:
 
 ```bash
-export CESIUM_ION_TOKEN='<your token>'    # add to ~/.bashrc
+cp sim/secrets.env.example sim/secrets.env
+chmod 600 sim/secrets.env
+$EDITOR sim/secrets.env          # paste the token
 ```
 
-Get one at <https://ion.cesium.com/tokens>. The launcher refuses to start
-without it, rather than bringing up a stage that silently streams nothing.
+`sim/launch-sitl.sh` sources that file automatically, so a fresh terminal needs
+no setup. An already-exported `CESIUM_ION_TOKEN` still wins, which keeps
+`CESIUM_ION_TOKEN=... ./sim/launch-sitl.sh` working for a one-off token. The
+launcher prints which source it used — the source, never the token:
+
+```
+launch-sitl: ion token  /home/innovation/pai/drone-sitl/sim/secrets.env
+```
+
+Get a token at <https://ion.cesium.com/tokens>. The launcher refuses to start
+without one, rather than bringing up a stage that silently streams nothing.
+
+**The token must be scoped to every ion asset in `sim/sites.py`** — asset
+`2275207` (Google Photorealistic 3D Tiles) for `bangkok-survey-040`. A token
+that is valid but lacks that asset gives you a lit, empty world with no error in
+the viewport, which is a genuinely confusing failure.
 
 **There is no stage file to build.** `sim/sites.py` holds the georeference
 origin, the ion tileset, the map model's globe anchor, the ground height and the
@@ -662,7 +679,7 @@ can fly the drone. Fine on a trusted LAN, not fine on an open network.
 ## Quick reference
 
 ```bash
-export CESIUM_ION_TOKEN='<token>'                                       # once, in ~/.bashrc
+# one-time: cp sim/secrets.env.example sim/secrets.env && paste your ion token
 ./sim/launch-sitl.sh                                                    # stage + drone + Play
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/detect   # 200
 conda run -n drone python joystick-server.py                            # wait for line 4

@@ -40,6 +40,14 @@ class ModelAnchor:
     latitude: float
     longitude: float
     height: float
+    zero_orientation: bool = True
+    """Force the prim's rotation to identity after anchoring.
+
+    The Metashape export bakes a non-identity orient into the model USD's own
+    root prim, which composes through the payload and lands the mesh tilted.
+    Zeroing it is the automated form of the manual step "add the map model USD,
+    fix its orientation to 0, 0, 0".
+    """
 
     def resolved_path(self) -> Path:
         path = Path(self.usd_path).expanduser()
@@ -81,7 +89,7 @@ BANGKOK_SURVEY_040 = Site(
             usd_path="../metashape/output/survey_040_max_converted/survey_mesh_obj.usd",
             latitude=13.662013797285455,
             longitude=100.29186024766956,
-            height=-27.141119462205456,
+            height=-25.0,
         ),
     ),
     ground_z=-26.992977143901495,

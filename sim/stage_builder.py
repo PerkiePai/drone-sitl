@@ -182,7 +182,51 @@ def _add_model(model: ModelAnchor) -> None:
     anchor.GetAnchorLatitudeAttr().Set(model.latitude)
     anchor.GetAnchorLongitudeAttr().Set(model.longitude)
     anchor.GetAnchorHeightAttr().Set(model.height)
-    anchor.GetDetectTransformChangesAttr().Set(True)
-    anchor.GetAdjustOrientationForGlobeWhenMovingAttr().Set(True)
+    # Both off: the anchor should place the mesh and then leave it alone. With
+    # them on, Cesium re-derives the anchor from any transform we author and
+    # re-tilts the prim to the globe tangent, undoing the zeroing below.
+    anchor.GetDetectTransformChangesAttr().Set(False)
+    anchor.GetAdjustOrientationForGlobeWhenMovingAttr().Set(False)
+
+    if model.zero_orientation:
+        _zero_orientation(xform)
+
     print(f">>> model {model.prim_name} anchored at "
-          f"{model.latitude}, {model.longitude}, {model.height}")
+          f"{model.latitude}, {model.longitude}, {model.height}"
+          f"{' (orientation zeroed)' if model.zero_orientation else ''}")
+    print(f"      xform: {_describe_xform(xform)}")
+
+
+def _zero_orientation(xform: UsdGeom.Xformable) -> None:
+    """Set every rotation op on the prim to identity, leaving translate alone.
+
+    Overrides rather than clears the op order: the globe anchor authors the
+    translate we want to keep, so wiping the ops would drop the placement along
+    with the rotation.
+    """
+    identity_quat = {
+        UsdGeom.XformOp.PrecisionDouble: Gf.Quatd(1.0, 0.0, 0.0, 0.0),
+        UsdGeom.XformOp.PrecisionFloat: Gf.Quatf(1.0, 0.0, 0.0, 0.0),
+        UsdGeom.XformOp.PrecisionHalf: Gf.Quath(1.0, 0.0, 0.0, 0.0),
+    }
+    for op in xform.GetOrderedXformOps():
+        op_type = op.GetOpType()
+        if op_type == UsdGeom.XformOp.TypeOrient:
+            op.Set(identity_quat[op.GetPrecision()])
+        elif op_type in (UsdGeom.XformOp.TypeRotateXYZ, UsdGeom.XformOp.TypeRotateXZY,
+                         UsdGeom.XformOp.TypeRotateYXZ, UsdGeom.XformOp.TypeRotateYZX,
+                         UsdGeom.XformOp.TypeRotateZXY, UsdGeom.XformOp.TypeRotateZYX):
+            op.Set(Gf.Vec3f(0.0, 0.0, 0.0))
+        elif op_type in (UsdGeom.XformOp.TypeRotateX, UsdGeom.XformOp.TypeRotateY,
+                         UsdGeom.XformOp.TypeRotateZ):
+            op.Set(0.0)
+        elif op_type == UsdGeom.XformOp.TypeTransform:
+            # A full matrix op carries rotation inside it; strip to translation.
+            matrix = op.Get()
+            translation = matrix.ExtractTranslation()
+            op.Set(Gf.Matrix4d().SetTranslate(translation))
+
+
+def _describe_xform(xform: UsdGeom.Xformable) -> str:
+    """One-line dump of the resolved ops, so the console shows what actually landed."""
+    return " ".join(f"{op.GetOpName()}={op.Get()}" for op in xform.GetOrderedXformOps()) or "(none)"

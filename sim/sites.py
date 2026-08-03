@@ -50,12 +50,12 @@ class ModelAnchor:
     """
 
     translate_z: float | None = None
-    """Pin the prim's local stage Z, leaving X/Y as the globe anchor placed them.
+    """Escape hatch: pin the prim's local stage Z, leaving X/Y alone.
 
-    `height` above is metres above the WGS84 ellipsoid and does NOT map 1:1 onto
-    stage Z: an anchor height of -25 resolved to a local translate of ~147. When
-    the mesh needs to sit at a known stage height, set it here. None leaves
-    whatever the anchor produced.
+    Not the primary mechanism. `height` drives placement, and over this site's
+    ~690 m origin-to-model distance it tracks local stage Z to within 0.037 m,
+    so `height = -25.0` lands the mesh at z ~= -25.04. Use this only if Cesium
+    is observed overwriting that.
     """
 
     def resolved_path(self) -> Path:
@@ -98,8 +98,7 @@ BANGKOK_SURVEY_040 = Site(
             usd_path="../metashape/output/survey_040_max_converted/survey_mesh_obj.usd",
             latitude=13.662013797285455,
             longitude=100.29186024766956,
-            height=-27.141119462205456,
-            translate_z=-25.0,
+            height=-25.0,
         ),
     ),
     ground_z=-26.992977143901495,

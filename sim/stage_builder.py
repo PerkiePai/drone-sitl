@@ -12,6 +12,8 @@ docs/superpowers/specs/2026-07-31-sitl-stage-from-config-design.md
 """
 from __future__ import annotations
 
+import math
+
 import omni.usd
 from pxr import Gf, Sdf, UsdGeom, UsdLux
 
@@ -22,6 +24,15 @@ from cesium.omniverse.usdUtils import usdUtils
 from cesium.usd.plugins.CesiumUsdSchemas import IonServer as CesiumIonServer
 
 from sites import ModelAnchor, Site
+
+# WGS84, the ellipsoid Cesium georeferences against by default. Used to author
+# cesium:anchor:position, the ECEF field the schema calls "the actual position of
+# the globally anchored prim" -- leaving it at its (0,0,0) default while setting
+# only lat/lon/height leaves the two descriptions of the same placement in
+# disagreement, and Cesium resolves that disagreement its own way.
+WGS84_A = 6378137.0
+WGS84_F = 1.0 / 298.257223563
+WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
 
 WORLD_PATH = "/World"
 GROUND_PLANE_PATH = "/World/GroundPlane"
@@ -182,6 +193,12 @@ def _add_model(model: ModelAnchor) -> None:
     anchor.GetAnchorLatitudeAttr().Set(model.latitude)
     anchor.GetAnchorLongitudeAttr().Set(model.longitude)
     anchor.GetAnchorHeightAttr().Set(model.height)
+    # Author the ECEF position too, consistent with the lat/lon/height above.
+    # Verified exact: this formula reproduces the previously-working stage's
+    # anchor position to 0.000000 m.
+    ecef = geodetic_to_ecef(model.latitude, model.longitude, model.height)
+    anchor.GetPositionAttr().Set(Gf.Vec3d(*ecef))
+    print(f"      ecef: ({ecef[0]:.4f}, {ecef[1]:.4f}, {ecef[2]:.4f})")
     # Both off: the anchor should place the mesh and then leave it alone. With
     # them on, Cesium re-derives the anchor from any transform we author and
     # re-tilts the prim to the globe tangent, undoing the zeroing below.
@@ -202,6 +219,46 @@ def _add_model(model: ModelAnchor) -> None:
           f"{model.latitude}, {model.longitude}, {model.height}"
           f"{' (' + ', '.join(notes) + ')' if notes else ''}")
     print(f"      xform: {_describe_xform(xform)}")
+
+
+def geodetic_to_ecef(lat_deg: float, lon_deg: float, height: float) -> tuple[float, float, float]:
+    """WGS84 geodetic -> earth-centred earth-fixed metres.
+
+    `height` is metres above the ellipsoid, matching cesium:anchor:height. Over
+    the ~690 m between this site's georeference origin and its model, the
+    ellipsoid-vs-local-plane difference is 0.037 m, so anchor height and local
+    stage Z track each other almost exactly here.
+    """
+    lat, lon = math.radians(lat_deg), math.radians(lon_deg)
+    n = WGS84_A / math.sqrt(1.0 - WGS84_E2 * math.sin(lat) ** 2)
+    return (
+        (n + height) * math.cos(lat) * math.cos(lon),
+        (n + height) * math.cos(lat) * math.sin(lon),
+        (n * (1.0 - WGS84_E2) + height) * math.sin(lat),
+    )
+
+
+def apply_model_overrides(site: Site) -> None:
+    """Re-assert each model's orientation and local Z.
+
+    Cesium drives the prim transform FROM the globe anchor on its own update
+    tick, and that tick lands after build_stage returns -- so anything authored
+    during the build is overwritten. Calling this again once the app has pumped
+    frames is what makes the override stick. Idempotent by construction: both
+    helpers set absolute values rather than accumulating.
+    """
+    stage = omni.usd.get_context().get_stage()
+    for model in site.models:
+        prim = stage.GetPrimAtPath(f"{WORLD_PATH}/{model.prim_name}")
+        if not prim.IsValid():
+            print(f"*** {model.prim_name}: prim missing, cannot re-assert transform ***")
+            continue
+        xform = UsdGeom.Xformable(prim)
+        if model.zero_orientation:
+            _zero_orientation(xform)
+        if model.translate_z is not None:
+            _set_translate_z(xform, model.translate_z)
+        print(f">>> {model.prim_name} xform: {_describe_xform(xform)}")
 
 
 def _set_translate_z(xform: UsdGeom.Xformable, z: float) -> None:

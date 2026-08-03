@@ -147,8 +147,18 @@ async def _bring_up():
     print(f">>> Settling {SETTLE_FRAMES} frames for Cesium tiles.")
     await _frames(SETTLE_FRAMES)
 
+    # Cesium writes each model's transform from its globe anchor on its own
+    # update tick, which lands after build_stage returns. Re-assert the
+    # orientation and local Z now that those ticks have happened, or the mesh
+    # sits at the anchor's ellipsoid-derived height instead of where we want it.
+    stage_builder.apply_model_overrides(site)
+
     await _run_setup_script(site)
     await _frames(30)
+
+    # Spawning the drone runs a World reset, which is another chance for the
+    # anchor to reassert itself. Cheap to redo; both overrides are absolute.
+    stage_builder.apply_model_overrides(site)
 
     # The setup script is where the up-axis used to get flipped. Re-check after
     # it, not just after the build -- this is the regression guard.

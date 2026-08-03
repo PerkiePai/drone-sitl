@@ -49,6 +49,15 @@ class ModelAnchor:
     fix its orientation to 0, 0, 0".
     """
 
+    translate_z: float | None = None
+    """Pin the prim's local stage Z, leaving X/Y as the globe anchor placed them.
+
+    `height` above is metres above the WGS84 ellipsoid and does NOT map 1:1 onto
+    stage Z: an anchor height of -25 resolved to a local translate of ~147. When
+    the mesh needs to sit at a known stage height, set it here. None leaves
+    whatever the anchor produced.
+    """
+
     def resolved_path(self) -> Path:
         path = Path(self.usd_path).expanduser()
         return path if path.is_absolute() else (REPO_ROOT / path).resolve()
@@ -89,7 +98,8 @@ BANGKOK_SURVEY_040 = Site(
             usd_path="../metashape/output/survey_040_max_converted/survey_mesh_obj.usd",
             latitude=13.662013797285455,
             longitude=100.29186024766956,
-            height=-25.0,
+            height=-27.141119462205456,
+            translate_z=-25.0,
         ),
     ),
     ground_z=-26.992977143901495,

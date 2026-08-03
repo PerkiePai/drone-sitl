@@ -105,22 +105,45 @@ async def _run_setup_script(site):
         await _frames(60)
 
 
+def _advisory(label, fn):
+    """Run a diagnostic without ever letting it stop the bring-up.
+
+    Every check below this point is ADVISORY. An earlier version refused to
+    press Play when the georeference looked wrong, which was a mistake: Pegasus
+    only launches PX4 and starts streaming sensor data on the timeline's play
+    event, so withholding Play leaves no vehicle at all. The operator then meets
+    the problem four layers downstream as "the web UI won't let me arm" -- with
+    the actual banner scrolled off in the Isaac console. A loud warning plus a
+    running sim beats a silent, correct refusal.
+    """
+    try:
+        fn()
+    except Exception as exc:
+        _banner(f"{label} failed (continuing anyway): {exc.__class__.__name__}: {exc}")
+        traceback.print_exc()
+
+
 def _check_georeference(site):
-    """Manual step 7 -- 'drone position is the same for both QGC and Isaac' -- as
-    an assertion. drone_setup_px4_cesium.py derives the PX4 GPS origin from the
-    georeference prim, so matching coordinates here means the origin it used is
-    the origin we authored."""
+    """Manual step 7 -- 'drone position is the same for both QGC and Isaac'.
+
+    drone_setup_px4_cesium.py derives the PX4 GPS origin from the georeference
+    prim, so matching coordinates here means the origin it used is the origin we
+    authored. Advisory: a mismatch means QGC and Isaac disagree on where the
+    drone is, which is worth shouting about but is still a flyable sim.
+    """
     import stage_builder
 
     lat, lon, height = stage_builder.read_georeference()
     ok = (abs(lat - site.latitude) < 1e-6
           and abs(lon - site.longitude) < 1e-6
           and abs(height - site.height) < 1e-3)
-    if not ok:
+    if ok:
+        print(f">>> georeference verified: {lat}, {lon}, {height}")
+    else:
         _banner("georeference read-back does not match the site config",
                 f"authored: {site.latitude}, {site.longitude}, {site.height}",
                 f"stage:    {lat}, {lon}, {height}",
-                "NOT pressing Play -- QGC and Isaac would disagree on position.")
+                "QGC and Isaac will disagree on position. Playing anyway.")
     return ok
 
 
@@ -151,25 +174,36 @@ async def _bring_up():
     # update tick, which lands after build_stage returns. Re-assert the
     # orientation and local Z now that those ticks have happened, or the mesh
     # sits at the anchor's ellipsoid-derived height instead of where we want it.
-    stage_builder.apply_model_overrides(site)
+    _advisory("model transform override", lambda: stage_builder.apply_model_overrides(site))
 
-    await _run_setup_script(site)
+    # Also advisory: a setup script that dies partway still leaves prims on the
+    # stage, and Play is what reveals how far it got. Swallowing the traceback
+    # here would hide the single most useful diagnostic there is.
+    try:
+        await _run_setup_script(site)
+    except Exception as exc:
+        _banner(f"setup script failed (continuing to Play anyway): "
+                f"{exc.__class__.__name__}: {exc}",
+                "The drone may be missing or half-built -- this traceback is the",
+                "reason PX4 never launches and the web UI cannot arm.")
+        traceback.print_exc()
     await _frames(30)
 
-    # Spawning the drone runs a World reset, which is another chance for the
-    # anchor to reassert itself. Cheap to redo; both overrides are absolute.
-    stage_builder.apply_model_overrides(site)
-
-    # The setup script is where the up-axis used to get flipped. Re-check after
-    # it, not just after the build -- this is the regression guard.
-    stage_builder.assert_z_up("after drone_setup_px4_cesium.py")
-
-    if not _check_georeference(site):
-        return
+    # Everything from here is advisory -- see _advisory(). Play must happen
+    # regardless, because Pegasus launches PX4 and starts streaming sensor data
+    # from the timeline's play event and nowhere else. No Play means no vehicle,
+    # which is a much worse outcome than a warned-about stage.
+    _advisory("model transform override (post-spawn)",
+              lambda: stage_builder.apply_model_overrides(site))
+    _advisory("up-axis check",
+              lambda: stage_builder.assert_z_up("after drone_setup_px4_cesium.py"))
+    _advisory("georeference check", lambda: _check_georeference(site))
 
     if AUTOPLAY:
         omni.timeline.get_timeline_interface().play()
         print(">>> Play pressed. PX4 SITL is starting -- connect QGroundControl now.")
+        print("    If PX4 never appears (`pgrep px4` empty), Pegasus's timeline")
+        print("    callback did not fire and the vehicle is not simulating.")
     else:
         print(">>> SITL_AUTOPLAY=0 -- sim left stopped. Press Play when ready.")
 

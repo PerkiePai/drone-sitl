@@ -76,6 +76,13 @@ class Site:
     spawn_agl_m: float                 # clearance ABOVE ground_z, not above origin
     heading_deg: float                 # compass: 0=N, 90=E
 
+    """`ground_z` is the invisible collision plane the drone rests on. It must
+    match the height of the map model the drone appears to be standing on --
+    the manual step was "move the ground plane to the same ground as in the 3D
+    model". Set it below anything and the drone falls; above, and it hovers on
+    an invisible floor. `spawn_z` is derived from it so the two cannot drift.
+    """
+
     @property
     def spawn_z(self) -> float:
         """Absolute spawn height. Derived so it cannot drift from the ground plane."""
@@ -101,9 +108,12 @@ BANGKOK_SURVEY_040 = Site(
             height=-25.0,
         ),
     ),
-    ground_z=-26.992977143901495,
+    # Matches the survey mesh's height above, so the drone rests on the model's
+    # ground rather than 2 m under it. The old -26.99 came from the Y-up baked
+    # stage and no longer corresponds to anything.
+    ground_z=-25.0,
     spawn_xy=(0.0, 0.0),
-    spawn_agl_m=0.5,
+    spawn_agl_m=0.5,               # -> spawn_z = -24.5
     heading_deg=0.0,
 )
 

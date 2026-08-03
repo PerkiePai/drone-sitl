@@ -190,11 +190,41 @@ def _add_model(model: ModelAnchor) -> None:
 
     if model.zero_orientation:
         _zero_orientation(xform)
+    if model.translate_z is not None:
+        _set_translate_z(xform, model.translate_z)
 
+    notes = []
+    if model.zero_orientation:
+        notes.append("orientation zeroed")
+    if model.translate_z is not None:
+        notes.append(f"z pinned to {model.translate_z}")
     print(f">>> model {model.prim_name} anchored at "
           f"{model.latitude}, {model.longitude}, {model.height}"
-          f"{' (orientation zeroed)' if model.zero_orientation else ''}")
+          f"{' (' + ', '.join(notes) + ')' if notes else ''}")
     print(f"      xform: {_describe_xform(xform)}")
+
+
+def _set_translate_z(xform: UsdGeom.Xformable, z: float) -> None:
+    """Pin the prim's local Z, leaving X/Y as the globe anchor placed them.
+
+    The anchor's height is metres above the WGS84 ellipsoid and does not map 1:1
+    onto stage Z -- an anchor height of -25 resolved to a local translate of
+    ~147. X and Y are left alone because the anchor's lat/lon placement is the
+    part that is already correct.
+    """
+    for op in xform.GetOrderedXformOps():
+        op_type = op.GetOpType()
+        if op_type == UsdGeom.XformOp.TypeTranslate:
+            current = op.Get()
+            op.Set(type(current)(current[0], current[1], z))
+            return
+        if op_type == UsdGeom.XformOp.TypeTransform:
+            translation = op.Get().ExtractTranslation()
+            op.Set(Gf.Matrix4d().SetTranslate(
+                Gf.Vec3d(translation[0], translation[1], z)))
+            return
+    # No translate op composed in from the payload or the anchor -- author one.
+    xform.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, z))
 
 
 def _zero_orientation(xform: UsdGeom.Xformable) -> None:

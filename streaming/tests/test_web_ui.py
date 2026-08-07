@@ -179,6 +179,44 @@ def test_pressing_a_direction_pauses_a_running_mission(server):
     asyncio.run(exercise())
 
 
+def test_telemetry_carries_a_recorder_block_with_isaac_down(server):
+    """Isaac is not running in the test suite, and that is the common case on
+    the page too -- before launch-sitl.sh finishes. It must read as `offline`
+    with the button disabled, not as a missing key the UI then throws on."""
+    websockets = pytest.importorskip("websockets")
+
+    async def exercise():
+        async with websockets.connect(f"ws://127.0.0.1:{WEB_PORT}/ws") as ws:
+            t = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            assert t["rec"]["state"] == "offline"
+            assert t["rec"]["can_start"] is False
+
+    asyncio.run(exercise())
+
+
+def test_a_record_press_with_no_isaac_reports_a_reason_and_keeps_flying(server):
+    """The command cannot succeed, so what matters is that it fails visibly and
+    that the flight path is untouched: telemetry keeps arriving and the socket
+    keeps taking commands."""
+    websockets = pytest.importorskip("websockets")
+
+    async def exercise():
+        async with websockets.connect(f"ws://127.0.0.1:{WEB_PORT}/ws") as ws:
+            await asyncio.wait_for(ws.recv(), timeout=10)
+            await ws.send(json.dumps({"type": "record", "action": "start"}))
+
+            t = await _telem_where(ws, lambda t: t["rec"]["cmd_error"])
+            assert "sim" in t["rec"]["cmd_error"].lower()
+            assert t["rec"]["state"] == "offline"
+
+            # The socket is still live and still driving the aircraft.
+            await ws.send(json.dumps({"type": "axis", "dir": "fwd",
+                                      "pressed": True}))
+            t = await _telem_where(ws, lambda t: t["streaming_s"] > 0)
+
+    asyncio.run(exercise())
+
+
 def test_releasing_a_direction_does_not_pause(server):
     """Only pressed=True pauses. If releases paused too, the mission would
     re-pause forever and RESUME could never take."""

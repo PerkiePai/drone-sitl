@@ -22,6 +22,8 @@ import queue
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 
 from pymavlink import mavutil
 
@@ -249,21 +251,138 @@ class SetpointLoop(threading.Thread):
                 next_tick = time.monotonic()   # fell behind; resync
 
 
-async def _push_telemetry(sock, loop_thread, hz=5.0):
+class RecorderProxy:
+    """The page's view of the VIO recorder, which lives inside Isaac Sim.
+
+    Deliberately NOT routed through SetpointLoop.submit(). Every other command
+    from the page goes on that queue because it touches the MAVLink connection,
+    which only the setpoint thread may own. Recording touches no MAVLink at all,
+    and an HTTP call into Kit can block for hundreds of milliseconds while its
+    main thread is mid-frame. A gap that long in the setpoint stream drops PX4
+    out of OFFBOARD -- so routing RECORD through that thread would mean pressing
+    it could drop the aircraft (design R2).
+
+    The `drone` env has no async HTTP client, so urllib runs in a worker thread
+    (design R3). Nothing here ever blocks the event loop for longer than the
+    timeout.
+    """
+
+    # What the page sees when Isaac is not up. A state, not an error: this is
+    # the normal condition before launch-sitl.sh has finished.
+    OFFLINE = {"state": "offline", "can_start": False, "run_dir": None,
+               "elapsed_s": 0.0, "frames": 0, "images": 0, "dropped": 0,
+               "queue": 0, "bytes": 0, "free_bytes": None,
+               "min_free_bytes": None, "warn_free_bytes": None, "error": None}
+
+    def __init__(self, base_url, timeout=2.0, poll_hz=1.0):
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.poll_hz = poll_hz
+        self._status = dict(self.OFFLINE)
+        self._cmd_error = None      # sticky until the next command is issued
+        self._pending = set()
+
+    def status(self):
+        return dict(self._status, cmd_error=self._cmd_error)
+
+    def submit(self, action):
+        """Fire-and-forget, called from the WebSocket handler.
+
+        Awaiting the command there would stop that handler reading messages for
+        as long as the HTTP call takes -- up to the 2 s timeout -- and 0.5 s of
+        silence is all it takes for the watchdog to zero a held direction. So
+        pressing RECORD while flying forward would stop the drone. The result
+        reaches the page through the telemetry frames instead.
+        """
+        task = asyncio.create_task(self.command(action))
+        self._pending.add(task)                 # or it can be GC'd mid-flight
+        task.add_done_callback(self._pending.discard)
+        return task
+
+    def _request(self, path, method="GET"):
+        """Blocking. Only ever called inside asyncio.to_thread.
+
+        -> (http_code, body). A refused command (409/507/503) is a normal
+        answer carrying a reason, not an exception, so HTTPError is unwrapped
+        rather than raised.
+        """
+        req = urllib.request.Request(self.base_url + path, method=method,
+                                     data=b"" if method == "POST" else None)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as exc:
+            try:
+                return exc.code, json.loads(exc.read() or b"{}")
+            except Exception:
+                return exc.code, {}
+
+    async def command(self, action):
+        """start | stop. Runs on the web thread's event loop (design R2)."""
+        if action not in ("start", "stop"):
+            return
+        self._cmd_error = None
+        try:
+            code, body = await asyncio.to_thread(self._request,
+                                                 f"/record/{action}", "POST")
+        except Exception as exc:
+            self._cmd_error = (f"cannot reach the recorder in Isaac Sim "
+                               f"({exc.__class__.__name__}) -- is the sim running?")
+            self._status = dict(self.OFFLINE)
+            return
+        if code >= 400:
+            # 409/503/507 all carry the reason the control server refused, and
+            # that reason is the whole point -- "disk too full" must reach the
+            # operator, not just "failed".
+            self._cmd_error = body.get("error") or f"recorder refused ({code})"
+        else:
+            # Don't wait up to a second for the next poll to show the change.
+            await self.refresh()
+
+    async def refresh(self):
+        try:
+            code, body = await asyncio.to_thread(self._request, "/record/status")
+        except Exception:
+            self._status = dict(self.OFFLINE)
+            return
+        self._status = body if code == 200 else dict(self.OFFLINE)
+
+    async def poll_forever(self):
+        """1 Hz, not the 5 Hz telemetry rate: the counters do not change faster
+        than that and Kit should not be polled for free disk space 5 times a
+        second."""
+        while True:
+            await self.refresh()
+            await asyncio.sleep(1.0 / self.poll_hz)
+
+
+async def _push_telemetry(sock, loop_thread, recorder, hz=5.0):
     try:
         while True:
-            await sock.send_text(json.dumps(loop_thread.telemetry()))
+            telem = loop_thread.telemetry()
+            telem["rec"] = recorder.status()
+            await sock.send_text(json.dumps(telem))
             await asyncio.sleep(1.0 / hz)
     except Exception:
         pass          # socket closed; the /ws handler cleans up
 
 
-def build_app(loop_thread, state, video_port, mission_speed):
+def build_app(loop_thread, state, video_port, mission_speed, recorder):
+    from contextlib import asynccontextmanager
+
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     from fastapi.responses import JSONResponse
     from fastapi.staticfiles import StaticFiles
 
-    app = FastAPI()
+    @asynccontextmanager
+    async def lifespan(_app):
+        # One poller for the server, not one per socket: two phones on the page
+        # must not double the load on Kit.
+        poller = asyncio.create_task(recorder.poll_forever())
+        yield
+        poller.cancel()
+
+    app = FastAPI(lifespan=lifespan)
 
     @app.get("/config")
     def config():
@@ -274,7 +393,8 @@ def build_app(loop_thread, state, video_port, mission_speed):
     async def ws(sock: WebSocket):
         await sock.accept()
         state.clear()
-        pusher = asyncio.create_task(_push_telemetry(sock, loop_thread))
+        pusher = asyncio.create_task(_push_telemetry(sock, loop_thread,
+                                                     recorder))
         try:
             while True:
                 msg = json.loads(await sock.receive_text())
@@ -305,6 +425,11 @@ def build_app(loop_thread, state, video_port, mission_speed):
                         loop_thread.submit("mission_pause")
                     elif action == "clear":
                         loop_thread.submit("mission_clear")
+                elif kind == "record":
+                    # Inline on this loop, never loop_thread.submit(). See
+                    # RecorderProxy for why the setpoint thread must not carry
+                    # this, and .submit() for why it is not awaited here.
+                    recorder.submit(msg.get("action"))
                 elif kind == "ping":
                     state.touch()
         except (WebSocketDisconnect, json.JSONDecodeError, KeyError, ValueError):
@@ -331,6 +456,10 @@ def main():
     ap.add_argument("--port", type=int, default=8090, help="web UI port")
     ap.add_argument("--video-port", type=int, default=8080,
                     help="Isaac MJPEG port from drone_setup_px4_cesium.py")
+    ap.add_argument("--recorder-url", default="http://127.0.0.1:8091",
+                    help="VIO recorder control server inside Isaac Sim "
+                         "(sim/recorder_control.py). Unreachable is fine -- "
+                         "the page shows the recorder as offline")
     ap.add_argument("--speed-fwd", type=float, default=2.0, help="m/s")
     ap.add_argument("--speed-up", type=float, default=1.0, help="m/s")
     ap.add_argument("--yaw-rate", type=float, default=offboard.DEFAULT_YAW_RATE_DPS,
@@ -363,8 +492,10 @@ def main():
           f"({args.speed_fwd} m/s fwd, {args.speed_up} m/s climb, "
           f"{args.yaw_rate:.0f} deg/s turn)")
     print(f">>> open http://<box-ip>:{args.port}/")
+    print(f">>> recorder control: {args.recorder_url}")
+    recorder = RecorderProxy(args.recorder_url)
     uvicorn.run(build_app(loop_thread, state, args.video_port,
-                          args.mission_speed),
+                          args.mission_speed, recorder),
                 host="0.0.0.0", port=args.port, log_level="warning")
 
 

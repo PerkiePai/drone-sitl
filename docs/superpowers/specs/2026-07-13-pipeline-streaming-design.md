@@ -1,5 +1,11 @@
 # Design: streaming VIO pipeline → PX4/QGC (Isaac Sim)
 
+> **Architecture superseded (2026-08-07)** by `2026-08-07-vio-gps-denied-design.md`,
+> which keeps this document's goal, scope and error-handling analysis but revises
+> how the estimate reaches PX4 (via `joystick-server.py`, the sole MAVLink owner)
+> and corrects `EKF2_HGT_REF=EV` — flow-odom takes altitude from the barometer, so
+> vision must not also claim to supply it.
+
 ## Goal
 
 Feed `pipeline.py`'s GPS-denied position estimate into PX4 SITL (spawned by

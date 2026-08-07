@@ -260,17 +260,10 @@ async def _push_telemetry(sock, loop_thread, hz=5.0):
 
 def build_app(loop_thread, state, video_port, mission_speed):
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-    from fastapi.responses import FileResponse, JSONResponse
+    from fastapi.responses import JSONResponse
     from fastapi.staticfiles import StaticFiles
 
     app = FastAPI()
-    app.mount("/vendor",
-              StaticFiles(directory=os.path.join(ROOT, "web", "vendor")),
-              name="vendor")
-
-    @app.get("/")
-    def index():
-        return FileResponse(os.path.join(ROOT, "web", "index.html"))
 
     @app.get("/config")
     def config():
@@ -320,6 +313,11 @@ def build_app(loop_thread, state, video_port, mission_speed):
             pusher.cancel()
             # A dropped socket must not latch the last commanded velocity.
             state.clear()
+
+    # Mounted last so /config and /ws above take priority for those paths;
+    # this serves index.html at "/" plus css/js/vendor as plain static files.
+    app.mount("/", StaticFiles(directory=os.path.join(ROOT, "web"), html=True),
+              name="web")
 
     return app
 

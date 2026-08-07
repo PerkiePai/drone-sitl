@@ -4,3 +4,7 @@ __pycache__/
 
 # Secrets sourced by sim/launch-sitl.sh. Never commit — see sim/secrets.env.example
 sim/secrets.env
+
+# NvStreamer ETW traces. Isaac's WebRTC streamer drops these in the CWD and they
+# run to tens of megabytes each.
+NvStreamer-*.etli

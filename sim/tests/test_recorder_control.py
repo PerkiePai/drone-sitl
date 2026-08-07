@@ -221,3 +221,71 @@ def test_can_start_is_false_while_recording():
     s, _, _ = make_session()
     s.start()
     assert not s.status()["can_start"]
+
+
+# --- HTTP layer ------------------------------------------------------------
+
+class FakeQueue:
+    def __init__(self):
+        self.items = []
+
+    def put_nowait(self, item):
+        self.items.append(item)
+
+
+def test_start_request_only_enqueues_and_never_execs():
+    """Design R1, the load-bearing one. The HTTP thread must not exec the
+    recorder: that installs a physics callback and touches USD and replicator,
+    which Kit does not support off the main thread. The handler's whole job is
+    to validate and enqueue."""
+    executed = []
+    s, _, _ = make_session()
+    s._exec = lambda: executed.append(1) or make_ns()
+    q = FakeQueue()
+    code, body = rc.handle_request("POST", "/record/start", s, q)
+    assert code == 202
+    assert q.items == ["start"]
+    assert executed == []               # nothing ran on this thread
+    assert s.state == rc.STATE_IDLE     # still idle until the main thread acts
+
+
+def test_start_request_is_refused_without_enqueueing_when_gated():
+    s, _, _ = make_session(free=10 * GIB)
+    q = FakeQueue()
+    code, body = rc.handle_request("POST", "/record/start", s, q)
+    assert code == 507
+    assert q.items == []
+
+
+def test_stop_request_enqueues():
+    s, _, _ = make_session()
+    q = FakeQueue()
+    code, _ = rc.handle_request("POST", "/record/stop", s, q)
+    assert code == 200
+    assert q.items == ["stop"]
+
+
+def test_status_is_always_200_so_offline_is_distinguishable_from_broken():
+    s, _, _ = make_session()
+    code, body = rc.handle_request("GET", "/record/status", s, FakeQueue())
+    assert code == 200
+    assert body["state"] == rc.STATE_IDLE
+
+
+def test_status_never_enqueues():
+    q = FakeQueue()
+    s, _, _ = make_session()
+    rc.handle_request("GET", "/record/status", s, q)
+    assert q.items == []
+
+
+def test_unknown_path_is_404():
+    s, _, _ = make_session()
+    code, _ = rc.handle_request("GET", "/nope", s, FakeQueue())
+    assert code == 404
+
+
+def test_wrong_method_is_405():
+    s, _, _ = make_session()
+    code, _ = rc.handle_request("GET", "/record/start", s, FakeQueue())
+    assert code == 405

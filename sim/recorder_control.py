@@ -167,3 +167,70 @@ class RecorderSession:
             "can_start": self._why_not_start() is None,
             "error": self.error,
         }
+
+
+# --- HTTP ------------------------------------------------------------------
+#
+# Kept as a pure function of (method, path, session, queue) so it is testable
+# without binding a socket. The BaseHTTPRequestHandler below is a thin shell.
+
+def handle_request(method, path, session, commands):
+    """-> (http_code, body_dict). Runs on the HTTP thread: ENQUEUE ONLY.
+
+    Never touches the recorder. Execing it here would install a physics callback
+    from a worker thread, which Kit does not support (design R1).
+    """
+    if path == "/record/status":
+        if method != "GET":
+            return 405, {"error": "GET only"}
+        return 200, session.status()
+
+    if path in ("/record/start", "/record/stop"):
+        if method != "POST":
+            return 405, {"error": "POST only"}
+        if path == "/record/stop":
+            commands.put_nowait("stop")
+            return 200, {"queued": "stop"}
+        # Gate on the HTTP thread so a refusal is immediate and specific,
+        # rather than queued and silently dropped a frame later.
+        refusal = session._why_not_start()
+        if refusal is not None:
+            code, reason = refusal
+            return code, {"error": reason}
+        commands.put_nowait("start")
+        return 202, {"queued": "start"}
+
+    return 404, {"error": f"unknown path {path}"}
+
+
+def make_handler(session, commands):
+    """BaseHTTPRequestHandler bound to one session/queue pair."""
+    import json
+    from http.server import BaseHTTPRequestHandler
+
+    class Handler(BaseHTTPRequestHandler):
+        def _respond(self, method):
+            code, body = handle_request(method, self.path.split("?")[0],
+                                        session, commands)
+            blob = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(blob)))
+            # The page is served from :8090 and this is :8091, so a browser
+            # calling it directly would be a cross-origin request. Nothing does
+            # today -- the web server proxies -- but allowing it keeps curl and
+            # a future direct call working.
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(blob)
+
+        def do_GET(self):
+            self._respond("GET")
+
+        def do_POST(self):
+            self._respond("POST")
+
+        def log_message(self, fmt, *args):
+            pass                    # a 1 Hz status poll would flood the console
+
+    return Handler

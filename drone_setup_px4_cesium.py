@@ -716,6 +716,21 @@ async def _spawn_px4_keep_stage():
         "vehicle_id": VEHICLE_ID,
         "px4_autolaunch": PX4_AUTOLAUNCH,
         "px4_dir": pg.px4_path,
+        # Explicit on purpose. px4_mavlink_backend.py's own defaults were
+        # changed 2026-08-05 for a HITL setup (real FC over VPN): tcpin->udpin,
+        # localhost->0.0.0.0, lockstep True->False. Local SITL needs the
+        # opposite of all three -- PX4's own px4-rc.simulator runs
+        # `simulator_mavlink start -c <port>`, which connects OUT over TCP, so
+        # Isaac has to be the TCP listener (tcpin) or the two sides never even
+        # share a transport. Without an explicit lockstep=True, PX4 SITL's
+        # simulator_mavlink module spins on "ERROR poll timeout" forever,
+        # because Isaac never blocks the physics step to wait for it. Relying
+        # on the backend's defaults means this file's behavior silently
+        # depends on which config PegasusSimulator happens to ship with --
+        # stating the SITL values here keeps this script correct regardless.
+        "connection_type": "tcpin",
+        "connection_ip": "localhost",
+        "enable_lockstep": True,
     })
     vcfg = MultirotorConfig()
     vcfg.backends = [PX4MavlinkBackend(cfg)]

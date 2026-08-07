@@ -401,6 +401,15 @@ else:
         # grab a frame from EVERY camera on the same data frame (shared ts_ns) so
         # cam0/cam1 are time-synced by construction.
         if fr % st["img_every"] == 0:
+            # Force a synchronous render before reading the annotators. Without this,
+            # get_data() returns whatever is already sitting in the buffer from the
+            # separate, slower render/app-update loop -> image content can be stale
+            # relative to `now` (observed: frame stamped ts=1.00s held pixels from
+            # ~0.95s, i.e. lagging by ~1 render period). NEEDS IN-SIM VERIFICATION:
+            # calling orchestrator.step() from inside a physics callback may be
+            # reentrant-unsafe on some Isaac Sim builds (double physics step / hang)
+            # -- watch the first run closely (frame timing prints, no stalls).
+            rep.orchestrator.step(rt_subframes=1, pause_timeline=False)
             # grab ALL cameras first, then enqueue atomically: either every camera's
             # frame for this data frame is kept, or none is. Prevents the per-camera
             # bias (cam0 enqueued first, so under queue pressure cam1 lost the race ->

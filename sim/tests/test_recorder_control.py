@@ -289,3 +289,41 @@ def test_wrong_method_is_405():
     s, _, _ = make_session()
     code, _ = rc.handle_request("GET", "/record/start", s, FakeQueue())
     assert code == 405
+
+
+def test_the_socket_shell_serves_status_and_start_over_real_http():
+    """handle_request is pure, but make_handler is what Kit actually binds, and
+    everything in it -- method dispatch, the JSON body, Content-Length -- is
+    otherwise first exercised inside Isaac where a mistake costs a launch."""
+    import json
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    s, _, _ = make_session()
+    commands = FakeQueue()
+    srv = ThreadingHTTPServer(("127.0.0.1", 0),
+                              rc.make_handler(s, commands))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/record/status", timeout=5) as r:
+            assert r.status == 200
+            body = json.loads(r.read())
+        assert body["state"] == rc.STATE_IDLE
+        assert "free_bytes" in body and "can_start" in body
+
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/record/start", method="POST", data=b"")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert r.status == 202
+        assert commands.items == ["start"]
+
+        # A query string must not defeat the route match.
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/record/status?t=1", timeout=5) as r:
+            assert r.status == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()

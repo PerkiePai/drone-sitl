@@ -147,6 +147,19 @@ def _check_georeference(site):
     return ok
 
 
+def _start_recorder_control():
+    """Serve the RECORD button's control endpoints from inside Kit.
+
+    The recorder needs Pegasus sensor callbacks and the replicator annotators,
+    which exist only in this process -- the web server, in the `drone` conda
+    env, cannot reach them. See
+    docs/superpowers/specs/2026-08-07-web-recorder-design.md
+    """
+    import recorder_control
+
+    recorder_control.start_control_server()
+
+
 async def _bring_up():
     if not SITE_NAME or not SETUP_SCRIPT:
         _banner("SITL_SITE / SITL_SETUP_SCRIPT not set.",
@@ -198,6 +211,11 @@ async def _bring_up():
     _advisory("up-axis check",
               lambda: stage_builder.assert_z_up("after drone_setup_px4_cesium.py"))
     _advisory("georeference check", lambda: _check_georeference(site))
+
+    # Before Play on purpose: the operator reaches for the RECORD button as soon
+    # as the page comes alive, and PX4 takes a while to appear after Play. The
+    # server should already be answering by then.
+    _advisory("recorder control server", _start_recorder_control)
 
     if AUTOPLAY:
         omni.timeline.get_timeline_interface().play()

@@ -14,7 +14,9 @@ dynamically, so post-exec mutation works.
 Design: docs/superpowers/specs/2026-08-07-web-recorder-design.md
 """
 import os
+import queue
 import shutil
+import threading
 import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -31,6 +33,13 @@ STATE_ERROR = "error"
 # through corrupts its own dataset and destabilises the sim and PX4 with it.
 MIN_FREE_BYTES = 50 * 1024 ** 3     # refuse to start below this
 WARN_FREE_BYTES = 100 * 1024 ** 3   # amber on the page below this
+
+DEFAULT_PORT = int(os.environ.get("SITL_RECORDER_PORT", "8091"))
+
+# How long the shutdown thread waits for the image writers to drain before
+# closing the CSVs out from under them. Generous: the queue holds up to
+# 256 frames per camera (vio-recorder-pai.py:307).
+DRAIN_TIMEOUT_S = 20.0
 
 # What TAKEOFF_ALT_M becomes once the button is the trigger (design R5). NOT
 # 0.0: the recorder waits while `climbed < TAKEOFF_ALT_M` where climbed is
@@ -234,3 +243,177 @@ def make_handler(session, commands):
             pass                    # a 1 Hz status poll would flood the console
 
     return Handler
+
+
+# --- Kit bindings ----------------------------------------------------------
+#
+# Everything below runs only inside Isaac. omni.* is imported lazily so the
+# state machine and the HTTP layer above stay importable under pytest.
+
+def _exec_recorder():
+    """Run vio-recorder-pai.py and hand back its namespace.
+
+    Exactly how sim/bootstrap.py:90-98 runs the setup script -- the recorder
+    stays the same file you would paste into the Script Editor (design R4). It
+    cleans up a previous run of itself at :159-169, so re-exec is a safe
+    restart.
+    """
+    with open(RECORDER_PATH, encoding="utf-8") as f:
+        source = f.read()
+    ns = {"__name__": "__main__", "__file__": RECORDER_PATH}
+    print(f">>> recorder: exec {RECORDER_PATH}")
+    exec(compile(source, RECORDER_PATH, "exec"), ns)
+    return ns
+
+
+def _stop_recorder(ns):
+    """The stop sequence the recorder documents at vio-recorder-pai.py:460-461.
+
+    Every step gets its own try. A half-stopped recorder MUST still release the
+    physics callback: leave `vio_rec` installed and the next start collides with
+    a live callback, which shows up as a corrupt dataset rather than as a stop
+    bug.
+
+    Two departures from the one-line version in that print:
+
+    - The callback is removed FIRST, so no further frames are enqueued while we
+      are trying to drain.
+    - The files are closed on a short-lived thread once the image queue has
+      drained, not immediately. The writer threads hold the frames.csv handles
+      (:299-330) and swallow their own exceptions (:326), so closing under them
+      silently drops the CSV rows for images that are already on disk -- a
+      dataset whose frames.csv disagrees with images/cam0. Waiting on the main
+      thread instead would stall Kit for as long as the queue is deep.
+    """
+    rec = (ns or {}).get("_VIO_REC") or {}
+
+    try:
+        world = ns.get("world")
+        if world is not None:
+            world.remove_physics_callback(rec.get("cb", "vio_rec"))
+    except Exception as exc:
+        print(f"*** recorder: remove_physics_callback failed: {exc}")
+
+    q = rec.get("q")
+    try:
+        if q is not None:
+            q.put_nowait(None)          # writer threads exit on the sentinel
+    except Exception as exc:
+        print(f"*** recorder: could not post the writer sentinel: {exc}")
+
+    files = list(rec.get("files") or [])
+    run_dir = rec.get("dir")
+
+    def _close_when_drained():
+        deadline = time.monotonic() + DRAIN_TIMEOUT_S
+        while q is not None and time.monotonic() < deadline:
+            try:
+                if q.qsize() <= 1:      # only our own sentinel left
+                    break
+            except Exception:
+                break
+            time.sleep(0.1)
+        for fh in files:
+            try:
+                fh.flush()
+                fh.close()
+            except Exception:
+                pass
+        print(f">>> recorder: stopped, dataset closed: {run_dir}")
+
+    threading.Thread(target=_close_when_drained, daemon=True,
+                     name="recorder-close").start()
+
+
+def _is_playing():
+    import omni.timeline
+    return bool(omni.timeline.get_timeline_interface().is_playing())
+
+
+class RecorderControl:
+    """The Kit side: HTTP server on a daemon thread, commands drained on the
+    main thread from Kit's update event stream."""
+
+    def __init__(self, port=None, dataset_root=DATASET_ROOT):
+        self.port = DEFAULT_PORT if port is None else port
+        self.commands = queue.Queue()
+        self.session = RecorderSession(
+            dataset_root=dataset_root,
+            exec_recorder=_exec_recorder,
+            stop_recorder=_stop_recorder,
+            is_playing=_is_playing)
+        self._server = None
+        self._thread = None
+        self._sub = None
+
+    def start(self):
+        import omni.kit.app
+        from http.server import ThreadingHTTPServer
+
+        self._server = ThreadingHTTPServer(
+            ("0.0.0.0", self.port), make_handler(self.session, self.commands))
+        self._thread = threading.Thread(target=self._server.serve_forever,
+                                        daemon=True, name="recorder-http")
+        self._thread.start()
+
+        # The other half of design R1: the HTTP thread only ever enqueues, and
+        # the work happens here, on the main thread, where touching USD,
+        # replicator and physics callbacks is legal.
+        self._sub = (omni.kit.app.get_app().get_update_event_stream()
+                     .create_subscription_to_pop(self._on_update,
+                                                 name="recorder_control"))
+        print(f">>> recorder control server on :{self.port} "
+              f"(POST /record/start, /record/stop; GET /record/status)")
+        return self
+
+    def _on_update(self, _event):
+        while True:
+            try:
+                cmd = self.commands.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                if cmd == "start":
+                    ok, code, reason = self.session.start()
+                else:
+                    ok, code, reason = self.session.stop()
+                print(f">>> recorder: {cmd} -> {code} {reason}")
+            except Exception as exc:
+                # An exception here would otherwise kill the subscription and
+                # take the whole control server down with it, silently.
+                self.session.state = STATE_ERROR
+                self.session.error = f"{cmd} failed: {exc.__class__.__name__}: {exc}"
+                print(f"*** recorder: {self.session.error}")
+                import traceback
+                traceback.print_exc()
+
+    def shutdown(self):
+        for label, fn in (("subscription", lambda: self._sub.unsubscribe()),
+                          ("http server", lambda: self._server.shutdown()),
+                          ("socket", lambda: self._server.server_close())):
+            try:
+                fn()
+            except Exception as exc:
+                print(f"*** recorder: {label} shutdown failed: {exc}")
+        self._sub = None
+        self._server = None
+
+
+_CONTROL = None         # the live server, so a re-run can replace it
+
+
+def start_control_server(port=None):
+    """Entry point for sim/bootstrap.py. Safe to call twice.
+
+    Kit survives a re-exec of the bootstrap script, so without this the second
+    launch on a warm app finds :8091 already bound and the control server never
+    comes up -- the same guard the recorder keeps for its own callback
+    (vio-recorder-pai.py:159-169).
+    """
+    global _CONTROL
+    if _CONTROL is not None:
+        print(">>> recorder control server already running -- restarting it")
+        _CONTROL.shutdown()
+        _CONTROL = None
+    _CONTROL = RecorderControl(port).start()
+    return _CONTROL

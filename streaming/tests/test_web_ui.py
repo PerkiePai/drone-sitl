@@ -217,6 +217,43 @@ def test_a_record_press_with_no_isaac_reports_a_reason_and_keeps_flying(server):
     asyncio.run(exercise())
 
 
+def _fetch(path):
+    import urllib.request
+    with urllib.request.urlopen(f"http://127.0.0.1:{WEB_PORT}{path}") as r:
+        return r.status, r.read().decode()
+
+
+def test_the_record_button_and_its_module_are_actually_served(server):
+    """ES modules fail as a chain: if /js/recorder.js 404s, main.js never
+    finishes importing and NOTHING on the page updates -- telemetry, map and
+    d-pad included. A missing file is silent in the browser and fatal here."""
+    status, html = _fetch("/")
+    assert status == 200
+    assert 'id="c-record"' in html
+    assert 'id="rec-stat"' in html
+
+    status, recorder_js = _fetch("/js/recorder.js")
+    assert status == 200
+    assert "paintRecorder" in recorder_js
+
+    _, main_js = _fetch("/js/main.js")
+    assert "recorder.js" in main_js and "paintRecorder(t)" in main_js
+
+
+def test_every_element_recorder_js_paints_exists_on_the_page(server):
+    """A typo'd id makes el(...) return null, and the TypeError kills the whole
+    telemetry paint on every frame -- the map and the flight readouts freeze
+    because of a mistake in the recorder row."""
+    import re
+
+    _, recorder_js = _fetch("/js/recorder.js")
+    _, html = _fetch("/")
+    ids = set(re.findall(r"el\('([\w-]+)'\)", recorder_js))
+    assert ids, "no el('...') lookups found; did the module change shape?"
+    missing = [i for i in ids if f'id="{i}"' not in html]
+    assert not missing, f"recorder.js paints ids that index.html lacks: {missing}"
+
+
 def test_releasing_a_direction_does_not_pause(server):
     """Only pressed=True pauses. If releases paused too, the mission would
     re-pause forever and RESUME could never take."""

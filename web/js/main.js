@@ -5,6 +5,7 @@ import { setStatus, paint as paintTelemetry, sendCmd, clearPending } from './tel
 import { paintDrone } from './map.js';
 import { updateMission, syncAltDefault, setMissionSpeed } from './route.js';
 import { resetHeld } from './controls.js';
+import { paintRecorder } from './recorder.js';
 
 // The video comes from the Isaac MJPEG server on a different port, so derive
 // the host from the page rather than hard-coding an IP -- this has to work
@@ -26,6 +27,7 @@ connect({
     syncAltDefault(t);
     paintDrone(t);
     updateMission(t);
+    paintRecorder(t);
   },
   onClose: () => {
     resetHeld();

@@ -1,5 +1,13 @@
 # Implementation plan: streaming VIO pipeline → PX4/QGC
 
+> **SUPERSEDED (2026-08-07)** by `2026-08-07-vio-gps-denied.md`.
+>
+> The goal is unchanged; the integration surface is not. This plan predates the
+> web UI, `sim/`-driven launch and `sim/sites.py`, so its MAVLink port collides
+> with `joystick-server.py`'s bind on 14540, and its QGC parameter-editor and
+> Script-Editor procedures no longer apply. Retained for the design rationale in
+> Tasks 1–4, which the new plan reuses.
+
 ## Goal
 
 Build a live-streaming counterpart to `pipeline.py`'s flow-odom layer that

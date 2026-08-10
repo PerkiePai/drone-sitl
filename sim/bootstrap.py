@@ -18,6 +18,7 @@
 #   CESIUM_ION_TOKEN           Cesium ion access token (required)
 #   SITL_TILE_SETTLE_FRAMES    frames to let Cesium stream tiles (240)
 #   SITL_AUTOPLAY              "0" leaves the sim stopped after spawning
+#   SITL_VIO_STREAM            "1" also starts vio-streamer.py (GPS-denied VIO)
 #
 # Nothing here is fatal: on error it prints a banner and leaves the app up, so
 # you can still attach the WebRTC stream and inspect the stage by hand.
@@ -39,6 +40,13 @@ SETUP_SCRIPT  = os.environ.get("SITL_SETUP_SCRIPT", "")
 ION_TOKEN     = os.environ.get("CESIUM_ION_TOKEN", "")
 SETTLE_FRAMES = int(os.environ.get("SITL_TILE_SETTLE_FRAMES", "240"))
 AUTOPLAY      = os.environ.get("SITL_AUTOPLAY", "1") != "0"
+VIO_STREAM    = os.environ.get("SITL_VIO_STREAM", "0") == "1"
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VIO_STREAMER_PATH = os.path.join(REPO_ROOT, "vio-streamer.py")
+
+SETUP_NS = None
+"""The setup script's exec namespace, kept by _run_setup_script."""
 
 # Extensions the builder and setup script import from. They live outside the
 # Isaac install, so the launcher adds them with --ext-folder/--enable and we
@@ -97,6 +105,12 @@ async def _run_setup_script(site):
     print(f">>> Running setup script: {SETUP_SCRIPT}")
     exec(compile(source, SETUP_SCRIPT, "exec"), ns)
     spawned = set(asyncio.all_tasks(loop)) - before
+
+    # Kept so later steps can read the tunables the script actually ran with
+    # (DOWN_VIB_DAMP, DOWN_IMG_ROLL_DEG) rather than re-deriving them from the
+    # environment and hoping the two agree.
+    global SETUP_NS
+    SETUP_NS = ns
 
     if spawned:
         await asyncio.gather(*spawned)
@@ -158,6 +172,27 @@ def _start_recorder_control():
     import recorder_control
 
     recorder_control.start_control_server()
+
+
+def _start_vio_streamer():
+    """Exec vio-streamer.py in-process so GPS-denied VIO needs no Script Editor.
+
+    Same idiom as _run_setup_script: the file stays exactly what you would
+    paste into the Script Editor, and its name has a hyphen so it cannot be
+    imported anyway.
+
+    OFF by default. It publishes at the IMU rate and JPEG-encodes at the frame
+    rate from inside the physics callback, and PX4 SITL is lockstepped to that
+    callback -- so it is not something to impose on ordinary GPS flights. It
+    also has to start AFTER Play, because it reads the vehicle's live state and
+    registers a physics callback.
+    """
+    with open(VIO_STREAMER_PATH, encoding="utf-8") as f:
+        source = f.read()
+    ns = {"__name__": "vio_streamer", "__file__": VIO_STREAMER_PATH,
+          "_DRONE_SETUP_NS": SETUP_NS or {}}
+    exec(compile(source, VIO_STREAMER_PATH, "exec"), ns)
+    globals()["_VIO_STREAMER_NS"] = ns
 
 
 async def _bring_up():
@@ -224,6 +259,16 @@ async def _bring_up():
         print("    callback did not fire and the vehicle is not simulating.")
     else:
         print(">>> SITL_AUTOPLAY=0 -- sim left stopped. Press Play when ready.")
+
+    # After Play on purpose: the streamer reads the vehicle's live state and
+    # registers a physics callback, neither of which means anything until the
+    # timeline is running and Pegasus has brought the vehicle up.
+    if VIO_STREAM:
+        await _frames(60)
+        _advisory("vio streamer", _start_vio_streamer)
+    else:
+        print(">>> SITL_VIO_STREAM unset -- vio-streamer.py not started "
+              "(set SITL_VIO_STREAM=1 for GPS-denied VIO).")
 
 
 async def _guarded():

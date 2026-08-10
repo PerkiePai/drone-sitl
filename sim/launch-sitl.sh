@@ -26,6 +26,14 @@
 #   SPAWN_XYZ='[12.0, -4.0, -26.5]' ./sim/launch-sitl.sh # takeoff point (ABSOLUTE z)
 #   HEADING_DEG=90 ./sim/launch-sitl.sh                  # compass heading
 #   AUTOPLAY=0 ./sim/launch-sitl.sh                      # spawn but stay stopped
+#   VIO=1 ./sim/launch-sitl.sh                           # also start vio-streamer.py
+#
+# VIO=1 publishes IMU/baro/camera over ZMQ:5556 for GPS-denied flight. It is off
+# by default because it works from inside the physics callback that PX4 SITL is
+# lockstepped to, which is not a cost to put on ordinary GPS flights. Pair it
+# with DRONE_SETUP_DOWN_VIB_DAMP=False: the soft camera mount low-passes the
+# body attitude, making the camera<->IMU extrinsic time-varying and the rig
+# invalid for VIO.
 #
 # SPAWN_XYZ's z is absolute, so an override has to account for the ground plane
 # (ground_z = -26.99 at this site). Prefer editing spawn_agl_m in sim/sites.py,
@@ -82,6 +90,7 @@ export SITL_SITE="$SITE"
 export SITL_SETUP_SCRIPT="$SETUP_SCRIPT"
 export SITL_AUTOPLAY="${AUTOPLAY:-1}"
 export SITL_TILE_SETTLE_FRAMES="${TILE_SETTLE_FRAMES:-240}"
+export SITL_VIO_STREAM="${VIO:-0}"
 
 # --- consumed by drone_setup_px4_cesium.py's env-override block -------------
 # Only exported when the operator actually set them; otherwise the site config

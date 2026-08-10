@@ -109,9 +109,12 @@ else:
     site_name = os.environ.get("SITL_SITE", "")
     site = sites.get_site(site_name) if site_name else None
     if site is None:
-        print("*** SITL_SITE is not set -- cannot publish an origin. Launch "
-              "through sim/launch-sitl.sh. ***")
-        raise SystemExit
+        # RuntimeError, not SystemExit: bootstrap.py runs this through
+        # _advisory(), which catches Exception -- and SystemExit is not one, so
+        # it would take the whole bring-up down instead of being reported.
+        raise RuntimeError(
+            "SITL_SITE is not set -- vio-streamer cannot publish an origin. "
+            "Launch through sim/launch-sitl.sh.")
 
     # --- vibration mount: must be RIGID for the extrinsic to be constant ----
     setup_ns = globals().get("_DRONE_SETUP_NS") or {}

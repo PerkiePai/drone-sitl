@@ -39,6 +39,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from scipy.spatial.transform import Rotation
 
 DEFAULT_DIR = "/home/innovation/pai/drone-vio/_in/isaac-sim-20260623"
 
@@ -112,6 +113,88 @@ def load_dataset(d):
     return K, R_CtoI, recs
 
 
+class MahonyState:
+    """Mahony complementary filter carried one IMU tick at a time.
+
+    Holds the rotation that compute_ahrs_attitude's loop kept in a local. The
+    internal frame is FRD->ENU, matching that loop; callers wanting the
+    FLU->ENU convention used by load_dataset and run() call R_flu().
+
+    Extracted so the streaming estimator and the batch pipeline run the SAME
+    filter -- test_mahony_state.py pins the behaviour, and
+    test_ahrs_regression.py pins that the batch output did not move.
+    """
+
+    FLIP = np.diag([1.0, -1.0, -1.0])     # FLU<->FRD, self-inverse
+    G_UP = np.array([0.0, 0.0, 9.81])     # specific force at rest points UP in ENU
+
+    def __init__(self, R0_frd, Kp=1.0, mag_gain=0.0, mag_noise_deg=0.0, rng=None):
+        self.R = np.asarray(R0_frd, dtype=float).copy()
+        self.Kp = Kp
+        self.mag_gain = mag_gain
+        self.mag_noise_deg = mag_noise_deg
+        self.rng = rng if rng is not None else np.random.default_rng(0)
+        self.m_world = None
+
+    @classmethod
+    def from_flu(cls, R0_flu, **kw):
+        """Seed from an FLU->ENU rotation (what load_dataset stores as R_wb)."""
+        return cls(np.asarray(R0_flu, dtype=float) @ cls.FLIP, **kw)
+
+    @classmethod
+    def from_heading(cls, heading_deg, **kw):
+        """Seed level, at a compass heading. The LIVE cold start.
+
+        The batch filter initialises from GT frame 0 (flow_odometry.py:144),
+        which streaming does not have. np.eye(3) is not a usable substitute: as
+        an FRD->ENU rotation it means "body upside down", which is a singularity
+        for the gravity correction -- the predicted and measured gravity
+        directions come out antiparallel, their cross product vanishes, and the
+        filter can never level itself.
+
+        Compass is 0=N and clockwise; ENU yaw is 0=E and counter-clockwise.
+        """
+        yaw = np.radians(90.0 - heading_deg)
+        return cls.from_flu(Rotation.from_euler("z", yaw).as_matrix(), **kw)
+
+    def calibrate_mag(self, m_body0):
+        """One-time factory-compass calibration: fix the world magnetic vector
+        from the current attitude and a body reading."""
+        n = np.linalg.norm(m_body0)
+        if n > 1e-9:
+            self.m_world = self.R @ (np.asarray(m_body0, dtype=float) / n)
+
+    def update(self, gyro, acc, dt, mag=None):
+        """One IMU tick. Returns the updated FRD->ENU rotation."""
+        if dt <= 0 or dt > 0.1:
+            dt = 0.004                      # matches flow_odometry.py:164-165
+        w = np.asarray(gyro, dtype=float).copy()
+        a = np.asarray(acc, dtype=float)
+        an = np.linalg.norm(a)
+        v_pred = None
+        if an > 1e-3:                       # tilt correction toward gravity
+            v_meas = a / an
+            v_pred = self.R.T @ self.G_UP
+            v_pred /= np.linalg.norm(v_pred)
+            w = w + self.Kp * np.cross(v_meas, v_pred)
+        if self.m_world is not None and mag is not None and self.mag_gain > 0.0:
+            mn = np.linalg.norm(mag)
+            if mn > 1e-6:
+                m_meas = np.asarray(mag, dtype=float) / mn
+                if self.mag_noise_deg > 0.0 and v_pred is not None:
+                    ang = np.radians(self.mag_noise_deg) * self.rng.standard_normal()
+                    m_meas = Rotation.from_rotvec(v_pred * ang).apply(m_meas)
+                m_pred = self.R.T @ self.m_world
+                m_pred /= np.linalg.norm(m_pred)
+                w = w + self.mag_gain * np.cross(m_meas, m_pred)
+        self.R = self.R @ Rotation.from_rotvec(w * dt).as_matrix()
+        return self.R
+
+    def R_flu(self):
+        """FLU->ENU, the convention load_dataset and run() expect."""
+        return self.R @ self.FLIP
+
+
 def compute_ahrs_attitude(d, recs, Kp=1.0, mag_gain=0.0, mag_noise_deg=0.0):
     """Per-frame body attitude from the IMU ALONE (deployment-realistic; no GT).
     Mahony complementary filter integrated at the IMU rate in the FRD body frame:
@@ -140,18 +223,17 @@ def compute_ahrs_attitude(d, recs, Kp=1.0, mag_gain=0.0, mag_noise_deg=0.0):
     mag = (np.array([[float(r["mx"]), float(r["my"]), float(r["mz"])] for r in rows])
            if has_mag else None)
 
-    flip = np.diag([1.0, -1.0, -1.0])      # FLU<->FRD (self-inverse)
-    R0 = recs[0]["R_wb"] @ flip             # init FRD->ENU from GT frame 0
-    R = R0.copy()
-    g_up = np.array([0.0, 0.0, 9.81])      # specific-force-at-rest points UP in ENU
     rec_ts = [r["ts"] / 1e9 for r in recs]
     rng = np.random.default_rng(0)
 
-    m_world = None
+    # The per-tick filter itself lives in MahonyState so the streaming
+    # estimator runs exactly this code -- see test_ahrs_regression.py, which
+    # pins that this refactor did not move the batch output.
+    state = MahonyState.from_flu(recs[0]["R_wb"], Kp=Kp, mag_gain=mag_gain,
+                                 mag_noise_deg=mag_noise_deg, rng=rng)
     if has_mag and mag_gain > 0.0:
         i0 = int(np.clip(np.searchsorted(ts, rec_ts[0]), 0, len(ts) - 1))
-        m_body0 = mag[max(0, i0 - 25):i0 + 25].mean(axis=0)
-        m_world = R0 @ (m_body0 / np.linalg.norm(m_body0))   # one-time calibration from GT
+        state.calibrate_mag(mag[max(0, i0 - 25):i0 + 25].mean(axis=0))
 
     gt_yaw = None
     if mag_gain > 0.0 and not has_mag:      # legacy stand-in only when there's no real mag channel
@@ -160,36 +242,19 @@ def compute_ahrs_attitude(d, recs, Kp=1.0, mag_gain=0.0, mag_noise_deg=0.0):
     out = [recs[0]["R_wb"]]                 # frame 0 = GT init
     ri = 1
     for k in range(1, len(rows)):
-        dt = ts[k] - ts[k - 1]
-        if dt <= 0 or dt > 0.1:
-            dt = 0.004
-        w = gyro[k].copy()
-        a = acc[k]; an = np.linalg.norm(a)
-        v_pred = None
-        if an > 1e-3:                       # tilt correction from gravity direction
-            v_meas = a / an
-            v_pred = R.T @ g_up; v_pred /= np.linalg.norm(v_pred)
-            w = w + Kp * np.cross(v_meas, v_pred)
-        if m_world is not None:             # continuous magnetometer yaw correction
-            mn = np.linalg.norm(mag[k])
-            if mn > 1e-6:
-                m_meas = mag[k] / mn
-                if mag_noise_deg > 0.0 and v_pred is not None:
-                    ang = np.radians(mag_noise_deg) * rng.standard_normal()
-                    m_meas = Rot.from_rotvec(v_pred * ang).apply(m_meas)
-                m_pred = R.T @ m_world; m_pred /= np.linalg.norm(m_pred)
-                w = w + mag_gain * np.cross(m_meas, m_pred)
-        R = R @ Rot.from_rotvec(w * dt).as_matrix()
+        state.update(gyro[k], acc[k], ts[k] - ts[k - 1],
+                     mag=mag[k] if mag is not None else None)
         while ri < len(recs) and ts[k] >= rec_ts[ri]:
             if gt_yaw is not None:          # legacy GT-yaw stand-in (no real mag channel)
-                yaw = np.arctan2(R[1, 0], R[0, 0])
+                yaw = np.arctan2(state.R[1, 0], state.R[0, 0])
                 meas = gt_yaw[ri] + np.radians(mag_noise_deg) * rng.standard_normal()
                 dpsi = np.arctan2(np.sin(meas - yaw), np.cos(meas - yaw))
-                R = Rot.from_rotvec([0, 0, mag_gain * dpsi]).as_matrix() @ R   # about world up
-            out.append(R @ flip)           # back to FLU->ENU for load_dataset parity
+                state.R = Rot.from_rotvec(
+                    [0, 0, mag_gain * dpsi]).as_matrix() @ state.R   # about world up
+            out.append(state.R_flu())      # back to FLU->ENU for load_dataset parity
             ri += 1
     while len(out) < len(recs):
-        out.append(R @ flip)
+        out.append(state.R_flu())
     return out
 
 

@@ -30,7 +30,90 @@ from pymavlink import mavutil
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, "streaming"))
 import offboard  # noqa: E402
+import vision_bridge  # noqa: E402
 import waypoints  # noqa: E402
+
+PX4_RESTART_GAP_S = 3.0
+"""Heartbeat silence that means PX4 restarted rather than merely lagged.
+
+PX4 heartbeats at 1 Hz, so three missed beats is unambiguous. A restarted PX4
+has forgotten the GPS origin, and with GNSS off nothing else will ever set it
+again -- the map marker and every GLOBAL_RELATIVE_ALT setpoint just silently
+stop working. Re-arming the param send on a gap is what makes recovery
+automatic instead of a puzzling half-dead session.
+"""
+
+
+class VisionSubscriber(threading.Thread):
+    """Receives `vio` estimates over ZMQ into a lock-guarded slot.
+
+    Deliberately NOT given the MAVLink connection. offboard.py:196-198 makes
+    the setpoint thread the sole owner of `conn`, and the cheapest way to keep
+    that true is for this thread to have no way to reach it -- it holds a pose
+    and a timestamp, and the setpoint thread comes and takes them.
+    """
+
+    def __init__(self, endpoint, topic=None):
+        super().__init__(daemon=True)
+        self.endpoint = endpoint
+        self.topic = topic
+        self._lock = threading.Lock()
+        self._pose = None
+        self._received_at = None
+        self._last_msg = None
+        self._stop = threading.Event()
+        self.received = 0
+
+    def _store(self, pose, received_at, msg=None):
+        with self._lock:
+            self._pose = pose
+            self._received_at = received_at
+            self._last_msg = msg
+            self.received += 1
+
+    def latest(self):
+        """(VisionPose|None, monotonic time it arrived|None). Any thread."""
+        with self._lock:
+            return self._pose, self._received_at
+
+    def close(self):
+        self._stop.set()
+
+    def run(self):
+        import zmq
+        import zmq_proto
+
+        ctx = zmq.Context.instance()
+        sock = ctx.socket(zmq.SUB)
+        # Small receive queue: a backlog here would hand the setpoint thread a
+        # pose from seconds ago, and VisionPositionSender would then drop it as
+        # stale anyway. Better never to queue it.
+        sock.setsockopt(zmq.RCVHWM, 10)
+        sock.setsockopt(zmq.RCVTIMEO, 250)
+        sock.connect(self.endpoint)
+        sock.subscribe(self.topic if self.topic is not None
+                       else zmq_proto.TOPIC_VIO)
+        print(f">>> vision SUB {self.endpoint}")
+        try:
+            while not self._stop.is_set():
+                try:
+                    parts = sock.recv_multipart()
+                except zmq.Again:
+                    continue
+                except Exception:
+                    break
+                try:
+                    _, msg = zmq_proto.unpack(parts)
+                    pose = vision_bridge.VisionPose(
+                        ts_ns=int(msg["ts_ns"]),
+                        x=float(msg["x"]), y=float(msg["y"]), z=float(msg["z"]),
+                        roll=float(msg["roll"]), pitch=float(msg["pitch"]),
+                        yaw=float(msg["yaw"]))
+                except (KeyError, TypeError, ValueError):
+                    continue        # a malformed estimate is not worth flying on
+                self._store(pose, time.monotonic(), msg)
+        finally:
+            sock.close(linger=0)
 
 
 class SetpointLoop(threading.Thread):
@@ -49,11 +132,20 @@ class SetpointLoop(threading.Thread):
                         "mission_clear": "clear"}
 
     def __init__(self, conn, state, rate_hz=20.0, takeoff_alt=5.0, warmup_s=1.0,
-                 mission_speed=3.0, arrival_radius=2.0):
+                 mission_speed=3.0, arrival_radius=2.0,
+                 vision=None, vision_origin=None):
         super().__init__(daemon=True)
         self.conn = conn
         self.state = state
         self.link = offboard.OffboardLink(conn)
+        # Vision is opt-in end to end: no source means no EKF2 param changes,
+        # no origin, and no VPE stream. Disabling GNSS fusion is never a
+        # side effect of starting the server.
+        self.vision = vision
+        self.vision_origin = vision_origin
+        self.vision_sender = (vision_bridge.VisionPositionSender(conn)
+                              if vision is not None else None)
+        self._last_heartbeat = None
         self.mission = waypoints.Mission(arrival_radius)
         self.dt = 1.0 / rate_hz
         self.takeoff_alt = takeoff_alt
@@ -92,6 +184,9 @@ class SetpointLoop(threading.Thread):
             "sim_rate": 0.0,
             "ready_for_offboard": False,
             "streaming_s": 0.0,
+            # None when the server was started without --vision, so the page
+            # can hide the row entirely rather than render a dead one.
+            "vio": None,
         }
         self._stream_start = None
         self._params_sent = False
@@ -162,10 +257,77 @@ class SetpointLoop(threading.Thread):
         # six times faster than anything the operator has seen it do.
         self.link.set_param("MPC_XY_VEL_MAX", self.mission_speed,
                             offboard.MAV_PARAM_TYPE_REAL32)
+        if self.vision is not None:
+            # Order matters and is asserted by
+            # test_gps_origin_is_sent_before_the_first_vision_estimate: PX4
+            # cannot place a local estimate without an anchor, and VPE carries
+            # no lat/lon of its own.
+            vision_bridge.apply_ekf2_vision_params(self.link)
+            if self.vision_origin is not None:
+                vision_bridge.send_gps_global_origin(self.link,
+                                                     *self.vision_origin)
+                print(f">>> vision: EKF2 param set applied, GPS origin "
+                      f"{self.vision_origin}")
+            else:
+                print("*** vision: NO ORIGIN configured. GLOBAL_POSITION_INT, "
+                      "waypoint flight and the FLY gate will all fail "
+                      "silently. ***")
+            for name in vision_bridge.HGT_REF_NEEDS_REBOOT:
+                print(f"*** {name} is @reboot_required: PX4 now STORES the new "
+                      f"value (QGC will show it) but keeps its old height "
+                      f"reference until it restarts. Set it before PX4 boots, "
+                      f"or reboot the flight controller once. ***")
         self._params_sent = True
         print(f">>> params: COM_RCL_EXCEPT=4 (offboard exempt from RC-loss "
               f"failsafe), MIS_TAKEOFF_ALT={self.takeoff_alt}, "
               f"MPC_XY_VEL_MAX={self.mission_speed}")
+
+    def _check_px4_restart(self, now):
+        """Re-arm the param send if PX4 has gone quiet long enough to have
+        rebooted. Setpoint thread only."""
+        if not self._params_sent or self._last_heartbeat is None:
+            return
+        if now - self._last_heartbeat > PX4_RESTART_GAP_S:
+            self._params_sent = False
+            self._last_heartbeat = None
+            print(">>> PX4 heartbeat gap -- assuming a restart; params and "
+                  "GPS origin will be re-sent on the next heartbeat.")
+
+    def _send_vision(self, now):
+        """Forward the latest estimate. Setpoint thread only.
+
+        Never raises into run(): a vision problem must not be able to gap the
+        setpoint stream, because that gap is what drops PX4 out of OFFBOARD.
+        """
+        if self.vision_sender is None:
+            return False
+        pose, received_at = self.vision.latest()
+        return self.vision_sender.send(pose, now, received_at)
+
+    def _vio_status(self, now):
+        """The `vio` telemetry block, or None when vision is not configured.
+
+        `fresh` is the one the operator has to be able to trust: false means
+        the aircraft is flying on dead reckoning, which the page renders as
+        `bad` rather than as a quiet absence.
+        """
+        if self.vision_sender is None:
+            return None
+        _, received_at = self.vision.latest()
+        age = None if received_at is None else (now - received_at)
+        last = getattr(self.vision, "_last_msg", None) or {}
+        return {
+            "fresh": bool(age is not None
+                          and age <= self.vision_sender.max_age_s),
+            "age_s": age,
+            "n_inliers": last.get("n_inliers"),
+            # None, never 0.0 -- no GT topic is not zero drift.
+            "drift_m": last.get("drift_m"),
+            "fps": last.get("fps"),
+            "sent": self.vision_sender.sent,
+            "dropped_stale": self.vision_sender.dropped_stale,
+            "received": getattr(self.vision, "received", 0),
+        }
 
     def _drain_mavlink(self):
         while True:
@@ -175,6 +337,7 @@ class SetpointLoop(threading.Thread):
             kind = msg.get_type()
             if kind == "HEARTBEAT":
                 self.link.bind_target(msg)
+                self._last_heartbeat = time.monotonic()
                 armed = bool(msg.base_mode & offboard.MAV_MODE_FLAG_SAFETY_ARMED)
                 mode = offboard.decode_px4_mode(msg.custom_mode)
                 with self._telem_lock:
@@ -229,16 +392,28 @@ class SetpointLoop(threading.Thread):
                 vx, vy, vz, yaw_rate = self.state.command()
                 self.link.send_velocity(vx, vy, vz, yaw_rate)
 
+            # AFTER the setpoint, never before and never instead: the setpoint
+            # stream is what holds OFFBOARD, so vision rides along with it and
+            # can never displace it.
+            now_mono = time.monotonic()
+            try:
+                self._send_vision(now_mono)
+            except Exception as exc:
+                print(f"*** vision send failed (setpoints continue): {exc!r} ***")
+            self._check_px4_restart(now_mono)
+
             if self._stream_start is None:
                 self._stream_start = time.monotonic()
             streaming_s = time.monotonic() - self._stream_start
             # Taken before _telem_lock, never inside it: Mission has its own
             # lock and nesting the two would introduce a cycle.
             mission_status = self.mission.status()
+            vio_status = self._vio_status(now_mono)
             with self._telem_lock:
                 self._telem["cmd_vx"] = vx
                 self._telem["cmd_yaw_rate"] = yaw_rate
                 self._telem["streaming_s"] = streaming_s
+                self._telem["vio"] = vio_status
                 self._telem["mission"] = mission_status
                 self._telem["ready_for_offboard"] = (
                     streaming_s >= self.warmup_s and self._telem["connected"])
@@ -475,16 +650,43 @@ def main():
     ap.add_argument("--rate", type=float, default=20.0, help="setpoint Hz")
     ap.add_argument("--offboard-warmup", type=float, default=1.0,
                     help="seconds of streaming before OFFBOARD is offered")
+    ap.add_argument("--vision", action="store_true",
+                    help="fly GPS-DENIED on pipeline-streaming.py's estimate. "
+                         "Disables all GNSS fusion (EKF2_GPS_CTRL=0) -- never "
+                         "a default, always a deliberate choice.")
+    ap.add_argument("--vio-endpoint", default="tcp://127.0.0.1:5557",
+                    help="where pipeline-streaming.py publishes `vio`")
+    ap.add_argument("--site", default=os.environ.get("SITL_SITE", ""),
+                    help="sim/sites.py key; supplies the GPS origin under "
+                         "--vision")
     args = ap.parse_args()
 
     import uvicorn
+
+    vision = None
+    vision_origin = None
+    if args.vision:
+        if not args.site:
+            ap.error("--vision needs --site (or SITL_SITE) for the GPS origin: "
+                     "with GNSS off, PX4 has no other way to anchor its global "
+                     "frame, and the map, waypoints and the FLY gate all fail "
+                     "silently without it.")
+        sys.path.insert(0, os.path.join(ROOT, "sim"))
+        import sites
+        site = sites.get_site(args.site)
+        vision_origin = (site.latitude, site.longitude, site.height)
+        vision = VisionSubscriber(args.vio_endpoint)
+        vision.start()
+        print(f">>> GPS-DENIED: vision from {args.vio_endpoint}, "
+              f"origin from site {site.name}")
 
     conn = mavutil.mavlink_connection(args.mavlink)
     state = offboard.CommandState(args.speed_fwd, args.speed_up, args.watchdog,
                                   args.yaw_rate)
     loop_thread = SetpointLoop(conn, state, args.rate, args.takeoff_alt,
                                args.offboard_warmup, args.mission_speed,
-                               args.arrival_radius)
+                               args.arrival_radius,
+                               vision=vision, vision_origin=vision_origin)
     loop_thread.start()
 
     print(f">>> MAVLink offboard link: {args.mavlink}")

@@ -399,3 +399,157 @@ def test_status_poll_timeout_does_not_stall_telemetry():
         assert frames[-1]["rec"]["state"] == "offline"
     finally:
         server.close()
+
+
+# --- GPS-denied flight on vision (plan Task 6) ------------------------------
+
+import vision_bridge  # noqa: E402
+
+
+class _FakeVision:
+    """Stands in for VisionSubscriber: the setpoint thread only ever calls
+    latest(), so a test needs nothing more than that."""
+
+    def __init__(self, pose=None, received_at=None):
+        self.pose = pose
+        self.received_at = received_at
+        self.calls = 0
+
+    def latest(self):
+        self.calls += 1
+        return self.pose, self.received_at
+
+
+def _pose(x=1.0, y=2.0, z=3.0):
+    return vision_bridge.VisionPose(ts_ns=1_000_000_000, x=x, y=y, z=z,
+                                    roll=0.0, pitch=0.0, yaw=0.0)
+
+
+ORIGIN = (13.66156872, 100.298235, 0.0)
+
+
+def _vision_loop(js, port_offset, pose=None, received_at=None):
+    conn = mavutil.mavlink_connection(
+        f"udpout:127.0.0.1:{FAKE_PX4_PORT + port_offset}")
+    vision = _FakeVision(pose, received_at)
+    loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0), rate_hz=20.0,
+                           vision=vision, vision_origin=ORIGIN)
+    return conn, loop, vision
+
+
+def test_vision_pose_is_forwarded_once_per_tick():
+    """One VISION_POSITION_ESTIMATE per setpoint tick -- the same steady-stream
+    discipline the velocity setpoint already follows."""
+    js = _load_server()
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{FAKE_PX4_PORT + 20}")
+    try:
+        _, loop, _ = _vision_loop(js, 20, _pose(), received_at=time.monotonic())
+        loop.start()
+        seen = _collect(px4, 1.0, kind="VISION_POSITION_ESTIMATE")
+        assert len(seen) >= 10, f"expected >=10 VPE in 1 s, got {len(seen)}"
+        assert abs(seen[-1].x - 2.0) < 1e-6      # ENU y=2 -> NED north
+        assert abs(seen[-1].y - 1.0) < 1e-6      # ENU x=1 -> NED east
+        assert abs(seen[-1].z + 3.0) < 1e-6      # ENU up=3 -> NED down=-3
+    finally:
+        px4.close()
+
+
+def test_setpoint_still_goes_out_when_vision_is_stale():
+    """Vision going stale must NOT interrupt the setpoint stream: a gap there
+    drops PX4 out of OFFBOARD, turning a degraded estimate into a loss of
+    control."""
+    js = _load_server()
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{FAKE_PX4_PORT + 21}")
+    try:
+        # received 60 s ago -- far past DEFAULT_MAX_AGE_S
+        _, loop, _ = _vision_loop(js, 21, _pose(),
+                                  received_at=time.monotonic() - 60.0)
+        loop.start()
+        setpoints = _collect(px4, 1.0)
+        assert len(setpoints) >= 10, "stale vision must not gap the setpoints"
+        vpe = _collect(px4, 0.5, kind="VISION_POSITION_ESTIMATE")
+        assert not vpe, "a stale pose must be dropped, not repeated"
+    finally:
+        px4.close()
+
+
+def test_ekf2_params_are_not_sent_without_the_vision_flag():
+    """EKF2_GPS_CTRL=0 disables all GNSS fusion. It must never be a default."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 22}")
+    loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0), rate_hz=20.0)
+    sent = {}
+    loop.link.set_param = lambda name, value, ptype: sent.__setitem__(name, value)
+
+    loop._send_startup_params()
+
+    assert not [n for n in sent if n.startswith("EKF2_")], sent
+
+
+def test_gps_origin_is_sent_before_the_first_vision_estimate():
+    """PX4 cannot place a local estimate without an anchor, so ordering is the
+    assertion."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 23, _pose(), received_at=time.monotonic())
+    order = []
+    loop.link.set_param = lambda name, value, ptype: order.append(("param", name))
+    loop.link.conn.mav.set_gps_global_origin_send = (
+        lambda *a, **k: order.append(("origin", a)))
+    loop.vision_sender.conn.mav.vision_position_estimate_send = (
+        lambda *a, **k: order.append(("vpe", a)))
+
+    loop._send_startup_params()
+    loop._send_vision(time.monotonic())
+
+    kinds = [k for k, _ in order]
+    assert "origin" in kinds, kinds
+    assert "vpe" in kinds, kinds
+    assert kinds.index("origin") < kinds.index("vpe")
+    assert ("param", "EKF2_GPS_CTRL") in order
+
+
+def test_gps_origin_is_resent_after_a_px4_restart():
+    """A rebooted PX4 forgets the origin and the map silently stops updating."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 24, _pose(), received_at=time.monotonic())
+    origins = []
+    loop.link.set_param = lambda name, value, ptype: None
+    loop.link.conn.mav.set_gps_global_origin_send = (
+        lambda *a, **k: origins.append(a))
+
+    loop._send_startup_params()
+    assert len(origins) == 1
+
+    # PX4 goes quiet for longer than the restart threshold, then comes back.
+    loop._last_heartbeat = time.monotonic() - (js.PX4_RESTART_GAP_S + 1.0)
+    loop._check_px4_restart(time.monotonic())
+    assert not loop._params_sent, "a heartbeat gap must re-arm the param send"
+
+    loop._send_startup_params()
+    assert len(origins) == 2, "the origin must be re-sent after a restart"
+
+
+def test_zmq_thread_never_touches_the_mavlink_connection():
+    """The sole-owner contract (offboard.py:196-198): the subscriber holds a
+    pose slot and nothing else. It is never handed the connection, so it
+    cannot touch it from its own thread even by mistake."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 25}")
+    sub = js.VisionSubscriber("tcp://127.0.0.1:15599")
+    try:
+        assert conn not in vars(sub).values()
+        assert not any(hasattr(v, "mav") for v in vars(sub).values())
+
+        pose = _pose()
+        done = threading.Event()
+
+        def writer():                       # stands in for the ZMQ thread
+            sub._store(pose, 123.0)
+            done.set()
+
+        threading.Thread(target=writer, daemon=True).start()
+        assert done.wait(2.0)
+        got, at = sub.latest()
+        assert got is pose and at == 123.0
+    finally:
+        sub.close()

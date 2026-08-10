@@ -1,5 +1,11 @@
 # Design: record VIO datasets from the web UI
 
+**Status:** implemented and flown 2026-08-10 -- live acceptance gate passed:
+RECORD produces non-empty datasets that load and process through
+`flow_odometry`, second-start returns 409 with no orphan directory. See
+`SESSION.md` for the zero-image bug found and fixed along the way, and its one
+remaining gap (recording during actual flight not yet flown live).
+
 Add a RECORD button to the flight page that starts and stops
 `vio-recorder-pai.py` inside Isaac Sim, writing a full dataset to
 `~/vio_dataset/<timestamp>/`, with live status on the page.

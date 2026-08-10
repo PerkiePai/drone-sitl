@@ -1,6 +1,10 @@
 # Design: build the SITL stage from config, not from a saved .usd
 
-**Status:** designed, not yet implemented
+**Status:** implemented and flown 2026-08-10 -- live acceptance gate passed: Play
+reached with no banner, up-axis stayed Z, georeference/GPS position matched
+config (13.6615688, 100.2982352 vs configured 13.66156872, 100.298235), drone
+rested at spawn (ground_z=-25.0, spawn_agl_m=0.5) with no fall-through, and
+`/detect` returned 200
 **Date:** 2026-07-31
 **Supersedes:** the bake-a-stage procedure added to `joystick-guide.md` §3.1
 earlier today, which is withdrawn — see "Why the first attempt failed"

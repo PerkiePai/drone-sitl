@@ -274,3 +274,54 @@ def test_releasing_a_direction_does_not_pause(server):
             assert t["mission"]["state"] == "RUNNING"
 
     asyncio.run(exercise())
+
+
+# --- the VIO row (plan Task 7) ---------------------------------------------
+
+def _read(*parts):
+    with open(os.path.join(ROOT, *parts), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_the_vio_row_is_hidden_until_the_server_offers_vision():
+    """An ordinary GPS flight must not show a dead VIO row."""
+    html = _read("web", "index.html")
+    assert 'id="telem-vio"' in html
+    row = html.split('id="telem-vio"')[1].split(">")[0]
+    assert "hidden" in row, "the VIO row must start hidden"
+    for field in ("t-vio", "t-vio-drift", "t-vio-pts", "t-vio-fps"):
+        assert f'id="{field}"' in html
+
+
+def test_stale_vision_renders_bad_and_says_so():
+    """Stale means the aircraft is on dead reckoning. It has to be unmissable,
+    not a quiet absence."""
+    js = _read("web", "js", "telemetry.js")
+    assert "STALE" in js
+    assert "v.fresh ? 'good' : 'bad'" in js
+
+
+def test_absent_drift_renders_as_dashes_never_zero():
+    """No GT topic means "cannot tell", which is not the same as "no drift" --
+    and 0.0 would be the single most reassuring wrong number on the page."""
+    js = _read("web", "js", "telemetry.js")
+    seg = js.split("t-vio-drift")[1].split(";")[0]
+    assert "'--'" in seg
+    assert "null" in seg
+
+
+def test_telemetry_carries_no_vio_block_without_the_vision_flag():
+    """The page keys the row off this being null."""
+    sys.path.insert(0, os.path.join(ROOT, "streaming"))
+    import importlib.util as iu
+    import offboard
+    spec = iu.spec_from_file_location(
+        "joystick_server_vio", os.path.join(ROOT, "joystick-server.py"))
+    mod = iu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    from pymavlink import mavutil
+    conn = mavutil.mavlink_connection("udpout:127.0.0.1:14599")
+    loop = mod.SetpointLoop(conn, offboard.CommandState(2.0, 1.0))
+    assert loop.telemetry()["vio"] is None
+    assert loop._vio_status(0.0) is None

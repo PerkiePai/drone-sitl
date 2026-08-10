@@ -30,6 +30,14 @@
     <span>speed <b id="t-gs">--</b>/<b id="t-cmd">--</b> m/s</span>
     <span>sim <b id="t-sim">--</b></span>
   </div>
+  <!-- GPS-denied flight. Hidden unless joystick-server.py was started with
+       --vision, so an ordinary GPS flight shows no dead row. -->
+  <div id="telem-vio" hidden>
+    <span>vio <b id="t-vio" class="bad">--</b></span>
+    <span>drift <b id="t-vio-drift">--</b> m</span>
+    <span>pts <b id="t-vio-pts">--</b></span>
+    <span>fix <b id="t-vio-fps">--</b> Hz</span>
+  </div>
   <div id="controls">
     <div>
       <div id="pad">

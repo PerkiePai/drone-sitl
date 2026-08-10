@@ -81,6 +81,27 @@ function checkPending(t) {
   }
 }
 
+// GPS-denied flight. `vio` is null unless the server was started with
+// --vision, in which case the row stays hidden rather than showing a dead one.
+function paintVio(v) {
+  const row = el('telem-vio');
+  if (!v) { row.hidden = true; return; }
+  row.hidden = false;
+
+  // STALE is the one that matters: it means the aircraft is flying on dead
+  // reckoning, so it renders `bad` and says so, never as a quiet absence.
+  el('t-vio').textContent = v.fresh ? 'fresh' : 'STALE';
+  el('t-vio').className = v.fresh ? 'good' : 'bad';
+
+  // `--`, never 0.0: no GT topic is "we cannot tell", not "no drift".
+  el('t-vio-drift').textContent =
+    v.drift_m === null || v.drift_m === undefined ? '--' : v.drift_m.toFixed(1);
+  el('t-vio-pts').textContent =
+    v.n_inliers === null || v.n_inliers === undefined ? '--' : v.n_inliers;
+  el('t-vio-fps').textContent =
+    v.fps === null || v.fps === undefined ? '--' : v.fps.toFixed(0);
+}
+
 export function paint(t) {
   el('t-link').textContent = t.connected ? 'up' : 'down';
   el('t-link').className = t.connected ? 'good' : 'bad';
@@ -103,6 +124,8 @@ export function paint(t) {
     el('t-sim').className = t.sim_rate > 0.8 ? 'good'
                           : t.sim_rate > 0.4 ? 'wait' : 'bad';
   }
+
+  paintVio(t.vio);
 
   el('c-offboard').disabled = !t.ready_for_offboard;
   ['c-arm','c-takeoff','c-land','c-disarm'].forEach(

@@ -119,11 +119,14 @@ function paintGpsDenied(t) {
     stat.className = 'good';
     return;
   }
-  btn.disabled = !t.vio.fresh;
-  stat.textContent = t.vio.fresh
-    ? 'GNSS on — ready to cut'
-    : 'GNSS on — waiting for a fresh estimate';
-  stat.className = t.vio.fresh ? 'wait' : 'bad';
+  // Gated on the server's own precondition, not merely on freshness: on the
+  // pad the estimator is fresh and confident with zero features, and EKF2 is
+  // not fusing it at all until it can see.
+  btn.disabled = !t.vision_fusing;
+  stat.textContent = t.vision_fusing
+    ? 'GNSS on, vision fusing — ready to cut'
+    : 'GNSS on — climb until vision is fusing';
+  stat.className = t.vision_fusing ? 'wait' : 'bad';
 }
 
 export function paint(t) {

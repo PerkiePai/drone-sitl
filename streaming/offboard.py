@@ -9,6 +9,7 @@ recalled; the source file and line are on each one. test_offboard.py also
 asserts they agree with pymavlink's dialect.
 """
 import math
+import struct
 import threading
 import time
 
@@ -283,7 +284,31 @@ class OffboardLink:
                            PREFLIGHT_REBOOT_AUTOPILOT)
 
     def set_param(self, name, value, param_type):
+        """Set one parameter. Setpoint thread only.
+
+        PARAM_SET carries every value in a float field, but PX4 does NOT
+        convert -- for an INT32 param it reinterprets that field's RAW BYTES:
+
+            param_set(param, &(set.param_value));   mavlink_parameters.cpp:134
+
+        So an INT32 has to go on the wire as the float whose BIT PATTERN is
+        that integer. Sending `float(9)` instead sets the param to 1091567616,
+        which is 9.0f's bit pattern read as an int -- and PX4 accepts it
+        silently, because 1091567616 is a perfectly legal int32.
+
+        Measured on a live PX4 2026-08-11, before this conversion existed:
+        COM_RCL_EXCEPT read back 1082130432 instead of 4, and EKF2_EV_CTRL
+        1091567616 instead of 9 -- so vision fusion was never actually enabled.
+        Zero-valued int params (EKF2_GPS_CTRL=0, EKF2_HGT_REF=0) worked by
+        coincidence, 0.0f and int 0 having the same bits, which is exactly what
+        made the bug hard to see: the params that disabled things worked, and
+        only the ones that enabled things did nothing.
+        """
+        if param_type == MAV_PARAM_TYPE_INT32:
+            wire = struct.unpack("<f", struct.pack("<i", int(value)))[0]
+        else:
+            wire = float(value)
         self.conn.mav.param_set_send(
             self.target_system, self.target_component,
             name.encode() if isinstance(name, str) else name,
-            float(value), param_type)
+            wire, param_type)

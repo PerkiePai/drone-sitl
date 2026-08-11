@@ -1,6 +1,7 @@
 """Unit tests for streaming/offboard.py. No PX4 and no Isaac Sim required."""
 import math
 import os
+import struct
 import sys
 
 import pytest
@@ -187,6 +188,13 @@ def test_arm_then_disarm():
 
 
 def test_rc_loss_exception_param_is_sent_as_int32():
+    """The value PX4 STORES is the assertion, not the number on the wire.
+
+    PX4 reinterprets PARAM_SET's float field as int32 for an INT32 param
+    (mavlink_parameters.cpp:134), so `value == 4.0` -- what this test used to
+    assert -- is precisely the bug: it puts 1082130432 in COM_RCL_EXCEPT and
+    PX4 accepts it silently, leaving OFFBOARD never actually exempted from the
+    RC-loss failsafe. Confirmed against a live PX4 2026-08-11."""
     conn = MagicMock()
     offboard.OffboardLink(conn).set_param(
         "COM_RCL_EXCEPT", offboard.COM_RCL_EXCEPT_OFFBOARD,
@@ -194,7 +202,7 @@ def test_rc_loss_exception_param_is_sent_as_int32():
     args, _ = conn.mav.param_set_send.call_args
     _sys, _comp, param_id, value, param_type = args
     assert param_id == b"COM_RCL_EXCEPT"
-    assert value == 4.0
+    assert struct.unpack("<i", struct.pack("<f", value))[0] == 4
     assert param_type == offboard.MAV_PARAM_TYPE_INT32
 
 

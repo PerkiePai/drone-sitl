@@ -1,6 +1,7 @@
 """Unit tests for streaming/vision_bridge.py. No PX4, no Isaac Sim."""
 import math
 import os
+import struct
 import sys
 
 import pytest
@@ -162,6 +163,14 @@ def test_reboot_autopilot_sends_the_documented_command(conn):
     assert args[4] == pytest.approx(1.0)
 
 
+def _decode(wire, ptype):
+    """Undo the wire encoding, so tests assert the value PX4 will actually
+    store rather than the number that happened to be passed in."""
+    if ptype == offboard.MAV_PARAM_TYPE_INT32:
+        return struct.unpack("<i", struct.pack("<f", wire))[0]
+    return wire
+
+
 def test_apply_params_sends_every_param_with_its_declared_type(conn):
     link = offboard.OffboardLink(conn)
     vision_bridge.apply_ekf2_vision_params(link)
@@ -169,7 +178,41 @@ def test_apply_params_sends_every_param_with_its_declared_type(conn):
             for c in conn.mav.param_set_send.call_args_list}
     assert len(sent) == len(vision_bridge.EKF2_VISION_PARAMS)
     for name, value, ptype in vision_bridge.EKF2_VISION_PARAMS:
-        assert sent[name] == (pytest.approx(float(value)), ptype)
+        wire, sent_type = sent[name]
+        assert sent_type == ptype
+        assert _decode(wire, ptype) == pytest.approx(value)
+
+
+def test_int_params_go_on_the_wire_as_their_bit_pattern(conn):
+    """PX4 reinterprets PARAM_SET's float field as int32 for an INT32 param
+    (mavlink_parameters.cpp:134), so the wire must carry the bits of the
+    integer, not the integer converted to a float.
+
+    Sending float(9) sets the param to 1091567616 and PX4 accepts it silently.
+    Measured live 2026-08-11: this is why EKF2_EV_CTRL was never 9 and vision
+    fusion never switched on."""
+    link = offboard.OffboardLink(conn)
+    link.set_param("EKF2_EV_CTRL", 9, offboard.MAV_PARAM_TYPE_INT32)
+    wire = conn.mav.param_set_send.call_args[0][3]
+
+    assert struct.unpack("<i", struct.pack("<f", wire))[0] == 9
+    assert wire != 9.0, "sending the number itself is the bug"
+
+
+def test_zero_valued_int_params_are_unchanged_by_the_encoding(conn):
+    """0.0f and int 0 share a bit pattern. This is why EKF2_GPS_CTRL=0 worked
+    all along while every non-zero int param did not -- the params that
+    disabled things worked and only the ones that enabled things were dead."""
+    link = offboard.OffboardLink(conn)
+    link.set_param("EKF2_GPS_CTRL", 0, offboard.MAV_PARAM_TYPE_INT32)
+    assert conn.mav.param_set_send.call_args[0][3] == 0.0
+
+
+def test_float_params_are_sent_as_their_value(conn):
+    """REAL32 params are NOT bit-reinterpreted -- only INT32 is."""
+    link = offboard.OffboardLink(conn)
+    link.set_param("EKF2_EVP_NOISE", 0.5, offboard.MAV_PARAM_TYPE_REAL32)
+    assert conn.mav.param_set_send.call_args[0][3] == pytest.approx(0.5)
 
 
 # --- SET_GPS_GLOBAL_ORIGIN -------------------------------------------------

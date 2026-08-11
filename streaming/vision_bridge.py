@@ -12,34 +12,23 @@ from dataclasses import dataclass
 from offboard import MAV_PARAM_TYPE_INT32, MAV_PARAM_TYPE_REAL32
 
 # EKF2 vision fusion. Applied only under --vision: EKF2_GPS_CTRL=0 is a
-# deliberate, safety-relevant act, never a default.
+# deliberate, safety-relevant act, never a default. Each param is documented on
+# the phase that applies it.
 #
-#   EKF2_GPS_CTRL     ekf2_params.c:706, default 7. 0 disables ALL GNSS fusion.
-#   EKF2_EV_CTRL      ekf2_params.c:687, default 15. bit0 horizontal position,
-#                     bit1 vertical position, bit2 3D velocity, bit3 yaw.
-#                     9 = horizontal position + yaw, which is exactly what
-#                     flow-odom measures. Vertical is deliberately NOT claimed:
-#                     altitude comes straight from the barometer
-#                     (flow_odometry.py:455), and EKF2 already fuses baro
-#                     directly (EKF2_BARO_CTRL default 1), so setting bit1 would
-#                     feed one sensor in twice and read as spurious agreement.
-#   EKF2_HGT_REF      ekf2_params.c:657, default 1 (GPS). 0 = barometric, which
-#                     is where the height genuinely comes from.
-#                     *** @reboot_required true (ekf2_params.c:656). ***
-#                     A PARAM_SET at runtime updates the STORED value -- QGC
-#                     will show 0 -- but EKF2 does not re-read its height
-#                     reference until PX4 restarts. See HGT_REF_NEEDS_REBOOT.
-#   EKF2_EV_NOISE_MD  ekf2_params.c:814, default 0. 1 = use the noise params
-#                     below rather than a reported variance we do not compute.
-#   EKF2_EVP_NOISE    ekf2_params.c:837, default 0.1 m -- far too tight for a
-#   EKF2_EVA_NOISE    ekf2_params.c:857, default 0.1 rad -- drifting estimator;
-#                     EKF2 would reject its own vision source as inconsistent.
-# The set is split into three PHASES, because applying it as one block does not
+# The set is split into PHASES, because applying it as one block does not
 # work and the failure is an unbounded descent rather than an error. Measured
 # live 2026-08-11 (SESSION.md): EKF2_GPS_CTRL=0 takes effect immediately while
 # EKF2_HGT_REF=0 does not, leaving EKF2 with GNSS fusion off and its height
 # reference still on GPS. Reported altitude ran 49 m -> -22 m and still falling,
 # with AUTO.LAND latched and both `offboard` and `disarm` refused.
+
+EKF2_GPS_CTRL_DEFAULT = 7
+"""PX4's own default (ekf2_params.c:706) -- all GNSS aiding on.
+
+Named rather than inlined because restoring it is a safety act, not a tidy-up:
+it is what stops a previous GPS-denied session leaving the next run to boot
+with GNSS already disabled.
+"""
 
 EKF2_BOOT_PARAMS = (
     ("EKF2_HGT_REF", 0, MAV_PARAM_TYPE_INT32),
@@ -59,7 +48,7 @@ EKF2_FUSION_PARAMS = (
     ("EKF2_EVP_NOISE", 0.5, MAV_PARAM_TYPE_REAL32),
     ("EKF2_EVA_NOISE", 0.2, MAV_PARAM_TYPE_REAL32),
 )
-"""Phase 1 -- turn vision fusion ON while GNSS is still on. Safe in flight.
+"""Phase 1b -- turn vision fusion ON while GNSS is still on. Safe in flight.
 
 Deliberately separable from phase 2 so the aircraft can climb on GPS with the
 vision source already being fused and observable before anything is taken away.
@@ -79,6 +68,25 @@ every Cesium-tile site tested so far -- that climb is not optional.
   EKF2_EVP_NOISE    ekf2_params.c:837, default 0.1 m -- far too tight for a
   EKF2_EVA_NOISE    ekf2_params.c:857, default 0.1 rad -- drifting estimator;
                     EKF2 would reject its own vision source as inconsistent.
+"""
+
+EKF2_GPS_FLIGHT_PARAMS = (
+    ("EKF2_EV_CTRL", 0, MAV_PARAM_TYPE_INT32),
+    ("EKF2_GPS_CTRL", EKF2_GPS_CTRL_DEFAULT, MAV_PARAM_TYPE_INT32),
+)
+"""Phase 1 -- assert ordinary GPS flight, explicitly. Applied every startup.
+
+**PX4 parameters persist across runs and across reboots**, so not setting a
+param is NOT the same as it being off. Without this, two things carry over from
+a previous GPS-denied session:
+
+  EKF2_EV_CTRL=9   vision fused over a blind pad camera -> PX4 refuses to arm,
+                   `Preflight Fail: Yaw estimate error`
+  EKF2_GPS_CTRL=0  **the next run boots GPS-denied on the ground**, which is
+                   the more dangerous of the two by a wide margin
+
+Both were observed live 2026-08-11: deferring the fusion params in code changed
+nothing, because the previous run had already saved EKF2_EV_CTRL=9.
 """
 
 EKF2_GPS_DENIED_PARAMS = (
@@ -144,8 +152,21 @@ def apply_ekf2_boot_params(link):
     _apply(link, EKF2_BOOT_PARAMS)
 
 
+def apply_ekf2_gps_flight_params(link):
+    """Phase 1: assert ordinary GPS flight with vision NOT fused.
+
+    Setpoint thread only. Must run every startup -- see EKF2_GPS_FLIGHT_PARAMS
+    for why leaving these alone is not the same as them being off.
+    """
+    _apply(link, EKF2_GPS_FLIGHT_PARAMS)
+
+
 def apply_ekf2_fusion_params(link):
-    """Phase 1: fuse vision alongside GNSS. Setpoint thread only."""
+    """Phase 1b: fuse vision alongside GNSS. Setpoint thread only.
+
+    Gated by the caller on the estimate actually tracking something -- see
+    EKF2_GPS_FLIGHT_PARAMS for what fusing a blind camera costs.
+    """
     _apply(link, EKF2_FUSION_PARAMS)
 
 

@@ -351,7 +351,7 @@ def test_the_gps_denied_button_is_disabled_without_a_fresh_estimate():
     button."""
     js = _read("web", "js", "telemetry.js")
     seg = js.split("function paintGpsDenied")[1]
-    assert "btn.disabled = !t.vio.fresh" in seg
+    assert "btn.disabled = !t.vision_fusing" in seg
 
 
 def test_cutting_gnss_is_reported_as_taken_and_not_offered_twice():

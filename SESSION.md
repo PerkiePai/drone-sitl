@@ -2,7 +2,9 @@
 
 **Date:** 2026-08-11
 **Plan:** `docs/superpowers/plans/2026-08-07-vio-gps-denied.md`, Task 8
-**Result:** 8.1–8.4 pass. 8.5 partial. 8.6–8.9 **blocked** on `EKF2_HGT_REF`.
+**Result:** 8.1–8.5 pass. GPS-denied flight ACHIEVED and held ~40 s, then
+diverged. 8.6 does not pass. Read top to bottom: three runs, and each fix
+exposed the next fault. The root cause of all of it was INT32 param encoding.
 
 Run configuration:
 
@@ -143,7 +145,42 @@ predicted: inliers ran 44 → 304 → 440 → 600 during the climb off the pad.
 accept the vision stream as a position source: with GNSS cut it had no
 horizontal position at all, and dropped to the one mode that needs only baro.
 
-### Leading diagnosis: VPE timestamps are on the wrong clock
+### CORRECTION: the timestamp is not the cause
+
+The diagnosis below was **wrong**, and is kept only so the reasoning can be
+checked. Read the PX4 source before believing it:
+
+```c
+// src/lib/timesync/Timesync.cpp:127-136
+uint64_t Timesync::sync_stamp(uint64_t usec)
+{
+	if (sync_converged()) {
+		return usec + (int64_t)_time_offset;
+	} else {
+		return hrt_absolute_time();      // <-- our case
+	}
+}
+```
+
+`sync_converged()` is `_sequence >= CONVERGENCE_WINDOW`, and
+`CONVERGENCE_WINDOW = 500` (`Timesync.hpp:76,120`). `_sequence` only advances
+inside the TIMESYNC round-trip handler (`Timesync.cpp:93`). **Neither pymavlink
+nor anything in this repo sends or answers TIMESYNC** — zero occurrences in
+either — so `_sequence` never leaves 0, and
+`mavlink_receiver.cpp:1213`'s `sync_stamp(vpe.usec)` returns PX4's own arrival
+time for every single estimate.
+
+So PX4 was already discarding the sim-time stamp and substituting its own.
+Sending a corrected timestamp would change nothing. Whatever stopped EKF2
+fusing vision, it is not this.
+
+What made the wrong diagnosis look right: the mechanism is real in general
+(the two clocks genuinely are on different epochs), and every other number in
+the run was healthy, so the one unverified quantity attracted the blame. The
+lesson is the ordinary one — the counter nothing checks is not thereby the
+guilty one.
+
+### The superseded diagnosis, kept for the record
 
 Not yet confirmed against `ESTIMATOR_STATUS`, but the mechanism is concrete and
 the evidence fits:
@@ -176,10 +213,115 @@ enough on the previous run to test whether vision was actually being fused.
 - [ ] **8.6–8.9 still blocked**, now on timestamp alignment rather than on
       `EKF2_HGT_REF`
 
-Next step is to put VPE on PX4's clock — either offset the sim stamp by a
-measured boot delta, or stamp with `0` and let PX4 apply its own arrival time,
-which is the usual advice for exactly this situation and costs one render
-period of accuracy.
+Next step is **not** the timestamp (see the correction above). PX4 already
+stamps VPE on arrival. The open question is why EKF2 does not fuse the vision
+source even in phase 1, while GNSS is still up and the estimate is healthy —
+which has to be answered by reading `ESTIMATOR_STATUS` rather than by
+reasoning about it from outside.
+
+## Third run: the real root cause was INT32 param encoding
+
+`set_param` sent INT32 params as `float(value)`. PX4 does not convert -- for an
+INT32 param it reinterprets the PARAM_SET float field's **raw bytes**:
+
+```c
+param_set(param, &(set.param_value));   // mavlink_parameters.cpp:134
+```
+
+So `float(9)` stored **1091567616**, the bit pattern of `9.0f`, and PX4 accepted
+it silently because that is a perfectly legal int32. Read back off a live PX4:
+
+| Param | PX4 held | Intended |
+|---|---|---|
+| `COM_RCL_EXCEPT` | 1082130432 | 4 |
+| `EKF2_EV_CTRL` | 1091567616 | 9 |
+| `EKF2_EV_NOISE_MD` | 1065353216 | 1 |
+| `EKF2_GPS_CTRL`, `EKF2_HGT_REF` | 0 | 0 ✓ |
+
+**Only the zero-valued ones worked**, `0.0f` and int `0` sharing a bit pattern.
+That asymmetry is what hid the bug for so long: every param that *disabled*
+something worked, and every param that *enabled* something was dead. So GNSS
+really did get cut, vision fusion never actually switched on, and the aircraft
+lost its position exactly as if vision were broken.
+
+It also means **`COM_RCL_EXCEPT` was never 4 on any flight this repo has ever
+made** -- OFFBOARD was never actually exempted from the RC-loss failsafe.
+
+Fixed in `offboard.py:set_param`, which now sends the bit pattern for INT32.
+Verified live: `EKF2_EV_CTRL : 9`, `COM_RCL_EXCEPT : 4`, and for the first time
+`cs_ev_pos: True` / `cs_ev_yaw: True` in `estimator_status_flags`.
+
+### The timestamp was a red herring
+
+The previous run blamed VPE timestamps. That was wrong, and the correction above
+has the source. Worth keeping as a lesson: the unverified quantity attracted the
+blame precisely because everything else looked healthy.
+
+## What the fix then exposed, in order
+
+Each of these was invisible until the one before it was fixed.
+
+1. **Fusing a blind camera stops the aircraft arming.** With EV fusion genuinely
+   on, the pad camera (0 inliers, see above) gave PX4
+   `Preflight Fail: Yaw estimate error / heading estimate not stable`.
+   Fixed: fusion is now deferred until the estimate clears
+   `VISION_MIN_INLIERS`, which needs altitude.
+
+2. **PX4 params persist across runs AND across reboots.** Deferring the fusion
+   params in code changed nothing, because the previous run had already saved
+   `EKF2_EV_CTRL=9`. Not setting a param is not the same as it being off.
+   Fixed: startup now *asserts* GPS flight (`EKF2_EV_CTRL=0`,
+   `EKF2_GPS_CTRL=7`). The dangerous direction is the other one -- a saved
+   `EKF2_GPS_CTRL=0` would have the next run boot GPS-denied on the pad.
+
+3. **The param re-send undid fusion mid-flight.** `_send_startup_params` is also
+   the recovery path (`_check_px4_restart` re-runs it on a heartbeat gap), so
+   asserting GPS flight there switched EKF2 back off vision at altitude.
+   Fixed: the re-send now re-asserts whichever phase is actually current.
+
+4. **`PX4_RESTART_GAP_S` was measured in wall time against a sim-time
+   heartbeat.** PX4 SITL is lockstepped to Isaac, so its 1 Hz heartbeat arrives
+   every `1/sim_rate` wall seconds -- ~1.8 s at the 0.55 this box runs. The old
+   3 s threshold was barely 1.5 beats and tripped on ordinary jitter, which is
+   what kept firing (3). Raised to 10 s.
+
+## GPS-denied flight achieved, then lost
+
+With all of the above fixed, the full sequence ran end to end:
+
+```
+>>> vision: FUSING alongside GNSS (573 inliers). `gps_denied` is now available.
+>>> GPS-DENIED: GNSS fusion off, flying on vision (444 inliers, drift 24.4)
+```
+
+PX4 confirmed it: **`cs_gps: False`, `cs_ev_pos: True`, `EKF2_GPS_CTRL: 0`,
+`reject_hor_pos: False`** — genuinely GPS-denied, holding OFFBOARD at ~24 m with
+`vz≈0.00` and `gs` 0.07–0.48. That is the first time this repo has flown without
+GNSS.
+
+**It held for roughly 40 s and then diverged.** Altitude ran 24.9 → 23.3 → 19.1
+→ 13.3 → −7.5 → −31.3 with `vz` reaching −20 m/s, ground speed to 12.7 m/s, and
+estimator drift 28 → 230 → 352 m. So **8.6 does not pass**: the bar is holding
+station for 60 s, and it did not.
+
+### The next thing to fix, and it is the same bug class again
+
+`dropped_stale` climbed all the way down: 15 → 40 → 54 → 63 → 110 → 122 → 179,
+while `sim_rate` collapsed 0.56 → 0.36 → 0.26 → 0.11.
+
+`VisionPositionSender.send()` judges staleness against **wall clock**
+(`vision_bridge.py:121`, `max_age_s=0.5`) while everything producing those
+estimates runs on **sim time**. When the sim slows, healthy estimates arrive
+late in wall terms and get dropped as stale -- at precisely the moment they are
+the aircraft's only position source. EKF2 starves, and the aircraft diverges.
+
+That is the third wall-vs-sim-time confusion in this system, after
+`PX4_RESTART_GAP_S` and the VPE timestamp theory. **It is worth auditing every
+duration in the vision path for which clock it belongs to** rather than fixing
+this one instance and waiting for the next.
+
+Note the irony: `dropped_stale` is the counter the previous write-up dismissed
+as "the one nothing checks". It was the smoking gun all along.
 
 ## If this resurfaces
 

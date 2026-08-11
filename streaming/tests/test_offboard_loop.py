@@ -407,13 +407,17 @@ import vision_bridge  # noqa: E402
 
 
 class _FakeVision:
-    """Stands in for VisionSubscriber: the setpoint thread only ever calls
-    latest(), so a test needs nothing more than that."""
+    """Stands in for VisionSubscriber: the setpoint thread calls latest() and
+    reads _last_msg, so a test needs nothing more than those two.
 
-    def __init__(self, pose=None, received_at=None):
+    `inliers` defaults to a healthy count because most tests are about
+    something else; the blind-camera case passes 0 explicitly."""
+
+    def __init__(self, pose=None, received_at=None, inliers=600):
         self.pose = pose
         self.received_at = received_at
         self.calls = 0
+        self._last_msg = {"n_inliers": inliers, "drift_m": 0.4, "fps": 8.8}
 
     def latest(self):
         self.calls += 1
@@ -428,10 +432,10 @@ def _pose(x=1.0, y=2.0, z=3.0):
 ORIGIN = (13.66156872, 100.298235, 0.0)
 
 
-def _vision_loop(js, port_offset, pose=None, received_at=None):
+def _vision_loop(js, port_offset, pose=None, received_at=None, inliers=600):
     conn = mavutil.mavlink_connection(
         f"udpout:127.0.0.1:{FAKE_PX4_PORT + port_offset}")
-    vision = _FakeVision(pose, received_at)
+    vision = _FakeVision(pose, received_at, inliers)
     loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0), rate_hz=20.0,
                            vision=vision, vision_origin=ORIGIN)
     return conn, loop, vision
@@ -544,31 +548,37 @@ def test_gps_origin_is_sent_before_the_first_vision_estimate():
     loop.vision_sender.conn.mav.vision_position_estimate_send = (
         lambda *a, **k: order.append(("vpe", a)))
 
-    loop._send_startup_params()          # phase 1: fusion + origin
+    loop._send_startup_params()          # phase 1: the origin
     loop._send_vision(time.monotonic())
 
     kinds = [k for k, _ in order]
     assert "origin" in kinds, kinds
     assert "vpe" in kinds, kinds
     assert kinds.index("origin") < kinds.index("vpe")
+    # Fusion is not switched ON here -- startup asserts it OFF and waits for a
+    # camera that can see.
     assert ("param", "EKF2_EV_CTRL") in order
 
 
-def test_startup_never_cuts_gnss_on_its_own():
-    """EKF2_GPS_CTRL=0 is phase 2 and belongs to the `gps_denied` command. If
-    startup cut GNSS, the aircraft would be GPS-denied while still on the pad --
-    where the nadir camera cannot see the ground at all (SESSION.md)."""
+def test_startup_asserts_gps_flight_rather_than_leaving_params_alone():
+    """PX4 params PERSIST across runs and reboots, so a previous GPS-denied
+    session leaves EKF2_GPS_CTRL=0 and EKF2_EV_CTRL=9 saved. Merely not setting
+    them would start this run GPS-denied on the pad with vision fused over a
+    blind camera. Startup has to assert the state it wants."""
     js = _load_server()
     _, loop, _ = _vision_loop(js, 27, _pose(), received_at=time.monotonic())
-    sent = []
-    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+    sent = {}
+    loop.link.set_param = lambda name, value, ptype: sent.__setitem__(name, value)
     loop.link.reboot_autopilot = lambda: None
 
     loop._send_startup_params()
     loop._send_startup_params()
 
-    assert "EKF2_GPS_CTRL" not in sent, sent
+    assert sent["EKF2_GPS_CTRL"] == vision_bridge.EKF2_GPS_CTRL_DEFAULT
+    assert sent["EKF2_GPS_CTRL"] != 0, "startup must never cut GNSS"
+    assert sent["EKF2_EV_CTRL"] == 0, "fusion must start OFF, not merely unset"
     assert loop.telemetry()["gps_denied"] is False
+    assert loop.telemetry()["vision_fusing"] is False
 
 
 def test_gps_denied_is_refused_without_a_fresh_estimate():
@@ -585,12 +595,114 @@ def test_gps_denied_is_refused_without_a_fresh_estimate():
     assert loop.telemetry()["gps_denied"] is False
 
 
-def test_gps_denied_cuts_gnss_when_vision_is_fresh():
+def test_a_blind_camera_is_fresh_but_never_fused():
+    """The pad case: the estimator publishes promptly and confidently with
+    ZERO tracked features. Fusing that costs an arming refusal --
+    `Preflight Fail: Yaw estimate error` -- so freshness alone must not be
+    enough to switch fusion on."""
     js = _load_server()
-    _, loop, _ = _vision_loop(js, 29, _pose(), received_at=time.monotonic())
+    _, loop, _ = _vision_loop(js, 30, _pose(), received_at=time.monotonic(),
+                              inliers=0)
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+    loop._params_sent = True
+
+    loop._maybe_start_fusing_vision(time.monotonic())
+
+    assert sent == [], sent
+    assert loop.telemetry()["vision_fusing"] is False
+    assert loop._vio_status(time.monotonic())["fresh"] is True, (
+        "the point of this test is that it IS fresh")
+
+
+def test_vision_starts_fusing_once_the_camera_can_see():
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 31, _pose(), received_at=time.monotonic())
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+    loop._params_sent = True
+
+    loop._maybe_start_fusing_vision(time.monotonic())
+    loop._maybe_start_fusing_vision(time.monotonic())   # latched, not repeated
+
+    assert sent.count("EKF2_EV_CTRL") == 1, sent
+    assert "EKF2_GPS_CTRL" not in sent, "phase 1 must not cut GNSS"
+    assert loop.telemetry()["vision_fusing"] is True
+
+
+def test_gps_denied_is_refused_before_vision_is_fusing():
+    """Ordering: EKF2 has to be fusing vision BEFORE GNSS is taken away, or
+    the cut lands on a source it is not using."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 32, _pose(), received_at=time.monotonic())
     sent = []
     loop.link.set_param = lambda name, value, ptype: sent.append(name)
 
+    loop._run_command("gps_denied")          # never started fusing
+
+    assert sent == [], sent
+    assert loop.telemetry()["gps_denied"] is False
+
+
+def test_a_heartbeat_gap_does_not_switch_vision_back_off():
+    """_send_startup_params is the RECOVERY path as well as the startup one --
+    _check_px4_restart re-runs it on any heartbeat gap. Asserting GPS flight
+    unconditionally there turns fusion off mid-flight, which is what happened
+    live 2026-08-11: fusion engaged at altitude and a gap quietly undid it."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 33, _pose(), received_at=time.monotonic())
+    loop._params_sent = True
+    loop._vision_rebooted = True         # phase 0 already done
+    loop.link.set_param = lambda name, value, ptype: None
+    loop.link.reboot_autopilot = lambda: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+    assert loop._vision_fusing
+
+    sent = {}
+    loop.link.set_param = lambda name, value, ptype: sent.__setitem__(name, value)
+    loop._send_startup_params()          # as a heartbeat gap would
+
+    assert sent["EKF2_EV_CTRL"] == 9, "fusion must be re-asserted, not undone"
+
+
+def test_a_heartbeat_gap_keeps_gnss_cut_once_gps_denied():
+    """Same hazard in the other direction: re-asserting GPS flight after the
+    operator cut GNSS would silently hand the aircraft back to GPS."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 34, _pose(), received_at=time.monotonic())
+    loop._params_sent = True
+    loop._vision_rebooted = True         # phase 0 already done
+    loop.link.set_param = lambda name, value, ptype: None
+    loop.link.reboot_autopilot = lambda: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+    loop._run_command("gps_denied")
+    assert loop.telemetry()["gps_denied"] is True
+
+    sent = {}
+    loop.link.set_param = lambda name, value, ptype: sent.__setitem__(name, value)
+    loop._send_startup_params()
+
+    assert sent["EKF2_GPS_CTRL"] == 0, "GNSS must stay cut across a gap"
+    assert sent["EKF2_EV_CTRL"] == 9
+
+
+def test_the_restart_gap_allows_for_sim_time_heartbeats():
+    """PX4 heartbeats in SIM time while this threshold is WALL time. At the
+    ~0.55 sim rate this box runs, a 1 Hz heartbeat is ~1.8 s apart, so a 3 s
+    threshold is barely one and a half beats and trips on ordinary jitter."""
+    js = _load_server()
+    assert js.PX4_RESTART_GAP_S >= 5 * 1.8
+
+
+def test_gps_denied_cuts_gnss_once_vision_is_fusing():
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 29, _pose(), received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
     loop._run_command("gps_denied")
 
     assert "EKF2_GPS_CTRL" in sent, sent

@@ -1005,11 +1005,16 @@ Extend `streaming/tests/test_web_ui.py` in the existing style.
 
 Order matters: each step isolates one failure class.
 
-> **Status 2026-08-11:** 8.1-8.4 pass. The `EKF2_HGT_REF` blocker is FIXED
-> (phase split + PX4 reboot, verified live). 8.6-8.9 are still blocked, now
-> on `VISION_POSITION_ESTIMATE` timestamps being Isaac sim time rather than
-> PX4's clock, so EKF2 discards them and has no position once GNSS is cut.
-> Full write-up, plus the blind-nadir-near-the-ground finding, in `SESSION.md`.
+> **Status 2026-08-11:** 8.1-8.5 pass. **GPS-denied flight achieved** --
+> `cs_gps: False`, `cs_ev_pos: True`, holding OFFBOARD on vision alone -- but it
+> held only ~40 s before diverging, so 8.6 does not pass.
+>
+> The root cause behind the whole chain was `set_param` sending INT32 params as
+> a float, so PX4 stored the bit pattern: `EKF2_EV_CTRL` was 1091567616, never
+> 9, and vision fusion had never once switched on. Fixed. The next blocker is
+> `VisionPositionSender`'s staleness check being in wall time while the sim runs
+> on sim time -- when `sim_rate` falls, good estimates are dropped as stale.
+> Full write-up in `SESSION.md`.
 
 - [x] **8.1** `DRONE_SETUP_DOWN_VIB_DAMP=False ./sim/launch-sitl.sh` → drone
       spawned, Play pressed, MJPEG on 8080. **Done 2026-08-11.**

@@ -33,14 +33,35 @@ import offboard  # noqa: E402
 import vision_bridge  # noqa: E402
 import waypoints  # noqa: E402
 
-PX4_RESTART_GAP_S = 3.0
+VISION_MIN_INLIERS = 100
+"""Tracked features below which the vision estimate is not worth fusing.
+
+Not a tuning knob so much as a blind-camera detector. At the pad the nadir
+camera renders flat black (below the Cesium tile surface) and the estimator
+still publishes at full rate with 0 inliers -- fresh, confident and empty.
+Fusing that costs an arming refusal: `Preflight Fail: Yaw estimate error`.
+
+Healthy flight sits at ~600 (the detector's cap) and the climb passes through
+44 -> 304 -> 440 -> 600, so anything in the low hundreds separates the two
+cases with room to spare. The estimator's own floor for tracking at all is 30
+(pipeline-streaming.py --min-track).
+"""
+
+PX4_RESTART_GAP_S = 10.0
 """Heartbeat silence that means PX4 restarted rather than merely lagged.
 
-PX4 heartbeats at 1 Hz, so three missed beats is unambiguous. A restarted PX4
-has forgotten the GPS origin, and with GNSS off nothing else will ever set it
-again -- the map marker and every GLOBAL_RELATIVE_ALT setpoint just silently
-stop working. Re-arming the param send on a gap is what makes recovery
-automatic instead of a puzzling half-dead session.
+A restarted PX4 has forgotten the GPS origin, and with GNSS off nothing else
+will ever set it again -- the map marker and every GLOBAL_RELATIVE_ALT setpoint
+just silently stop working. Re-arming the param send on a gap is what makes
+recovery automatic instead of a puzzling half-dead session.
+
+**Measured in WALL time; PX4 heartbeats in SIM time.** That is why this is 10 s
+and not the 3 s it used to be. PX4 SITL is lockstepped to Isaac, so its 1 Hz
+heartbeat arrives every 1/sim_rate seconds of wall clock -- at the ~0.55 this
+box runs with the VIO streamer up, that is ~1.8 s per beat, and 3 s is barely
+one and a half beats. Observed 2026-08-11: routine jitter tripped it repeatedly
+and re-ran the startup params mid-flight, which under the phased vision profile
+silently switched EKF2 back off vision. 10 s is >5 beats even at 0.55.
 """
 
 
@@ -191,6 +212,10 @@ class SetpointLoop(threading.Thread):
             # --vision the aircraft still flies on GNSS until then, and the
             # difference matters enough to be visible rather than inferred.
             "gps_denied": False,
+            # True once EKF2 is fusing vision alongside GNSS. The page gates
+            # the GPS-denied control on this, so the button cannot be offered
+            # before the step it depends on has happened.
+            "vision_fusing": False,
         }
         self._stream_start = None
         self._params_sent = False
@@ -198,6 +223,12 @@ class SetpointLoop(threading.Thread):
         # restart re-runs _send_startup_params (see _check_px4_restart), and
         # without this latch that would reboot it again, forever.
         self._vision_rebooted = False
+        # Phase 1 latch. Vision is fused only once the camera can actually see
+        # (_maybe_start_fusing_vision), never at startup over a blind one.
+        self._vision_fusing = False
+        # Mirrors telemetry["gps_denied"], but owned by the setpoint thread so
+        # the re-send path can read the phase without taking the telemetry lock.
+        self._gps_denied = False
         self._sim_ref = None          # (px4_boot_ms, wall_monotonic) baseline
 
     def telemetry(self):
@@ -259,24 +290,74 @@ class SetpointLoop(threading.Thread):
             getattr(self.link, name)()
         print(f">>> command: {name}")
 
+    def _healthy_vision(self, now):
+        """The VIO block if the estimate is worth fusing, else None.
+
+        `fresh` alone is not enough. On the pad the nadir camera sits below the
+        Cesium tile surface and renders flat black, so the estimator publishes
+        promptly and confidently with ZERO tracked features -- fresh, and
+        meaningless. Inlier count is what tells those apart.
+        """
+        health = self._vio_status(now)
+        if not health or not health.get("fresh"):
+            return None
+        if (health.get("n_inliers") or 0) < VISION_MIN_INLIERS:
+            return None
+        return health
+
+    def _maybe_start_fusing_vision(self, now):
+        """Phase 1: begin fusing vision alongside GNSS, once it can see.
+
+        Deferred rather than applied at startup because turning EV fusion on
+        over a blind camera is actively harmful: PX4 refuses to arm with
+        `Preflight Fail: Yaw estimate error / heading estimate not stable`,
+        the vision yaw being a constant derived from no features at all.
+        Observed live 2026-08-11, and only visible once INT32 params started
+        arriving intact -- before that EKF2_EV_CTRL never took and nothing was
+        ever fused.
+
+        So the aircraft takes off on GPS with vision merely streaming, and the
+        moment the camera has a real view this fires exactly once. By the time
+        the operator can sensibly ask for GNSS to be cut, vision has been
+        fusing alongside it for the whole climb.
+        """
+        if self.vision is None or self._vision_fusing or not self._params_sent:
+            return
+        health = self._healthy_vision(now)
+        if health is None:
+            return
+        self._vision_fusing = True
+        vision_bridge.apply_ekf2_fusion_params(self.link)
+        with self._telem_lock:
+            self._telem["vision_fusing"] = True
+        print(f">>> vision: FUSING alongside GNSS "
+              f"({health.get('n_inliers')} inliers). `gps_denied` is now "
+              f"available.")
+
     def _go_gps_denied(self):
         """Phase 2: cut GNSS and fly on vision alone. Setpoint thread only.
 
-        Refused unless vision is actually arriving. The whole point of phasing
-        the param set is that this step is taken with the vision source already
-        proven in flight; letting it through on a dead estimator would just
-        reproduce the descent it was split up to prevent.
+        Refused unless vision is actually being fused and still healthy. The
+        whole point of phasing the param set is that this step is taken with
+        the vision source already proven in flight; letting it through on a
+        dead estimator would just reproduce the descent it was split up to
+        prevent.
         """
         if self.vision is None:
             print("*** gps_denied: server was not started with --vision. ***")
             return
-        health = self._vio_status(time.monotonic()) or {}
-        if not health.get("fresh"):
-            print("*** gps_denied: REFUSED -- no fresh vision estimate. "
-                  "Cutting GNSS now would leave EKF2 with no position source "
-                  "at all. ***")
+        if not self._vision_fusing:
+            print("*** gps_denied: REFUSED -- EKF2 is not fusing vision yet. "
+                  "Climb until the camera can see ground. ***")
+            return
+        health = self._healthy_vision(time.monotonic())
+        if health is None:
+            print("*** gps_denied: REFUSED -- no fresh vision estimate with "
+                  "enough inliers. Cutting GNSS now would leave EKF2 with no "
+                  "position source at all. ***")
             return
         vision_bridge.apply_ekf2_gps_denied_params(self.link)
+        self._gps_denied = True
         with self._telem_lock:
             self._telem["gps_denied"] = True
         print(f">>> GPS-DENIED: GNSS fusion off, flying on vision "
@@ -308,26 +389,42 @@ class SetpointLoop(threading.Thread):
                       f" and rebooting PX4 so it takes effect -- "
                       f"params resume when it comes back")
                 return
-            # Phase 1: fuse vision WITH GNSS still on, so the aircraft can climb
-            # on GPS to where the nadir camera can actually see ground before
-            # anything is taken away. Cutting GNSS is phase 2, on command.
+            # Re-assert whatever phase we are ACTUALLY in, not phase 1.
+            #
+            # This method re-runs on any heartbeat gap (_check_px4_restart), so
+            # it is not only a startup path -- it is the recovery path too.
+            # Blindly asserting GPS flight here turns vision fusion back off
+            # mid-flight, which is exactly what happened on 2026-08-11: fusion
+            # engaged at altitude, a heartbeat gap re-ran this, and EKF2 quietly
+            # stopped using vision again.
+            if self._gps_denied:
+                vision_bridge.apply_ekf2_fusion_params(self.link)
+                vision_bridge.apply_ekf2_gps_denied_params(self.link)
+            elif self._vision_fusing:
+                vision_bridge.apply_ekf2_fusion_params(self.link)
+            else:
+                # PX4 params persist, so a previous GPS-denied session can
+                # otherwise leave this run booting with GNSS off and vision
+                # fused over a blind camera.
+                vision_bridge.apply_ekf2_gps_flight_params(self.link)
+            # The origin goes in now; fusion waits for a camera that can see.
             #
             # Order matters and is asserted by
             # test_gps_origin_is_sent_before_the_first_vision_estimate: PX4
             # cannot place a local estimate without an anchor, and VPE carries
             # no lat/lon of its own.
-            vision_bridge.apply_ekf2_fusion_params(self.link)
             if self.vision_origin is not None:
                 vision_bridge.send_gps_global_origin(self.link,
                                                      *self.vision_origin)
-                print(f">>> vision: fusion params applied, GPS origin "
-                      f"{self.vision_origin}")
+                print(f">>> vision: GPS origin {self.vision_origin}")
             else:
                 print("*** vision: NO ORIGIN configured. GLOBAL_POSITION_INT, "
                       "waypoint flight and the FLY gate will all fail "
                       "silently. ***")
-            print(">>> vision: GNSS still ON. Climb until the VIO row shows a "
-                  "healthy inlier count, then send `gps_denied` to cut it.")
+            print(f">>> vision: GNSS still ON and EKF2 is NOT yet fusing "
+                  f"vision -- it starts once the estimate clears "
+                  f"{VISION_MIN_INLIERS} inliers, which needs altitude. "
+                  f"Then send `gps_denied` to cut GNSS.")
         self._params_sent = True
         print(f">>> params: COM_RCL_EXCEPT=4 (offboard exempt from RC-loss "
               f"failsafe), MIS_TAKEOFF_ALT={self.takeoff_alt}, "
@@ -449,6 +546,7 @@ class SetpointLoop(threading.Thread):
             now_mono = time.monotonic()
             try:
                 self._send_vision(now_mono)
+                self._maybe_start_fusing_vision(now_mono)
             except Exception as exc:
                 print(f"*** vision send failed (setpoints continue): {exc!r} ***")
             self._check_px4_restart(now_mono)

@@ -1005,9 +1005,11 @@ Extend `streaming/tests/test_web_ui.py` in the existing style.
 
 Order matters: each step isolates one failure class.
 
-> **Status 2026-08-11:** 8.1-8.4 pass, 8.5 partial, 8.6-8.9 blocked on
-> `EKF2_HGT_REF` needing to be set before PX4 boots. Full write-up and the
-> blind-nadir-near-the-ground finding are in `SESSION.md`.
+> **Status 2026-08-11:** 8.1-8.4 pass. The `EKF2_HGT_REF` blocker is FIXED
+> (phase split + PX4 reboot, verified live). 8.6-8.9 are still blocked, now
+> on `VISION_POSITION_ESTIMATE` timestamps being Isaac sim time rather than
+> PX4's clock, so EKF2 discards them and has no position once GNSS is cut.
+> Full write-up, plus the blind-nadir-near-the-ground finding, in `SESSION.md`.
 
 - [x] **8.1** `DRONE_SETUP_DOWN_VIB_DAMP=False ./sim/launch-sitl.sh` → drone
       spawned, Play pressed, MJPEG on 8080. **Done 2026-08-11.**

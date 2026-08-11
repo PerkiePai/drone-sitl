@@ -116,6 +116,71 @@ Candidate fixes, none yet chosen:
    above — but it still requires fix 1 or 2, since `EKF2_HGT_REF` is what the
    handover depends on.
 
+## Second run, after the phase split: the height fix works, and it uncovered the next one
+
+Reflown 2026-08-11 with the three-phase sequence. **The `EKF2_HGT_REF` blocker
+is fixed** — verified live, in order:
+
+```
+>>> vision: set EKF2_HGT_REF and rebooting PX4 so it takes effect
+>>> vision: fusion params applied, GPS origin (13.66156872, 100.298235, 0.0)
+>>> vision: GNSS still ON. Climb until the VIO row shows a healthy inlier count
+```
+
+PX4 rebooted, the params resumed on the fresh instance, and the aircraft armed
+and climbed **on GPS** to a stable hover — `vz≈0.00`, `gs≈0.01`, 600 inliers,
+drift 0.36–0.61 m. The blind-nadir effect was visible in passing exactly as
+predicted: inliers ran 44 → 304 → 440 → 600 during the climb off the pad.
+
+`gps_denied` was then accepted on its own terms:
+
+```
+>>> GPS-DENIED: GNSS fusion off, flying on vision (581 inliers, drift 0.42)
+```
+
+**And PX4 immediately fell out of OFFBOARD into ALTCTL and began descending at
+0.70 m/s.** Re-commanding OFFBOARD was refused from then on. So EKF2 did *not*
+accept the vision stream as a position source: with GNSS cut it had no
+horizontal position at all, and dropped to the one mode that needs only baro.
+
+### Leading diagnosis: VPE timestamps are on the wrong clock
+
+Not yet confirmed against `ESTIMATOR_STATUS`, but the mechanism is concrete and
+the evidence fits:
+
+- `vio-streamer.py:216` takes `now = world.current_time` — **Isaac sim time,
+  counted from Play** — and `vio-streamer.py:229` stamps every sample
+  `ts_ns = int(now * 1e9)`. That timestamp is carried unchanged through the
+  estimator (`pipeline-streaming.py:139`) and into
+  `VISION_POSITION_ESTIMATE.usec` (`vision_bridge.py:126`).
+- EKF2 interprets that field on **PX4's own `hrt_absolute_time()` clock**,
+  counted from PX4 boot. The two epochs were never aligned, and the phase-0
+  reboot now moves PX4's epoch *again*, mid-session.
+- Samples that far outside the fusion window are discarded, which is consistent
+  with everything observed: 5,597 VPE messages sent, a healthy 546–600 inliers
+  throughout, and still no position once GNSS went away.
+
+`dropped_stale: 0` is not evidence against this — `VisionPositionSender.send()`
+judges staleness with wall-clock `received_at` (`vision_bridge.py:121`), by
+deliberate design, so it never inspects the sim stamp it forwards. The one
+number that would have caught this is the one nothing checks.
+
+This was invisible before the height fix: the aircraft never survived long
+enough on the previous run to test whether vision was actually being fused.
+
+### Where Task 8 stands now
+
+- [x] 8.1–8.4, unchanged
+- [x] **The phase split and the PX4 reboot work** — verified live end to end
+- [~] 8.5 params, origin, reboot ordering and the VIO row all good
+- [ ] **8.6–8.9 still blocked**, now on timestamp alignment rather than on
+      `EKF2_HGT_REF`
+
+Next step is to put VPE on PX4's clock — either offset the sim stamp by a
+measured boot delta, or stamp with `0` and let PX4 apply its own arrival time,
+which is the usual advice for exactly this situation and costs one render
+period of accuracy.
+
 ## If this resurfaces
 
 `alt_m` sinking steadily with `AUTO.LAND` latched and `offboard`/`disarm` both

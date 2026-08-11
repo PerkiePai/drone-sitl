@@ -107,6 +107,61 @@ def test_vision_noise_is_looser_than_px4_defaults():
     assert p["EKF2_EV_NOISE_MD"] == 1     # use the params, not a reported variance
 
 
+# --- the phase split -------------------------------------------------------
+
+def test_the_phases_partition_the_whole_param_set():
+    """Every param belongs to exactly one phase, and the phases add up to the
+    profile. A param in two phases would be applied twice with different
+    timing; one in none would silently never be applied at all."""
+    phases = (vision_bridge.EKF2_BOOT_PARAMS
+              + vision_bridge.EKF2_FUSION_PARAMS
+              + vision_bridge.EKF2_GPS_DENIED_PARAMS)
+    names = [n for n, _, _ in phases]
+    assert len(names) == len(set(names)), names
+    assert set(names) == {n for n, _, _ in vision_bridge.EKF2_VISION_PARAMS}
+
+
+def test_only_reboot_required_params_are_in_the_boot_phase():
+    """The boot phase costs a PX4 restart, so nothing rides along in it that
+    did not have to."""
+    assert ({n for n, _, _ in vision_bridge.EKF2_BOOT_PARAMS}
+            == set(vision_bridge.HGT_REF_NEEDS_REBOOT))
+
+
+def test_the_fusion_phase_is_safe_to_apply_with_gnss_on():
+    """Phase 1 must be flyable on GPS: it turns vision ON without taking
+    anything away, so the aircraft can climb to where the camera can see."""
+    assert "EKF2_GPS_CTRL" not in {n for n, _, _
+                                   in vision_bridge.EKF2_FUSION_PARAMS}
+
+
+def test_cutting_gnss_is_a_phase_of_its_own():
+    assert [n for n, _, _ in vision_bridge.EKF2_GPS_DENIED_PARAMS] == \
+        ["EKF2_GPS_CTRL"]
+
+
+def test_reboot_sets_the_boot_params_before_restarting(conn):
+    """Reboot first and the param is still unset when PX4 reads it -- the whole
+    sequence would be a no-op that looks like it worked."""
+    link = offboard.OffboardLink(conn)
+    order = []
+    link.set_param = lambda name, value, ptype: order.append(("param", name))
+    link.reboot_autopilot = lambda: order.append(("reboot", None))
+
+    vision_bridge.reboot_for_boot_params(link)
+
+    assert order == [("param", "EKF2_HGT_REF"), ("reboot", None)], order
+
+
+def test_reboot_autopilot_sends_the_documented_command(conn):
+    """MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN with param1=1 -- param1=0 would be a
+    shutdown, which is not recoverable without relaunching the sim."""
+    offboard.OffboardLink(conn).reboot_autopilot()
+    args = conn.mav.command_long_send.call_args[0]
+    assert args[2] == offboard.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN
+    assert args[4] == pytest.approx(1.0)
+
+
 def test_apply_params_sends_every_param_with_its_declared_type(conn):
     link = offboard.OffboardLink(conn)
     vision_bridge.apply_ekf2_vision_params(link)

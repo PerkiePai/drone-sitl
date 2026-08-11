@@ -187,9 +187,17 @@ class SetpointLoop(threading.Thread):
             # None when the server was started without --vision, so the page
             # can hide the row entirely rather than render a dead one.
             "vio": None,
+            # False until `gps_denied` is commanded and accepted. Under
+            # --vision the aircraft still flies on GNSS until then, and the
+            # difference matters enough to be visible rather than inferred.
+            "gps_denied": False,
         }
         self._stream_start = None
         self._params_sent = False
+        # Latched, not per-connection: the reboot must happen once. A PX4
+        # restart re-runs _send_startup_params (see _check_px4_restart), and
+        # without this latch that would reboot it again, forever.
+        self._vision_rebooted = False
         self._sim_ref = None          # (px4_boot_ms, wall_monotonic) baseline
 
     def telemetry(self):
@@ -236,16 +244,44 @@ class SetpointLoop(threading.Thread):
     def submit(self, name):
         """Called from the web thread. Queue only -- never touches `conn`."""
         if (name in ("arm", "disarm", "takeoff", "land", "offboard")
+                or name == "gps_denied"
                 or name in self.MISSION_COMMANDS):
             self.commands.put(name)
 
     def _run_command(self, name):
+        if name == "gps_denied":
+            self._go_gps_denied()
+            return
         method = self.MISSION_COMMANDS.get(name)
         if method is not None:
             getattr(self.mission, method)()
         else:
             getattr(self.link, name)()
         print(f">>> command: {name}")
+
+    def _go_gps_denied(self):
+        """Phase 2: cut GNSS and fly on vision alone. Setpoint thread only.
+
+        Refused unless vision is actually arriving. The whole point of phasing
+        the param set is that this step is taken with the vision source already
+        proven in flight; letting it through on a dead estimator would just
+        reproduce the descent it was split up to prevent.
+        """
+        if self.vision is None:
+            print("*** gps_denied: server was not started with --vision. ***")
+            return
+        health = self._vio_status(time.monotonic()) or {}
+        if not health.get("fresh"):
+            print("*** gps_denied: REFUSED -- no fresh vision estimate. "
+                  "Cutting GNSS now would leave EKF2 with no position source "
+                  "at all. ***")
+            return
+        vision_bridge.apply_ekf2_gps_denied_params(self.link)
+        with self._telem_lock:
+            self._telem["gps_denied"] = True
+        print(f">>> GPS-DENIED: GNSS fusion off, flying on vision "
+              f"({health.get('n_inliers')} inliers, "
+              f"drift {health.get('drift_m')}).")
 
     def _send_startup_params(self):
         self.link.set_param("COM_RCL_EXCEPT", offboard.COM_RCL_EXCEPT_OFFBOARD,
@@ -258,25 +294,40 @@ class SetpointLoop(threading.Thread):
         self.link.set_param("MPC_XY_VEL_MAX", self.mission_speed,
                             offboard.MAV_PARAM_TYPE_REAL32)
         if self.vision is not None:
+            if not self._vision_rebooted:
+                # Phase 0. PX4 is already booted by the time we can talk to it,
+                # so the @reboot_required height reference can only be made to
+                # take by restarting it. Everything else waits: PX4 is about to
+                # drop off the link, and params sent into that gap are lost.
+                # The reboot shows up as a heartbeat gap, _check_px4_restart
+                # clears _params_sent, and this method runs again with
+                # _vision_rebooted set -- so phase 1 lands on the fresh PX4.
+                self._vision_rebooted = True
+                vision_bridge.reboot_for_boot_params(self.link)
+                print(f">>> vision: set {', '.join(vision_bridge.HGT_REF_NEEDS_REBOOT)}"
+                      f" and rebooting PX4 so it takes effect -- "
+                      f"params resume when it comes back")
+                return
+            # Phase 1: fuse vision WITH GNSS still on, so the aircraft can climb
+            # on GPS to where the nadir camera can actually see ground before
+            # anything is taken away. Cutting GNSS is phase 2, on command.
+            #
             # Order matters and is asserted by
             # test_gps_origin_is_sent_before_the_first_vision_estimate: PX4
             # cannot place a local estimate without an anchor, and VPE carries
             # no lat/lon of its own.
-            vision_bridge.apply_ekf2_vision_params(self.link)
+            vision_bridge.apply_ekf2_fusion_params(self.link)
             if self.vision_origin is not None:
                 vision_bridge.send_gps_global_origin(self.link,
                                                      *self.vision_origin)
-                print(f">>> vision: EKF2 param set applied, GPS origin "
+                print(f">>> vision: fusion params applied, GPS origin "
                       f"{self.vision_origin}")
             else:
                 print("*** vision: NO ORIGIN configured. GLOBAL_POSITION_INT, "
                       "waypoint flight and the FLY gate will all fail "
                       "silently. ***")
-            for name in vision_bridge.HGT_REF_NEEDS_REBOOT:
-                print(f"*** {name} is @reboot_required: PX4 now STORES the new "
-                      f"value (QGC will show it) but keeps its old height "
-                      f"reference until it restarts. Set it before PX4 boots, "
-                      f"or reboot the flight controller once. ***")
+            print(">>> vision: GNSS still ON. Climb until the VIO row shows a "
+                  "healthy inlier count, then send `gps_denied` to cut it.")
         self._params_sent = True
         print(f">>> params: COM_RCL_EXCEPT=4 (offboard exempt from RC-loss "
               f"failsafe), MIS_TAKEOFF_ALT={self.takeoff_alt}, "

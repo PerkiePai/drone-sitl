@@ -16,7 +16,7 @@ fetch('/config').then(r => r.json()).then(c => {
   setMissionSpeed(c.mission_speed);
 });
 
-['arm', 'takeoff', 'offboard', 'land', 'disarm'].forEach(name =>
+['arm', 'takeoff', 'offboard', 'land', 'disarm', 'gps_denied'].forEach(name =>
   document.getElementById(`c-${name}`).addEventListener(
     'click', () => sendCmd(name)));
 

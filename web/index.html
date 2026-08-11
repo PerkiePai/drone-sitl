@@ -68,6 +68,13 @@
     <button id="c-land">LAND</button>
     <button id="c-disarm">DISARM</button>
   </div>
+  <!-- Hidden unless the server was started with --vision. Cutting GNSS is a
+       deliberate act taken at altitude with a healthy VIO row, never a default,
+       so it gets its own control rather than a place in the command row. -->
+  <div id="gpsd" hidden>
+    <button id="c-gps_denied">GO GPS-DENIED</button>
+    <span id="gpsd-stat">GNSS on — climb until VIO is healthy</span>
+  </div>
   <div id="rec">
     <button id="c-record" disabled>RECORD</button>
     <span id="rec-dot"></span>

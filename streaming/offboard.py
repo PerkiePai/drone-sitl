@@ -41,6 +41,12 @@ POS_YAW_TYPE_MASK = 2552
 
 MAV_CMD_DO_SET_MODE = 176
 MAV_CMD_COMPONENT_ARM_DISARM = 400
+# MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, param1=1 -> reboot the autopilot
+# (MAVLink common.xml). PX4 refuses it while armed, which is the behaviour we
+# want: the only caller reboots to make a @reboot_required param take, and that
+# is a pre-flight act by definition.
+MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN = 246
+PREFLIGHT_REBOOT_AUTOPILOT = 1.0
 MAV_PARAM_TYPE_INT32 = 6
 MAV_PARAM_TYPE_REAL32 = 9
 MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1
@@ -264,6 +270,17 @@ class OffboardLink:
 
     def offboard(self):
         self.set_mode(PX4_MAIN_MODE_OFFBOARD)
+
+    def reboot_autopilot(self):
+        """Reboot PX4. Setpoint thread only.
+
+        The only way to make a @reboot_required param take effect on a running
+        flight controller. PX4 rejects this while armed, so it is safe to call
+        unconditionally at startup: the worst case is a refused command, not a
+        reboot in flight.
+        """
+        self._command_long(MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+                           PREFLIGHT_REBOOT_AUTOPILOT)
 
     def set_param(self, name, value, param_type):
         self.conn.mav.param_set_send(

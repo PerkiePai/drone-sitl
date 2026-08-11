@@ -38,6 +38,7 @@ const EXPECT = {
   takeoff:  t => t.mode === 'AUTO.TAKEOFF',
   offboard: t => t.mode === 'OFFBOARD',
   land:     t => t.mode === 'AUTO.LAND',
+  gps_denied: t => t.gps_denied,
 };
 // Budget for PX4 to act, expressed in SIM seconds -- because PX4 SITL runs in
 // lockstep with Isaac, so sim time is the only clock it experiences.
@@ -102,6 +103,29 @@ function paintVio(v) {
     v.fps === null || v.fps === undefined ? '--' : v.fps.toFixed(0);
 }
 
+// The GNSS cut. Shown only under --vision, and gated on the same `fresh` the
+// server gates on, so the button is not offered when pressing it would be
+// refused. Once taken it stays taken -- there is no un-cut command.
+function paintGpsDenied(t) {
+  const row = el('gpsd');
+  if (!t.vio) { row.hidden = true; return; }
+  row.hidden = false;
+
+  const btn = el('c-gps_denied');
+  const stat = el('gpsd-stat');
+  if (t.gps_denied) {
+    btn.disabled = true;
+    stat.textContent = 'GNSS OFF — flying on vision';
+    stat.className = 'good';
+    return;
+  }
+  btn.disabled = !t.vio.fresh;
+  stat.textContent = t.vio.fresh
+    ? 'GNSS on — ready to cut'
+    : 'GNSS on — waiting for a fresh estimate';
+  stat.className = t.vio.fresh ? 'wait' : 'bad';
+}
+
 export function paint(t) {
   el('t-link').textContent = t.connected ? 'up' : 'down';
   el('t-link').className = t.connected ? 'good' : 'bad';
@@ -126,6 +150,7 @@ export function paint(t) {
   }
 
   paintVio(t.vio);
+  paintGpsDenied(t);
 
   el('c-offboard').disabled = !t.ready_for_offboard;
   ['c-arm','c-takeoff','c-land','c-disarm'].forEach(

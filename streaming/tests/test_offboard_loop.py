@@ -486,11 +486,57 @@ def test_ekf2_params_are_not_sent_without_the_vision_flag():
     assert not [n for n in sent if n.startswith("EKF2_")], sent
 
 
+def test_startup_reboots_px4_before_sending_anything_else():
+    """EKF2_HGT_REF is @reboot_required, so the first startup pass sets it and
+    restarts PX4 -- and sends nothing else, because PX4 is about to drop off
+    the link and params posted into that gap are simply lost.
+
+    Skipping this is not a cosmetic bug: with GNSS cut and the height reference
+    still on GPS, the aircraft descends without bound (SESSION.md 2026-08-11)."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 23, _pose(), received_at=time.monotonic())
+    order = []
+    loop.link.set_param = lambda name, value, ptype: order.append(("param", name))
+    loop.link.reboot_autopilot = lambda: order.append(("reboot", None))
+    loop.link.conn.mav.set_gps_global_origin_send = (
+        lambda *a, **k: order.append(("origin", a)))
+
+    loop._send_startup_params()
+
+    kinds = [k for k, _ in order]
+    assert ("param", "EKF2_HGT_REF") in order, order
+    assert "reboot" in kinds, order
+    assert kinds.index("reboot") == len(kinds) - 1, (
+        "the reboot must be the LAST thing sent", order)
+    assert "origin" not in kinds, ("nothing may follow the reboot", order)
+
+
+def test_the_reboot_happens_once_not_on_every_restart():
+    """_check_px4_restart re-runs the startup params on any heartbeat gap, and
+    a reboot IS a heartbeat gap. Without a latch that is an infinite loop of
+    reboots."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 26, _pose(), received_at=time.monotonic())
+    reboots = []
+    loop.link.set_param = lambda name, value, ptype: None
+    loop.link.reboot_autopilot = lambda: reboots.append(1)
+
+    loop._send_startup_params()          # phase 0: reboots
+    loop._send_startup_params()          # PX4 back: must NOT reboot again
+    loop._send_startup_params()
+
+    assert len(reboots) == 1, reboots
+
+
 def test_gps_origin_is_sent_before_the_first_vision_estimate():
     """PX4 cannot place a local estimate without an anchor, so ordering is the
     assertion."""
     js = _load_server()
     _, loop, _ = _vision_loop(js, 23, _pose(), received_at=time.monotonic())
+    loop.link.set_param = lambda name, value, ptype: None
+    loop.link.reboot_autopilot = lambda: None
+    loop._send_startup_params()          # phase 0: the reboot pass
+
     order = []
     loop.link.set_param = lambda name, value, ptype: order.append(("param", name))
     loop.link.conn.mav.set_gps_global_origin_send = (
@@ -498,14 +544,57 @@ def test_gps_origin_is_sent_before_the_first_vision_estimate():
     loop.vision_sender.conn.mav.vision_position_estimate_send = (
         lambda *a, **k: order.append(("vpe", a)))
 
-    loop._send_startup_params()
+    loop._send_startup_params()          # phase 1: fusion + origin
     loop._send_vision(time.monotonic())
 
     kinds = [k for k, _ in order]
     assert "origin" in kinds, kinds
     assert "vpe" in kinds, kinds
     assert kinds.index("origin") < kinds.index("vpe")
-    assert ("param", "EKF2_GPS_CTRL") in order
+    assert ("param", "EKF2_EV_CTRL") in order
+
+
+def test_startup_never_cuts_gnss_on_its_own():
+    """EKF2_GPS_CTRL=0 is phase 2 and belongs to the `gps_denied` command. If
+    startup cut GNSS, the aircraft would be GPS-denied while still on the pad --
+    where the nadir camera cannot see the ground at all (SESSION.md)."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 27, _pose(), received_at=time.monotonic())
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+    loop.link.reboot_autopilot = lambda: None
+
+    loop._send_startup_params()
+    loop._send_startup_params()
+
+    assert "EKF2_GPS_CTRL" not in sent, sent
+    assert loop.telemetry()["gps_denied"] is False
+
+
+def test_gps_denied_is_refused_without_a_fresh_estimate():
+    """Cutting GNSS with a dead estimator leaves EKF2 with no position source
+    at all -- the exact descent the phase split exists to prevent."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 28, _pose(), received_at=None)
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+
+    loop._run_command("gps_denied")
+
+    assert sent == [], sent
+    assert loop.telemetry()["gps_denied"] is False
+
+
+def test_gps_denied_cuts_gnss_when_vision_is_fresh():
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 29, _pose(), received_at=time.monotonic())
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+
+    loop._run_command("gps_denied")
+
+    assert "EKF2_GPS_CTRL" in sent, sent
+    assert loop.telemetry()["gps_denied"] is True
 
 
 def test_gps_origin_is_resent_after_a_px4_restart():
@@ -514,9 +603,11 @@ def test_gps_origin_is_resent_after_a_px4_restart():
     _, loop, _ = _vision_loop(js, 24, _pose(), received_at=time.monotonic())
     origins = []
     loop.link.set_param = lambda name, value, ptype: None
+    loop.link.reboot_autopilot = lambda: None
     loop.link.conn.mav.set_gps_global_origin_send = (
         lambda *a, **k: origins.append(a))
 
+    loop._send_startup_params()          # phase 0: the reboot pass, no origin
     loop._send_startup_params()
     assert len(origins) == 1
 

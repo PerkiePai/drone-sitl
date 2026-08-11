@@ -325,3 +325,39 @@ def test_telemetry_carries_no_vio_block_without_the_vision_flag():
     loop = mod.SetpointLoop(conn, offboard.CommandState(2.0, 1.0))
     assert loop.telemetry()["vio"] is None
     assert loop._vio_status(0.0) is None
+
+
+def test_the_gps_denied_control_is_hidden_until_the_server_offers_vision():
+    """An ordinary GPS flight must not offer a button that cuts GNSS."""
+    html = _read("web", "index.html")
+    assert 'id="gpsd"' in html
+    row = html.split('id="gpsd"')[1].split(">")[0]
+    assert "hidden" in row, "the GPS-denied control must start hidden"
+    for field in ("c-gps_denied", "gpsd-stat"):
+        assert f'id="{field}"' in html
+
+
+def test_the_gps_denied_button_is_wired_to_the_command():
+    """sendCmd() resolves the button by `c-${name}`, so the id and the command
+    name are the same string -- a mismatch would flash nothing and look dead."""
+    main = _read("web", "js", "main.js")
+    assert "'gps_denied'" in main
+    assert "c-${name}" in main
+
+
+def test_the_gps_denied_button_is_disabled_without_a_fresh_estimate():
+    """The server refuses the command on a stale estimate, so the page must not
+    offer it -- a button that does nothing when pressed is worse than no
+    button."""
+    js = _read("web", "js", "telemetry.js")
+    seg = js.split("function paintGpsDenied")[1]
+    assert "btn.disabled = !t.vio.fresh" in seg
+
+
+def test_cutting_gnss_is_reported_as_taken_and_not_offered_twice():
+    """There is no un-cut command, so the control latches rather than
+    pretending the step is repeatable."""
+    js = _read("web", "js", "telemetry.js")
+    seg = js.split("function paintGpsDenied")[1]
+    assert "t.gps_denied" in seg
+    assert "GNSS OFF" in seg

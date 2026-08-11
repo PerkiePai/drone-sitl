@@ -34,23 +34,73 @@ from offboard import MAV_PARAM_TYPE_INT32, MAV_PARAM_TYPE_REAL32
 #   EKF2_EVP_NOISE    ekf2_params.c:837, default 0.1 m -- far too tight for a
 #   EKF2_EVA_NOISE    ekf2_params.c:857, default 0.1 rad -- drifting estimator;
 #                     EKF2 would reject its own vision source as inconsistent.
-EKF2_VISION_PARAMS = (
-    ("EKF2_GPS_CTRL", 0, MAV_PARAM_TYPE_INT32),
-    ("EKF2_EV_CTRL", 9, MAV_PARAM_TYPE_INT32),
+# The set is split into three PHASES, because applying it as one block does not
+# work and the failure is an unbounded descent rather than an error. Measured
+# live 2026-08-11 (SESSION.md): EKF2_GPS_CTRL=0 takes effect immediately while
+# EKF2_HGT_REF=0 does not, leaving EKF2 with GNSS fusion off and its height
+# reference still on GPS. Reported altitude ran 49 m -> -22 m and still falling,
+# with AUTO.LAND latched and both `offboard` and `disarm` refused.
+
+EKF2_BOOT_PARAMS = (
     ("EKF2_HGT_REF", 0, MAV_PARAM_TYPE_INT32),
+)
+"""Phase 0 -- @reboot_required, so PX4 must be restarted after these are set.
+
+`EKF2_HGT_REF` ekf2_params.c:657, default 1 (GPS). 0 = barometric, which is
+where the height genuinely comes from. *** @reboot_required true
+(ekf2_params.c:656). *** A PARAM_SET at runtime updates the STORED value -- QGC
+will show 0 -- but EKF2 does not re-read its height reference until PX4
+restarts.
+"""
+
+EKF2_FUSION_PARAMS = (
+    ("EKF2_EV_CTRL", 9, MAV_PARAM_TYPE_INT32),
     ("EKF2_EV_NOISE_MD", 1, MAV_PARAM_TYPE_INT32),
     ("EKF2_EVP_NOISE", 0.5, MAV_PARAM_TYPE_REAL32),
     ("EKF2_EVA_NOISE", 0.2, MAV_PARAM_TYPE_REAL32),
 )
+"""Phase 1 -- turn vision fusion ON while GNSS is still on. Safe in flight.
 
-HGT_REF_NEEDS_REBOOT = ("EKF2_HGT_REF",)
+Deliberately separable from phase 2 so the aircraft can climb on GPS with the
+vision source already being fused and observable before anything is taken away.
+At sites where the nadir camera cannot see the ground from the pad -- which is
+every Cesium-tile site tested so far -- that climb is not optional.
+
+  EKF2_EV_CTRL      ekf2_params.c:687, default 15. bit0 horizontal position,
+                    bit1 vertical position, bit2 3D velocity, bit3 yaw.
+                    9 = horizontal position + yaw, which is exactly what
+                    flow-odom measures. Vertical is deliberately NOT claimed:
+                    altitude comes straight from the barometer
+                    (flow_odometry.py:455), and EKF2 already fuses baro
+                    directly (EKF2_BARO_CTRL default 1), so setting bit1 would
+                    feed one sensor in twice and read as spurious agreement.
+  EKF2_EV_NOISE_MD  ekf2_params.c:814, default 0. 1 = use the noise params
+                    below rather than a reported variance we do not compute.
+  EKF2_EVP_NOISE    ekf2_params.c:837, default 0.1 m -- far too tight for a
+  EKF2_EVA_NOISE    ekf2_params.c:857, default 0.1 rad -- drifting estimator;
+                    EKF2 would reject its own vision source as inconsistent.
+"""
+
+EKF2_GPS_DENIED_PARAMS = (
+    ("EKF2_GPS_CTRL", 0, MAV_PARAM_TYPE_INT32),
+)
+"""Phase 2 -- the GPS-denied moment itself. Kept alone and explicit.
+
+`EKF2_GPS_CTRL` ekf2_params.c:706, default 7. 0 disables ALL GNSS fusion. This
+is the only irreversible-feeling step in the sequence and the one worth being
+able to point at, so it is not buried in a block of six.
+"""
+
+EKF2_VISION_PARAMS = EKF2_BOOT_PARAMS + EKF2_FUSION_PARAMS + EKF2_GPS_DENIED_PARAMS
+"""Every param the vision profile touches. The phases above are how they are
+APPLIED; this is what the whole profile amounts to."""
+
+HGT_REF_NEEDS_REBOOT = tuple(name for name, _, _ in EKF2_BOOT_PARAMS)
 """Params that PX4 only re-reads at boot.
 
 Setting these on a running PX4 is not enough: the value sticks, the behaviour
-does not change. They have to be in place BEFORE the flight controller starts,
-which for SITL means the startup script rather than a PARAM_SET at connect
-time. Kept as data so the caller can warn rather than silently believing a
-param it can see took effect.
+does not change. Kept as data so the caller can act rather than silently
+believing a param it can see took effect.
 """
 
 DEFAULT_MAX_AGE_S = 0.5
@@ -73,10 +123,51 @@ def enu_to_ned(e, n, u):
     return (n, e, -u)
 
 
-def apply_ekf2_vision_params(link):
-    """Push the vision param set. Setpoint thread only."""
-    for name, value, ptype in EKF2_VISION_PARAMS:
+def _apply(link, params):
+    for name, value, ptype in params:
         link.set_param(name, value, ptype)
+
+
+def apply_ekf2_vision_params(link):
+    """Push the whole vision param set in one go. Setpoint thread only.
+
+    Correct ONLY when PX4 will be rebooted afterwards, or was booted with the
+    phase-0 params already in place. Applying this to a running PX4 and then
+    flying is the failure described at EKF2_BOOT_PARAMS. Prefer the phased
+    calls below; this is kept for the case where a reboot follows.
+    """
+    _apply(link, EKF2_VISION_PARAMS)
+
+
+def apply_ekf2_boot_params(link):
+    """Phase 0. Setpoint thread only. Requires a reboot to take effect."""
+    _apply(link, EKF2_BOOT_PARAMS)
+
+
+def apply_ekf2_fusion_params(link):
+    """Phase 1: fuse vision alongside GNSS. Setpoint thread only."""
+    _apply(link, EKF2_FUSION_PARAMS)
+
+
+def apply_ekf2_gps_denied_params(link):
+    """Phase 2: cut GNSS. Setpoint thread only.
+
+    Separate from phase 1 on purpose -- this is the step that can put the
+    aircraft in the ground if the vision source is not already known good.
+    """
+    _apply(link, EKF2_GPS_DENIED_PARAMS)
+
+
+def reboot_for_boot_params(link):
+    """Set the @reboot_required params and restart PX4. Setpoint thread only.
+
+    PX4 refuses a reboot while armed, so this is a pre-flight act by
+    construction. The caller is expected to re-apply the remaining phases once
+    PX4 comes back -- joystick-server.py already re-sends its startup params on
+    a heartbeat gap, which is exactly what a reboot looks like from outside.
+    """
+    apply_ekf2_boot_params(link)
+    link.reboot_autopilot()
 
 
 def send_gps_global_origin(link, lat_deg, lon_deg, alt_m):

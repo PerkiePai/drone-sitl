@@ -1005,15 +1005,25 @@ Extend `streaming/tests/test_web_ui.py` in the existing style.
 
 Order matters: each step isolates one failure class.
 
-- [ ] **8.1** `DRONE_SETUP_DOWN_VIB_DAMP=False ./sim/launch-sitl.sh` → drone
-      spawned, Play pressed, MJPEG on 8080.
-- [ ] **8.2** Streamer up; `meta` reports `vib_damp: false` and the site origin.
-- [ ] **8.3** Estimator up; drift vs GT printed and bounded while hovering.
-- [ ] **8.4** **Baseline** — `joystick-server.py` **without** `--vision`. Fly
+> **Status 2026-08-11:** 8.1-8.4 pass, 8.5 partial, 8.6-8.9 blocked on
+> `EKF2_HGT_REF` needing to be set before PX4 boots. Full write-up and the
+> blind-nadir-near-the-ground finding are in `SESSION.md`.
+
+- [x] **8.1** `DRONE_SETUP_DOWN_VIB_DAMP=False ./sim/launch-sitl.sh` → drone
+      spawned, Play pressed, MJPEG on 8080. **Done 2026-08-11.**
+- [x] **8.2** Streamer up; `meta` reports `vib_damp: false` and the site origin.
+      **Done** — verified over the wire by the estimator's prime line.
+- [x] **8.3** Estimator up; drift vs GT printed and bounded while hovering.
+      **Done** — 0.36-0.61 m at 49 m, ~600 inliers, 8.8 fps.
+- [x] **8.4** **Baseline** — `joystick-server.py` **without** `--vision`. Fly
       normally on GPS. Confirms nothing regressed before vision is trusted.
-- [ ] **8.5** Restart with `--vision`. Confirm in QGC's parameter view that all
+      **Done** — took off to 49.2 m and held station.
+- [~] **8.5** Restart with `--vision`. Confirm in QGC's parameter view that all
       six EKF2 params took, and that `GLOBAL_POSITION_INT` still produces a map
       position (proves the origin landed).
+      **Partial** — origin landed and the VIO row works, but `EKF2_HGT_REF` is
+      @reboot_required and cannot take effect when applied at connect time.
+      See SESSION.md 2026-08-11.
 - [ ] **8.6** Arm, take off, hover 60 s vision-only. Pass bar is **holding
       station**, not zero drift.
 - [ ] **8.7** Manual flight — forward/back/turn. Watch drift accumulate.

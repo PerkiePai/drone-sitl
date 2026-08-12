@@ -2,9 +2,10 @@
 
 **Date:** 2026-08-11
 **Plan:** `docs/superpowers/plans/2026-08-07-vio-gps-denied.md`, Task 8
-**Result:** 8.1–8.5 pass. GPS-denied flight ACHIEVED and held ~40 s, then
-diverged. 8.6 does not pass. Read top to bottom: three runs, and each fix
-exposed the next fault. The root cause of all of it was INT32 param encoding.
+**Result:** 8.1–8.5 pass. GPS-denied flight ACHIEVED and repeatable, but it
+does not hold station for 60 s, so 8.6 does not pass. Read top to bottom:
+four runs, each fix exposing the next fault. The root cause of the transport
+faults was INT32 param encoding; what remains is estimator drift.
 
 Run configuration:
 
@@ -322,6 +323,61 @@ this one instance and waiting for the next.
 
 Note the irony: `dropped_stale` is the counter the previous write-up dismissed
 as "the one nothing checks". It was the smoking gun all along.
+
+## Fourth run: the staleness fix works, and the remaining fault is the estimator
+
+`VisionPositionSender` now ages estimates against PX4's `time_boot_ms` -- sim
+time under lockstep -- instead of the wall clock. Flown 2026-08-12:
+
+| | run 3 (wall clock) | run 4 (sim clock) |
+|---|---|---|
+| `dropped_stale` over the flight | 15 → 179 | **0 throughout** |
+| `sim_rate` | 0.56 → 0.11 | 0.41–0.59, no collapse |
+
+**That bug is fixed.** Not one estimate was dropped, at any point, including
+while the sim was at 0.41.
+
+**The aircraft still diverged, for a different reason.** `drift_m` -- the
+estimator's own error against ground truth -- ran away:
+
+```
+23–37 m   at the moment GNSS was cut
+60 → 77 → 318 → 704 → 1195 → 1801 → 2275 → 2544 m
+```
+
+with ground speed reaching 58 m/s and the estimator's own position at
+`(1271, -1030)` when truth was near the origin. So **8.6 still does not pass**,
+but the failure has moved out of the plumbing and into flow-odometry accuracy.
+
+### Two things this exposes, neither of them a transport bug
+
+1. **The estimate has already drifted tens of metres before the handover.**
+   Hovering at 49 m in run 1 the drift was 0.36–0.61 m; after a 3 m/s climb to
+   the same altitude it is 23–37 m. The drift is accumulated during the *climb*
+   -- flow-odom solves translation against a ground plane at barometric height,
+   and a fast climb is where that is worst conditioned.
+
+2. **Nothing realigns the two frames at the cut.** EKF2 is handed a vision frame
+   that already disagrees with where it believes it is by ~30 m, then follows
+   it. The aircraft chases the drifting estimate, which moves the camera, which
+   feeds more drift -- the runaway above. A handover that reset the vision
+   origin to PX4's current position would start GPS-denied flight from zero
+   error instead of from 30 m.
+
+Worth being clear that (2) is a *design* gap in the handover, not a bug in
+anything already written: the two-phase profile was specified before anyone had
+flown far enough to see that the phases meet at a discontinuity.
+
+### Where Task 8 stands
+
+- [x] 8.1–8.5, and the phase split, the param encoding and the staleness clock
+- [~] **8.6** GPS-denied flight is real and repeatable -- `cs_gps: False`,
+      `cs_ev_pos: True`, holding OFFBOARD on vision alone -- but it does not
+      hold station for 60 s, so the bar is not met
+- [ ] 8.7–8.9 not attempted; they all sit downstream of a stable hover
+
+Next, in order: realign the vision frame at handover (cheap, and (2) above is
+the larger error by far), then look at climb-phase drift.
 
 ## If this resurfaces
 

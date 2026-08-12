@@ -1012,8 +1012,10 @@ Order matters: each step isolates one failure class.
 > The root cause behind the whole chain was `set_param` sending INT32 params as
 > a float, so PX4 stored the bit pattern: `EKF2_EV_CTRL` was 1091567616, never
 > 9, and vision fusion had never once switched on. Fixed. The next blocker is
-> `VisionPositionSender`'s staleness check being in wall time while the sim runs
-> on sim time -- when `sim_rate` falls, good estimates are dropped as stale.
+> the estimator's own drift. The staleness clock is fixed (`dropped_stale` 0
+> for a whole flight, was 179). What remains is that flow-odom accumulates
+> 23-37 m of drift during the climb and nothing realigns the vision frame to
+> PX4's at the handover, so EKF2 inherits that error and follows it away.
 > Full write-up in `SESSION.md`.
 
 - [x] **8.1** `DRONE_SETUP_DOWN_VIB_DAMP=False ./sim/launch-sitl.sh` → drone

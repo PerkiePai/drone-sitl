@@ -644,6 +644,66 @@ def test_gps_denied_is_refused_before_vision_is_fusing():
     assert loop.telemetry()["gps_denied"] is False
 
 
+def _local_pos(time_boot_ms, z=-10.0):
+    return type("M", (), {
+        "time_boot_ms": time_boot_ms, "z": z, "vz": 0.0, "vx": 0.0, "vy": 0.0,
+        "get_type": lambda s: "LOCAL_POSITION_NED"})()
+
+
+def test_a_slow_sim_does_not_make_good_estimates_look_stale():
+    """The staleness budget is in SIM seconds, so a sim running at 0.11 must not
+    turn a perfectly good estimate into a dropped one.
+
+    This is the crash of 2026-08-11: `dropped_stale` ran 15 -> 179 as `sim_rate`
+    fell 0.56 -> 0.11, starving EKF2 of the only position source it had left."""
+    js = _load_server()
+    _, loop, vision = _vision_loop(js, 35, _pose(), received_at=time.monotonic())
+    loop.link.set_param = lambda name, value, ptype: None
+
+    # PX4 sim clock advances 0.1 s while NINE wall seconds pass -- sim_rate 0.011.
+    loop._px4_sim_s = 100.0
+    assert loop._send_vision(time.monotonic())          # first pose, age 0
+    loop._px4_sim_s = 100.1
+    assert loop._send_vision(time.monotonic() + 9.0), (
+        "a 0.1 s sim-time gap must not be judged stale because 9 wall seconds "
+        "elapsed")
+    assert loop.vision_sender.dropped_stale == 0
+
+
+def test_a_genuinely_frozen_estimator_is_still_caught():
+    """The guard must survive being put on the right clock: an estimator that
+    stops producing while SIM time advances is still dropped, because repeating
+    a frozen position is worse than having none."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 36, _pose(), received_at=time.monotonic())
+    loop.link.set_param = lambda name, value, ptype: None
+
+    loop._px4_sim_s = 100.0
+    assert loop._send_vision(time.monotonic())
+    # Same pose (same ts_ns), sim time marches on well past the budget.
+    loop._px4_sim_s = 100.0 + loop.vision_sender.max_age_s + 0.5
+    assert not loop._send_vision(time.monotonic())
+    assert loop.vision_sender.dropped_stale == 1
+
+
+def test_the_page_and_the_sender_agree_on_freshness():
+    """`fresh` gates the GNSS cut and the drop decision gates the aircraft's
+    position source. If they were computed from different clocks the page could
+    offer a cut that the sender was already refusing to feed."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 37, _pose(), received_at=time.monotonic())
+    loop.link.set_param = lambda name, value, ptype: None
+
+    loop._px4_sim_s = 50.0
+    loop._send_vision(time.monotonic())
+    assert loop._vio_status(time.monotonic())["fresh"] is True
+
+    loop._px4_sim_s = 50.0 + loop.vision_sender.max_age_s + 0.5
+    sent = loop._send_vision(time.monotonic())
+    assert sent is False
+    assert loop._vio_status(time.monotonic())["fresh"] is False
+
+
 def test_a_heartbeat_gap_does_not_switch_vision_back_off():
     """_send_startup_params is the RECOVERY path as well as the startup one --
     _check_px4_restart re-runs it on any heartbeat gap. Asserting GPS flight

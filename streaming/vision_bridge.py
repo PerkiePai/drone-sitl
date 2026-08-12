@@ -112,6 +112,23 @@ believing a param it can see took effect.
 """
 
 DEFAULT_MAX_AGE_S = 0.5
+"""How long an estimate may go unrefreshed before it is dropped, in SIM SECONDS.
+
+The unit is the whole point. This budget answers "how long has the aircraft been
+flying on a position nobody has confirmed", and the aircraft flies in sim time:
+PX4 SITL is lockstepped to Isaac, so at sim_rate 0.11 one simulated second takes
+nine wall seconds and the airframe does not care.
+
+Measured in wall time -- as this was until 2026-08-12 -- it turns into a
+self-inflicted failure exactly when the sim bogs down. The estimator keeps
+producing perfectly good estimates, they arrive further apart in wall time than
+the budget allows, and every one is dropped as stale at the precise moment they
+are the only position source EKF2 has. Observed: `dropped_stale` 15 -> 179 while
+`sim_rate` fell 0.56 -> 0.11, and the aircraft diverged and crashed.
+
+The caller supplies both `now` and `received_at`; it is responsible for their
+being on the same clock, and for that clock being sim time when one is available.
+"""
 
 
 @dataclass(frozen=True)
@@ -224,9 +241,12 @@ class VisionPositionSender:
         A pose older than max_age_s is DROPPED rather than repeated. Repeating a
         frozen position keeps EKF2 confident about a place the drone is not,
         and EKF2 has failsafes for a lost vision source but none for a lying
-        one. `received_at` is wall time (time.monotonic) at which the estimate
-        arrived over ZMQ -- not pose.ts_ns, which is SIM time and runs at its
-        own rate under lockstep.
+        one.
+
+        `now` and `received_at` must be on the SAME clock, and that clock should
+        be sim time wherever the caller can get it -- see DEFAULT_MAX_AGE_S for
+        what measuring this in wall time costs. This function cannot check that
+        for itself, which is why the requirement is stated rather than enforced.
         """
         if pose is None:
             return False

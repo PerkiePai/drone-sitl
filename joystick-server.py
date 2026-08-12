@@ -230,6 +230,12 @@ class SetpointLoop(threading.Thread):
         # the re-send path can read the phase without taking the telemetry lock.
         self._gps_denied = False
         self._sim_ref = None          # (px4_boot_ms, wall_monotonic) baseline
+        # PX4's own clock, which under lockstep IS sim time. Used to age vision
+        # estimates in the same seconds the aircraft actually flies in.
+        self._px4_sim_s = None
+        self._vision_seen_ts = None    # pose.ts_ns of the newest pose seen
+        self._vision_seen_at = None    # clock reading when it first appeared
+        self._vision_age_s = None      # computed once per tick by _send_vision
 
     def telemetry(self):
         with self._telem_lock:
@@ -449,8 +455,36 @@ class SetpointLoop(threading.Thread):
         """
         if self.vision_sender is None:
             return False
-        pose, received_at = self.vision.latest()
-        return self.vision_sender.send(pose, now, received_at)
+        pose, clock_now, received_at = self._vision_clock(now)
+        return self.vision_sender.send(pose, clock_now, received_at)
+
+    def _vision_clock(self, now_wall):
+        """(pose, now, received_at) with both times on ONE clock, sim if known.
+
+        Idempotent within a tick, and safe to call in any order, so the sender's
+        drop decision and the page's `fresh` cannot drift apart -- the aircraft's
+        position source is gated on the first and the GNSS cut on the second.
+
+        The clock is PX4's `time_boot_ms`, which under lockstep IS sim time.
+        Wall time is used only until PX4 has streamed its first position, at
+        which point nothing is flying anyway. "Age" means time since a NEW
+        estimate arrived, so it is measured from when a pose first appeared
+        rather than from each time this is called.
+        """
+        pose, received_at_wall = self.vision.latest()
+        if self._px4_sim_s is None:
+            self._vision_age_s = (None if received_at_wall is None
+                                  else now_wall - received_at_wall)
+            return pose, now_wall, received_at_wall
+
+        clock_now = self._px4_sim_s
+        if pose is not None and pose.ts_ns != self._vision_seen_ts:
+            self._vision_seen_ts = pose.ts_ns
+            self._vision_seen_at = clock_now
+        received_at = self._vision_seen_at
+        self._vision_age_s = (None if received_at is None
+                              else clock_now - received_at)
+        return pose, clock_now, received_at
 
     def _vio_status(self, now):
         """The `vio` telemetry block, or None when vision is not configured.
@@ -461,8 +495,11 @@ class SetpointLoop(threading.Thread):
         """
         if self.vision_sender is None:
             return None
-        _, received_at = self.vision.latest()
-        age = None if received_at is None else (now - received_at)
+        # The same age the sender judged on, so the page's `fresh` and the
+        # sender's drop decision can never disagree -- the GPS-denied control is
+        # gated on one of them and the aircraft's position source on the other.
+        self._vision_clock(now)
+        age = self._vision_age_s
         last = getattr(self.vision, "_last_msg", None) or {}
         return {
             "fresh": bool(age is not None
@@ -499,6 +536,7 @@ class SetpointLoop(threading.Thread):
                     self._telem["alt_m"] = -msg.z    # NED down -> altitude up
                     self._telem["vz"] = -msg.vz
                     self._telem["gs"] = math.hypot(msg.vx, msg.vy)
+                self._px4_sim_s = msg.time_boot_ms / 1000.0
                 # Sim clock vs wall clock, measured over a rolling 3 s window.
                 wall = time.monotonic()
                 if self._sim_ref is None:

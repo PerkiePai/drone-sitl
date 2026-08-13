@@ -33,6 +33,22 @@ import offboard  # noqa: E402
 import vision_bridge  # noqa: E402
 import waypoints  # noqa: E402
 
+ESTIMATOR_SCRIPT = "pipeline-streaming.py"
+"""The estimator this server brings up itself, so the stack is one command.
+
+Isaac Sim stays separate and always will -- `vio-streamer.py` runs inside its
+physics callback, not as a process anyone here could spawn.
+"""
+
+DEFAULT_SITE = "bangkok-survey-040"
+"""Falls back to the launcher's own default (sim/launch-sitl.sh:69).
+
+`SITL_SITE` is exported by that script into ISAAC's environment, not into the
+shell this server is usually started from, so leaning on it alone means typing
+--site every run for a value that has exactly one possible answer today
+(sim/sites.py:120).
+"""
+
 VISION_MIN_INLIERS = 100
 """Tracked features below which the vision estimate is not worth fusing.
 
@@ -691,6 +707,98 @@ class SetpointLoop(threading.Thread):
                 next_tick = time.monotonic()   # fell behind; resync
 
 
+class EstimatorProcess:
+    """Runs pipeline-streaming.py as a child so one command brings the stack up.
+
+    A SUBPROCESS, never a thread, and that is a hard design point rather than a
+    convenience. The estimator's LK tracking is the heaviest work in this
+    system, and the setpoint thread must tick at 20 Hz or PX4 drops OFFBOARD.
+    This server already refuses to put a few-hundred-millisecond HTTP call on
+    that thread (RecorderProxy, design R2); continuous frame processing in the
+    same interpreter is a larger version of the same hazard. A separate process
+    also means an OpenCV fault takes down the estimate and not the aircraft's
+    control link.
+
+    Output is INHERITED, not piped: `--print-every` lines are the instrument the
+    operator actually reads during a climb, and piping them through here would
+    only add a thread and a chance to lose them.
+
+    Restarts are the point of supervising at all -- a dead estimator is plan
+    Task 8.9's failure mode, and recovery is meant to need no sim restart. But
+    a child that dies IMMEDIATELY is not a crash to recover from, it is a
+    misconfiguration (no cv2, port already bound because an estimator is
+    already running), and retrying that forever would bury the reason in a
+    scroll of identical errors. So rapid failures give up and say why.
+    """
+
+    RESTART_DELAY_S = 2.0
+    HEALTHY_S = 20.0
+    """A child that lived this long counts as having run, so its exit is a
+    crash worth restarting rather than a startup failure worth reporting."""
+    MAX_RAPID_FAILURES = 3
+
+    def __init__(self, script, args, python=None):
+        self.script = script
+        self.args = list(args)
+        self.python = python or sys.executable
+        self.proc = None
+        self._stop = threading.Event()
+        self._rapid = 0
+
+    def command(self):
+        return [self.python, self.script, *self.args]
+
+    def start(self):
+        """Spawn the child and supervise it on a daemon thread."""
+        threading.Thread(target=self._supervise, daemon=True).start()
+
+    def _spawn(self):
+        import subprocess
+        return subprocess.Popen(self.command(), cwd=os.path.dirname(self.script)
+                                or None)
+
+    def _supervise(self):
+        while not self._stop.is_set():
+            started = time.monotonic()
+            try:
+                self.proc = self._spawn()
+            except Exception as exc:
+                print(f"*** estimator: cannot start {self.script}: {exc!r} ***")
+                return
+            code = self.proc.wait()
+            if self._stop.is_set():
+                return
+            lived = time.monotonic() - started
+            if lived >= self.HEALTHY_S:
+                self._rapid = 0
+            else:
+                self._rapid += 1
+            if self._rapid >= self.MAX_RAPID_FAILURES:
+                print(f"*** estimator: exited {self._rapid} times in under "
+                      f"{self.HEALTHY_S:.0f}s (last code {code}). NOT "
+                      f"restarting again. If one is already running, start "
+                      f"this server with --no-estimator. ***")
+                return
+            print(f"*** estimator exited (code {code}) after {lived:.0f}s -- "
+                  f"restarting in {self.RESTART_DELAY_S:.0f}s. Vision goes "
+                  f"STALE until it is back. ***")
+            if self._stop.wait(self.RESTART_DELAY_S):
+                return
+
+    def stop(self):
+        """Kill the child. Without this it outlives the server and keeps 5557
+        bound, so the next run cannot start its own."""
+        self._stop.set()
+        proc, self.proc = self.proc, None
+        if proc is None or proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=5.0)
+        except Exception:
+            proc.kill()
+
+
 class RecorderProxy:
     """The page's view of the VIO recorder, which lives inside Isaac Sim.
 
@@ -915,13 +1023,37 @@ def main():
     ap.add_argument("--rate", type=float, default=20.0, help="setpoint Hz")
     ap.add_argument("--offboard-warmup", type=float, default=1.0,
                     help="seconds of streaming before OFFBOARD is offered")
-    ap.add_argument("--vision", action="store_true",
-                    help="fly GPS-DENIED on pipeline-streaming.py's estimate. "
-                         "Disables all GNSS fusion (EKF2_GPS_CTRL=0) -- never "
-                         "a default, always a deliberate choice.")
+    ap.add_argument("--vision", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="set up for GPS-DENIED flight: fuse "
+                         "pipeline-streaming.py's estimate and REBOOT PX4 at "
+                         "startup so EKF2_HGT_REF takes. On by default so the "
+                         "whole stack is one command; --no-vision gives an "
+                         "ordinary GPS flight that touches no EKF2 params. "
+                         "GNSS itself is cut only by the page's GO GPS-DENIED "
+                         "button, never by starting this server.")
+    ap.add_argument("--estimator", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="run pipeline-streaming.py as a child process under "
+                         "--vision. --no-estimator if you are already running "
+                         "one by hand.")
+    ap.add_argument("--estimator-scale", type=float, default=0.5,
+                    help="image downscale before tracking, passed through")
+    ap.add_argument("--estimator-print-every", type=int, default=15,
+                    help="estimator prints pos/drift every Nth frame -- the "
+                         "instrument for watching drift accumulate")
+    ap.add_argument("--sensor-endpoint", default="tcp://127.0.0.1:5556",
+                    help="where vio-streamer.py publishes, for the estimator")
     ap.add_argument("--vio-endpoint", default="tcp://127.0.0.1:5557",
                     help="where pipeline-streaming.py publishes `vio`")
-    ap.add_argument("--site", default=os.environ.get("SITL_SITE", ""),
+    ap.add_argument("--estimator-bind", default="tcp://*:5557",
+                    help="the BIND side of --vio-endpoint, handed to the "
+                         "child. Separate because a ZMQ bind address is not a "
+                         "connect address -- deriving one from the other by "
+                         "string surgery breaks the moment either is "
+                         "overridden.")
+    ap.add_argument("--site", default=os.environ.get("SITL_SITE",
+                                                     DEFAULT_SITE),
                     help="sim/sites.py key; supplies the GPS origin under "
                          "--vision")
     args = ap.parse_args()
@@ -930,6 +1062,7 @@ def main():
 
     vision = None
     vision_origin = None
+    estimator = None
     if args.vision:
         if not args.site:
             ap.error("--vision needs --site (or SITL_SITE) for the GPS origin: "
@@ -940,10 +1073,26 @@ def main():
         import sites
         site = sites.get_site(args.site)
         vision_origin = (site.latitude, site.longitude, site.height)
+        if args.estimator:
+            estimator = EstimatorProcess(
+                os.path.join(ROOT, ESTIMATOR_SCRIPT),
+                ["--sensor-endpoint", args.sensor_endpoint,
+                 "--vio-endpoint", args.estimator_bind,
+                 "--scale", str(args.estimator_scale),
+                 "--print-every", str(args.estimator_print_every)])
+            estimator.start()
+            print(f">>> estimator: {' '.join(estimator.command())}")
         vision = VisionSubscriber(args.vio_endpoint)
         vision.start()
-        print(f">>> GPS-DENIED: vision from {args.vio_endpoint}, "
-              f"origin from site {site.name}")
+        # Loud on purpose. This used to be opt-in, and the thing that changed
+        # is a DEFAULT, not the behaviour: PX4 is about to be rebooted so
+        # EKF2_HGT_REF takes, and the EKF2 param set is about to be rewritten.
+        # An operator who wanted a plain GPS flight has to be told, not left to
+        # notice the autopilot restarting.
+        print(f">>> GPS-DENIED READY (--no-vision for a plain GPS flight): "
+              f"vision from {args.vio_endpoint}, origin from site {site.name}."
+              f" PX4 will be REBOOTED once at startup for EKF2_HGT_REF. GNSS "
+              f"stays ON until you press GO GPS-DENIED.")
 
     conn = mavutil.mavlink_connection(args.mavlink)
     state = offboard.CommandState(args.speed_fwd, args.speed_up, args.watchdog,
@@ -961,9 +1110,15 @@ def main():
     print(f">>> open http://<box-ip>:{args.port}/")
     print(f">>> recorder control: {args.recorder_url}")
     recorder = RecorderProxy(args.recorder_url)
-    uvicorn.run(build_app(loop_thread, state, args.video_port,
-                          args.mission_speed, recorder),
-                host="0.0.0.0", port=args.port, log_level="warning")
+    try:
+        uvicorn.run(build_app(loop_thread, state, args.video_port,
+                              args.mission_speed, recorder),
+                    host="0.0.0.0", port=args.port, log_level="warning")
+    finally:
+        # Ctrl-C included. An orphaned estimator keeps 5557 bound, so the next
+        # run's child cannot start and the failure looks like a broken server.
+        if estimator is not None:
+            estimator.stop()
 
 
 if __name__ == "__main__":

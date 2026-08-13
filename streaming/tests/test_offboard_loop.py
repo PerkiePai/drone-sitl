@@ -938,3 +938,79 @@ def test_zmq_thread_never_touches_the_mavlink_connection():
         assert got is pose and at == 123.0
     finally:
         sub.close()
+
+
+# --- the estimator child process -------------------------------------------
+
+def _child(tmp_path, body):
+    p = tmp_path / "child.py"
+    p.write_text(body)
+    return str(p)
+
+
+def test_the_estimator_runs_as_a_subprocess_not_a_thread():
+    """The setpoint thread must tick at 20 Hz or PX4 drops OFFBOARD, and the
+    estimator's LK tracking is the heaviest work in the system. This server
+    already keeps a few-hundred-millisecond HTTP call off that thread (design
+    R2); frame processing in the same interpreter is a bigger version of it."""
+    js = _load_server()
+    est = js.EstimatorProcess("/tmp/nope.py", ["--scale", "0.5"])
+    cmd = est.command()
+    assert cmd[0] == sys.executable, "the child must share this interpreter"
+    assert cmd[1:] == ["/tmp/nope.py", "--scale", "0.5"]
+
+
+def test_a_crashed_estimator_is_restarted(tmp_path):
+    """Plan Task 8.9: killing the estimator mid-hover must be recoverable
+    without restarting the sim."""
+    js = _load_server()
+    marker = tmp_path / "runs"
+    est = js.EstimatorProcess(_child(tmp_path, (
+        "import sys\n"
+        f"open({str(marker)!r}, 'a').write('x')\n"
+        "sys.exit(1)\n")), [])
+    est.RESTART_DELAY_S = 0.05
+    est.start()
+    deadline = time.time() + 5.0
+    while time.time() < deadline and len(marker.read_text() if marker.exists()
+                                         else "") < 2:
+        time.sleep(0.05)
+    est.stop()
+    assert len(marker.read_text()) >= 2, "the child was never restarted"
+
+
+def test_an_estimator_that_dies_instantly_stops_being_restarted(tmp_path):
+    """A child that never comes up is a misconfiguration -- no cv2, or 5557
+    already bound because one is running by hand -- not a crash to recover
+    from. Retrying forever would bury the reason in identical errors."""
+    js = _load_server()
+    marker = tmp_path / "runs"
+    est = js.EstimatorProcess(_child(tmp_path, (
+        "import sys\n"
+        f"open({str(marker)!r}, 'a').write('x')\n"
+        "sys.exit(1)\n")), [])
+    est.RESTART_DELAY_S = 0.01
+    est.start()
+    deadline = time.time() + 5.0
+    while time.time() < deadline and est._rapid < est.MAX_RAPID_FAILURES:
+        time.sleep(0.05)
+    est.stop()
+    assert est._rapid >= est.MAX_RAPID_FAILURES
+    settled = len(marker.read_text())
+    time.sleep(0.5)
+    assert len(marker.read_text()) == settled, "it kept restarting after giving up"
+
+
+def test_stopping_kills_the_child(tmp_path):
+    """An orphaned estimator keeps 5557 bound, so the NEXT run's child cannot
+    start and the failure presents as a broken server."""
+    js = _load_server()
+    est = js.EstimatorProcess(_child(tmp_path, "import time\ntime.sleep(60)\n"), [])
+    est.start()
+    deadline = time.time() + 5.0
+    while time.time() < deadline and est.proc is None:
+        time.sleep(0.05)
+    proc = est.proc
+    assert proc is not None and proc.poll() is None
+    est.stop()
+    assert proc.poll() is not None, "the child outlived the server"

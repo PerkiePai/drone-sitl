@@ -15,6 +15,24 @@ python pipeline-streaming.py --scale 0.5 --print-every 15
 python joystick-server.py --takeoff-alt 50 --speed-up 3.0 [--vision --site bangkok-survey-040]
 ```
 
+**Superseded 2026-08-13 — two commands, not three:**
+
+```bash
+DRONE_SETUP_DOWN_VIB_DAMP=False VIO=1 ./sim/launch-sitl.sh
+python joystick-server.py --takeoff-alt 50 --speed-up 3.0
+```
+
+`joystick-server.py` now spawns and supervises `pipeline-streaming.py` itself,
+`--site` defaults to the launcher's own default, and `--vision` defaults ON.
+Isaac stays a separate command and always will — `vio-streamer.py` runs inside
+its physics callback, not as a process anything here could spawn.
+
+`--no-vision` gives an ordinary GPS flight that touches no EKF2 params;
+`--no-estimator` keeps vision but leaves the estimator to you. **The default
+now reboots PX4 once at startup** (phase 0, `EKF2_HGT_REF`) on every run,
+including ones where you only wanted GPS — that is the cost of the one-command
+default and the startup banner says so.
+
 Offline first: **168/168 tests pass** in the `drone` conda env. (They fail in
 *base* conda purely for want of `websockets`/`msgpack` — wrong interpreter, not
 a real failure. Use `~/miniconda3/envs/drone/bin/python`.)

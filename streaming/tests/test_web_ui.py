@@ -294,6 +294,22 @@ def test_the_vio_row_is_hidden_until_the_server_offers_vision():
         assert f'id="{field}"' in html
 
 
+def test_every_button_row_sets_its_own_colours():
+    """The page is dark-themed by `body`, but buttons do NOT inherit that --
+    an unstyled row falls back to the UA default and renders near-white on
+    near-white. That is how `GO GPS-DENIED` shipped unreadable: every other row
+    named its colours and #gpsd was simply forgotten, which is invisible in
+    every test that only checks ids and text."""
+    css = _read("web", "css", "app.css")
+    for row in ("#gpsd", "#cmds", "#rec", "#mapbar"):
+        rule = f"{row} button"
+        assert rule in css, f"{rule} has no styling; it will render as a UA default button"
+        seg = css.split(rule)[1].split("}")[0]
+        assert "background:" in seg and "color:" in seg, (
+            f"{rule} must set BOTH background and color, or it inherits one "
+            f"and defaults the other")
+
+
 def test_alignment_shows_dashes_until_a_transition_has_taken_one():
     """`align` is the error the handover closed. Before any phase transition
     the offset is a structural zero, and rendering 0.0 would claim the vision

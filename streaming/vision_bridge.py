@@ -7,6 +7,7 @@ connections are not thread-safe.
 PX4 v1.14.3. Every param value below was read out of ~/PX4-Autopilot, with the
 source line on each one, per the convention in offboard.py:7-9.
 """
+import math
 from dataclasses import dataclass
 
 from offboard import MAV_PARAM_TYPE_INT32, MAV_PARAM_TYPE_REAL32
@@ -133,7 +134,13 @@ being on the same clock, and for that clock being sim time when one is available
 
 @dataclass(frozen=True)
 class VisionPose:
-    """One estimate, in the estimator's ENU frame. Angles in radians."""
+    """One estimate, in the estimator's ENU frame. Angles in radians.
+
+    The angles are the estimator's, which means body-FLU-in-world-ENU
+    (pipeline-streaming.py:130-134, off `MahonyState.R_flu`). They are NOT the
+    NED/FRD angles VISION_POSITION_ESTIMATE carries -- see
+    `enu_attitude_to_ned`, which is the only correct way to read them.
+    """
     ts_ns: int
     x: float          # East
     y: float          # North
@@ -143,9 +150,143 @@ class VisionPose:
     yaw: float
 
 
+@dataclass(frozen=True)
+class Px4Pose:
+    """Where PX4 believes it is, in its own local NED frame. Radians.
+
+    Assembled by the caller from LOCAL_POSITION_NED (position) and ATTITUDE
+    (yaw). Exists so `align_to_px4` takes one argument that cannot be
+    half-populated, rather than four loose floats in an order nobody remembers.
+    """
+    north: float
+    east: float
+    down: float
+    yaw: float
+
+
+def wrap_pi(angle):
+    """An angle folded into (-pi, pi]. Applied to every yaw this module emits."""
+    return math.remainder(angle, math.tau)
+
+
 def enu_to_ned(e, n, u):
     """(East, North, Up) -> (North, East, Down)."""
     return (n, e, -u)
+
+
+def enu_yaw_to_ned(yaw):
+    """ENU yaw (0 = East, counter-clockwise) -> NED yaw (0 = North, clockwise).
+
+    `pi/2 - yaw`, and like `enu_to_ned` it is its own inverse.
+
+    **This conversion was missing until 2026-08-13, and it is not cosmetic.**
+    The estimator reports yaw as the heading of the body-forward axis measured
+    from EAST, counter-clockwise (pipeline-streaming.py:132,
+    `arctan2(R_flu[1,0], R_flu[0,0])`). VISION_POSITION_ESTIMATE is defined in
+    NED, so PX4 reads that same number as degrees clockwise from NORTH. Sent
+    raw, a drone pointing north (ENU yaw 90 deg) tells EKF2 it is pointing east.
+    The error is `90 - 2*heading` degrees, so it vanishes at heading 45 and is
+    worst -- a full 180 deg -- pointing south. With `EKF2_EV_CTRL` bit3 set
+    (EKF2_FUSION_PARAMS) that yaw is fused, so EKF2 was being told the aircraft
+    faced somewhere it did not, and every horizontal correction it derived from
+    vision was applied in the wrong direction.
+    """
+    return wrap_pi(math.pi / 2 - yaw)
+
+
+def enu_attitude_to_ned(roll, pitch, yaw):
+    """Body-FLU-in-ENU euler angles -> body-FRD-in-NED, which is what VPE carries.
+
+    Roll survives untouched, pitch flips sign, yaw goes through
+    `enu_yaw_to_ned`. That falls out of `R_frd_ned = S @ R_flu_enu @ B` with
+    S the ENU->NED swap and B = diag(1, -1, -1) the FLU->FRD flip; verified
+    exact against the matrix form over random attitudes
+    (test_enu_attitude_to_ned_matches_the_rotation_matrix_form).
+
+    Pitch matters even though EKF2 is not asked to fuse EV attitude beyond yaw:
+    PX4 rebuilds a quaternion from all three angles and takes the yaw out of
+    that, so a mirrored pitch corrupts the one component that IS fused.
+    """
+    return (roll, -pitch, enu_yaw_to_ned(yaw))
+
+
+@dataclass(frozen=True)
+class FrameAlignment:
+    """A rigid transform from the estimator's frame into PX4's local NED.
+
+    A drifting odometry source and PX4's own estimate are two different frames
+    that happen to be described in the same units. Nothing keeps their origins
+    together, so by the time the aircraft has climbed they disagree -- measured
+    23-37 m after a 3 m/s climb to 49 m, against 0.36-0.61 m in a hover
+    (SESSION.md, run 4). Handing EKF2 that frame unchanged is what made
+    GPS-denied flight diverge: the aircraft chases the offset, which moves the
+    camera, which feeds more drift.
+
+    So the stream is transformed rather than trusted. Yaw is rotated as well as
+    position, because a translation-only fix leaves the two frames rotated
+    against each other and every subsequent metre of vision travel then points
+    a few degrees wrong -- an error that grows with distance flown, which is
+    exactly the flight this has to survive.
+
+    `down` is carried for completeness and is very nearly zero in practice:
+    both sides take height from the same barometer (flow_odometry.py:455,
+    EKF2_HGT_REF=0) and `EKF2_EV_CTRL` bit1 is deliberately unset, so EKF2 does
+    not fuse the vertical component anyway.
+
+    The identity is the honest default: with no alignment taken, `to_px4_ned`
+    is a pure frame conversion and nothing is invented.
+    """
+    yaw: float = 0.0
+    north: float = 0.0
+    east: float = 0.0
+    down: float = 0.0
+
+    def to_px4_ned(self, pose):
+        """A VisionPose as (north, east, down, roll, pitch, yaw) for PX4."""
+        n, e, d = enu_to_ned(pose.x, pose.y, pose.z)
+        roll, pitch, yaw = enu_attitude_to_ned(pose.roll, pose.pitch, pose.yaw)
+        c, s = math.cos(self.yaw), math.sin(self.yaw)
+        return (self.north + c * n - s * e,
+                self.east + s * n + c * e,
+                self.down + d,
+                roll, pitch, wrap_pi(yaw + self.yaw))
+
+    def offset_m(self):
+        """How far this shifts the vision frame horizontally, in metres.
+
+        The headline number: it is the error EKF2 would otherwise have
+        inherited at the handover, so it belongs in the telemetry row and in
+        the log line rather than being computed and thrown away.
+        """
+        return math.hypot(self.north, self.east)
+
+
+IDENTITY_ALIGNMENT = FrameAlignment()
+"""No alignment taken yet -- `to_px4_ned` is then a plain ENU->NED conversion."""
+
+
+def align_to_px4(pose, px4):
+    """The FrameAlignment that puts `pose` exactly at `px4`.
+
+    Solves `to_px4_ned(pose) == px4` for the transform, so the vision stream is
+    continuous with PX4's own estimate at the instant it is taken and
+    GPS-denied flight starts from zero error instead of from 30 m.
+
+    Taken at the two phase transitions ONLY -- never continuously. Re-solving
+    this every tick would feed EKF2 its own state back as an independent
+    measurement: innovations would sit at zero by construction, EKF2 would gain
+    confidence from a measurement carrying no information, and a completely
+    broken estimator would look perfect right up until GNSS was cut. Between
+    the transitions the vision source stays independent and observable, which
+    is the entire reason the profile has a phase 1b at all.
+    """
+    n, e, d = enu_to_ned(pose.x, pose.y, pose.z)
+    dyaw = wrap_pi(px4.yaw - enu_yaw_to_ned(pose.yaw))
+    c, s = math.cos(dyaw), math.sin(dyaw)
+    return FrameAlignment(yaw=dyaw,
+                          north=px4.north - (c * n - s * e),
+                          east=px4.east - (s * n + c * e),
+                          down=px4.down - d)
 
 
 def _apply(link, params):
@@ -234,6 +375,19 @@ class VisionPositionSender:
         self.max_age_s = max_age_s
         self.sent = 0
         self.dropped_stale = 0
+        # Identity until the caller takes an alignment at a phase transition.
+        self.alignment = IDENTITY_ALIGNMENT
+        self.realigned = 0
+
+    def realign(self, pose, px4):
+        """Re-solve the vision->PX4 transform against `px4`. Returns it.
+
+        Called at the phase transitions by the caller, which owns the phases;
+        see `align_to_px4` for why it must not be called every tick.
+        """
+        self.alignment = align_to_px4(pose, px4)
+        self.realigned += 1
+        return self.alignment
 
     def send(self, pose, now, received_at=None):
         """Send one estimate. Returns True if it went out.
@@ -253,10 +407,10 @@ class VisionPositionSender:
         if received_at is not None and (now - received_at) > self.max_age_s:
             self.dropped_stale += 1
             return False
-        x, y, z = enu_to_ned(pose.x, pose.y, pose.z)
+        n, e, d, roll, pitch, yaw = self.alignment.to_px4_ned(pose)
         self.conn.mav.vision_position_estimate_send(
             int(pose.ts_ns // 1000),        # usec
-            float(x), float(y), float(z),
-            float(pose.roll), float(pose.pitch), float(pose.yaw))
+            float(n), float(e), float(d),
+            float(roll), float(pitch), float(yaw))
         self.sent += 1
         return True

@@ -12,6 +12,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pytest
 from pymavlink import mavutil
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -432,12 +433,22 @@ def _pose(x=1.0, y=2.0, z=3.0):
 ORIGIN = (13.66156872, 100.298235, 0.0)
 
 
-def _vision_loop(js, port_offset, pose=None, received_at=None, inliers=600):
+def _vision_loop(js, port_offset, pose=None, received_at=None, inliers=600,
+                 px4_ned=(0.0, 0.0, -49.0), px4_yaw=0.0):
+    """A loop with vision, and with PX4's own pose already seen.
+
+    `px4_ned`/`px4_yaw` stand in for LOCAL_POSITION_NED and ATTITUDE, which PX4
+    streams continuously and which are therefore present long before any phase
+    transition. They are what the vision frame is aligned onto; pass
+    `px4_ned=None` to model the pathological case where they are missing.
+    """
     conn = mavutil.mavlink_connection(
         f"udpout:127.0.0.1:{FAKE_PX4_PORT + port_offset}")
     vision = _FakeVision(pose, received_at, inliers)
     loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0), rate_hz=20.0,
                            vision=vision, vision_origin=ORIGIN)
+    loop._px4_ned = px4_ned
+    loop._px4_yaw = px4_yaw
     return conn, loop, vision
 
 
@@ -644,9 +655,12 @@ def test_gps_denied_is_refused_before_vision_is_fusing():
     assert loop.telemetry()["gps_denied"] is False
 
 
-def _local_pos(time_boot_ms, z=-10.0):
+def _local_pos(time_boot_ms, z=-10.0, x=0.0, y=0.0):
+    # x/y are the aircraft's north/east: the loop reads them for the frame
+    # alignment, so a fake without them is not a LOCAL_POSITION_NED.
     return type("M", (), {
-        "time_boot_ms": time_boot_ms, "z": z, "vz": 0.0, "vx": 0.0, "vy": 0.0,
+        "time_boot_ms": time_boot_ms, "x": x, "y": y, "z": z,
+        "vz": 0.0, "vx": 0.0, "vy": 0.0,
         "get_type": lambda s: "LOCAL_POSITION_NED"})()
 
 
@@ -767,6 +781,114 @@ def test_gps_denied_cuts_gnss_once_vision_is_fusing():
 
     assert "EKF2_GPS_CTRL" in sent, sent
     assert loop.telemetry()["gps_denied"] is True
+
+
+def test_the_handover_realigns_the_vision_frame_onto_px4():
+    """The 2026-08-12 divergence. The estimator had drifted 23-37 m by the time
+    GNSS was cut, EKF2 was handed that frame unchanged, and the aircraft flew
+    at the discrepancy -- 60 -> 318 -> 1195 -> 2544 m. After the cut the vision
+    stream must report where PX4 believes it is, not where the estimator does."""
+    js = _load_server()
+    # Vision says 30 m east / 20 m north of an origin PX4 puts itself at (5, -3).
+    _, loop, _ = _vision_loop(js, 38, _pose(x=30.0, y=20.0, z=49.0),
+                              received_at=time.monotonic(),
+                              px4_ned=(5.0, -3.0, -49.0), px4_yaw=0.2)
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+
+    loop._maybe_start_fusing_vision(time.monotonic())
+    loop._run_command("gps_denied")
+    assert loop.telemetry()["gps_denied"] is True
+
+    n, e, _, _, _, yaw = loop.vision_sender.alignment.to_px4_ned(
+        loop.vision.pose)
+    assert (n, e) == pytest.approx((5.0, -3.0))
+    assert yaw == pytest.approx(0.2)
+
+
+def test_the_handover_reports_the_error_it_closed():
+    """The gap is the whole point, so it has to be visible in flight rather
+    than inferred afterwards from a diverging track."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 39, _pose(x=0.0, y=0.0, z=49.0),
+                              received_at=time.monotonic(),
+                              px4_ned=(30.0, 40.0, -49.0))
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+
+    loop._maybe_start_fusing_vision(time.monotonic())
+
+    vio = loop._vio_status(time.monotonic())
+    assert vio["realigned"] == 1
+    assert vio["align_m"] == pytest.approx(50.0)
+
+
+def test_the_frame_is_realigned_at_both_phase_transitions():
+    """Fusion start and the GNSS cut are separated by the climb, and the climb
+    is where flow-odom drifts worst. Aligning only once would let the whole
+    climb's drift back into the handover."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 40, _pose(), received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+
+    loop._maybe_start_fusing_vision(time.monotonic())
+    assert loop.vision_sender.realigned == 1
+    loop._run_command("gps_denied")
+    assert loop.vision_sender.realigned == 2
+
+
+def test_the_frame_is_not_realigned_every_tick():
+    """Re-solving the transform continuously would feed EKF2 its own estimate
+    back as an independent measurement: innovations would sit at zero by
+    construction and a broken estimator would look perfect right up until GNSS
+    was cut. Phase 1b exists to prove the source, which requires it to stay
+    independent between the transitions."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 41, _pose(), received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+
+    for _ in range(20):
+        loop._send_vision(time.monotonic())
+
+    assert loop.vision_sender.realigned == 1
+
+
+def test_fusion_waits_for_a_px4_pose_to_align_onto():
+    """EKF2 must never see one unaligned EV sample. Costs nothing in practice:
+    LOCAL_POSITION_NED and ATTITUDE stream far faster than the camera clears
+    the inlier gate."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 42, _pose(), received_at=time.monotonic(),
+                              px4_ned=None)
+    loop._params_sent = True
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+
+    loop._maybe_start_fusing_vision(time.monotonic())
+
+    assert sent == [], sent
+    assert loop.telemetry()["vision_fusing"] is False
+
+
+def test_gps_denied_is_refused_without_a_pose_to_align_onto():
+    """Cutting GNSS unaligned is the failure this all exists to prevent, so a
+    missing PX4 pose refuses the cut rather than proceeding on the raw frame."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 43, _pose(), received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+
+    loop._px4_yaw = None                 # ATTITUDE stops arriving
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+    loop._run_command("gps_denied")
+
+    assert "EKF2_GPS_CTRL" not in sent, sent
+    assert loop.telemetry()["gps_denied"] is False
 
 
 def test_gps_origin_is_resent_after_a_px4_restart():

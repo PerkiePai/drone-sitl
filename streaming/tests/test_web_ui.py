@@ -289,8 +289,19 @@ def test_the_vio_row_is_hidden_until_the_server_offers_vision():
     assert 'id="telem-vio"' in html
     row = html.split('id="telem-vio"')[1].split(">")[0]
     assert "hidden" in row, "the VIO row must start hidden"
-    for field in ("t-vio", "t-vio-drift", "t-vio-pts", "t-vio-fps"):
+    for field in ("t-vio", "t-vio-drift", "t-vio-pts", "t-vio-fps",
+                  "t-vio-align"):
         assert f'id="{field}"' in html
+
+
+def test_alignment_shows_dashes_until_a_transition_has_taken_one():
+    """`align` is the error the handover closed. Before any phase transition
+    the offset is a structural zero, and rendering 0.0 would claim the vision
+    and PX4 frames agree rather than that nobody has yet compared them."""
+    js = _read("web", "js", "telemetry.js")
+    seg = js.split("t-vio-align")[1].split(";")[0]
+    assert "'--'" in seg
+    assert "realigned" in seg, "the dash must key off whether one was taken"
 
 
 def test_stale_vision_renders_bad_and_says_so():

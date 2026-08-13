@@ -101,6 +101,12 @@ function paintVio(v) {
     v.n_inliers === null || v.n_inliers === undefined ? '--' : v.n_inliers;
   el('t-vio-fps').textContent =
     v.fps === null || v.fps === undefined ? '--' : v.fps.toFixed(0);
+
+  // `--` until a phase transition has actually taken an alignment: before
+  // then the offset is a structural zero, and showing 0.0 would claim the
+  // frames agree rather than that nobody has compared them yet.
+  el('t-vio-align').textContent =
+    v.realigned ? v.align_m.toFixed(1) : '--';
 }
 
 // The GNSS cut. Shown only under --vision, and gated on the same `fresh` the

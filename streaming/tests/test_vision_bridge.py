@@ -34,16 +34,72 @@ def test_enu_to_ned_is_its_own_inverse():
     assert vision_bridge.enu_to_ned(n, e, d) == (4.0, -5.0, 6.0)
 
 
+@pytest.mark.parametrize("heading_deg", [0.0, 45.0, 90.0, 180.0, 270.0])
+def test_enu_yaw_to_ned_recovers_the_compass_heading(heading_deg):
+    """The estimator's yaw comes from MahonyState.from_heading, which builds it
+    as radians(90 - heading_deg) (flow_odometry.py:157). Converting back has to
+    return the compass heading it was made from -- for EVERY heading, not just
+    45 deg, which is the one bearing where the raw ENU number happened to be
+    right and where a single-case test would have passed."""
+    yaw_enu = math.radians(90.0 - heading_deg)
+    ned = vision_bridge.enu_yaw_to_ned(yaw_enu)
+    assert math.degrees(ned) == pytest.approx(
+        math.degrees(vision_bridge.wrap_pi(math.radians(heading_deg))))
+
+
+def test_enu_yaw_to_ned_is_its_own_inverse():
+    """Like enu_to_ned: reflecting about 45 deg twice is identity, so there is
+    no separate NED->ENU function to keep in step with this one."""
+    for yaw in (0.0, 0.3, -2.1, 3.0):
+        assert vision_bridge.enu_yaw_to_ned(
+            vision_bridge.enu_yaw_to_ned(yaw)) == pytest.approx(yaw)
+
+
+def test_enu_attitude_to_ned_matches_the_rotation_matrix_form():
+    """The closed form against the definition it is derived from:
+    R_frd_ned = S @ R_flu_enu @ B. Pure Python so the test suite keeps needing
+    no scipy -- 3x3 matrices are small enough to multiply by hand."""
+    def rot_xyz(r, p, y):
+        cr, sr, cp, sp, cy, sy = (math.cos(r), math.sin(r), math.cos(p),
+                                  math.sin(p), math.cos(y), math.sin(y))
+        return [[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+                [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+                [-sp, cp * sr, cp * cr]]
+
+    S = [[0, 1, 0], [1, 0, 0], [0, 0, -1]]      # ENU -> NED
+    B = [[1, 0, 0], [0, -1, 0], [0, 0, -1]]     # FLU -> FRD
+    for roll, pitch, yaw in [(0.1, 0.2, 0.3), (-0.4, 0.15, 2.5),
+                             (0.05, -0.3, -1.9), (0.0, 0.0, math.pi / 2)]:
+        R = rot_xyz(roll, pitch, yaw)
+        M = [[sum(S[i][k] * R[k][m] * B[m][j] for k in range(3)
+                  for m in range(3) if B[m][j])
+              for j in range(3)] for i in range(3)]
+        # Euler angles read back out of the NED/FRD matrix, aerospace 3-2-1.
+        want = (math.atan2(M[2][1], M[2][2]),
+                -math.asin(max(-1.0, min(1.0, M[2][0]))),
+                math.atan2(M[1][0], M[0][0]))
+        got = vision_bridge.enu_attitude_to_ned(roll, pitch, yaw)
+        assert got == pytest.approx(want, abs=1e-12)
+
+
 # --- VISION_POSITION_ESTIMATE ---------------------------------------------
 
-def test_send_converts_enu_to_ned_and_yaw_to_radians(conn):
+def test_send_converts_position_and_attitude_into_ned(conn):
+    """The pose is ENU/FLU on the wire and NED/FRD in the message.
+
+    Position was converted from the start; the ATTITUDE half was not, until
+    2026-08-13. An ENU yaw of pi/2 is a drone pointing NORTH, and PX4 must be
+    told 0, not pi/2 -- see enu_yaw_to_ned.
+    """
     s = vision_bridge.VisionPositionSender(conn)
     assert s.send(vision_bridge.VisionPose(
         ts_ns=1_000_000_000, x=1.0, y=2.0, z=3.0,
-        roll=0.0, pitch=0.0, yaw=math.pi / 2), now=1.0)
+        roll=0.1, pitch=0.2, yaw=math.pi / 2), now=1.0)
     args = conn.mav.vision_position_estimate_send.call_args[0]
-    assert args[1:4] == (2.0, 1.0, -3.0)          # x=N, y=E, z=Down
-    assert args[6] == pytest.approx(math.pi / 2)   # yaw already radians
+    assert args[1:4] == (2.0, 1.0, -3.0)           # x=N, y=E, z=Down
+    assert args[4] == pytest.approx(0.1)           # roll survives
+    assert args[5] == pytest.approx(-0.2)          # pitch flips
+    assert args[6] == pytest.approx(0.0)           # ENU east-relative -> NED north-relative
 
 
 def test_send_stamps_microseconds_not_nanoseconds(conn):
@@ -69,6 +125,93 @@ def test_none_pose_sends_nothing(conn):
     s = vision_bridge.VisionPositionSender(conn)
     assert not s.send(None, now=1.0)
     conn.mav.vision_position_estimate_send.assert_not_called()
+
+
+# --- frame alignment -------------------------------------------------------
+
+def _pose(x, y, z=10.0, yaw=math.pi / 2):
+    return vision_bridge.VisionPose(ts_ns=0, x=x, y=y, z=z,
+                                    roll=0.0, pitch=0.0, yaw=yaw)
+
+
+def test_identity_alignment_is_a_plain_frame_conversion():
+    """With no alignment taken, nothing is invented: the transform is exactly
+    the ENU->NED conversion and no more."""
+    n, e, d, _, _, yaw = vision_bridge.IDENTITY_ALIGNMENT.to_px4_ned(
+        _pose(1.0, 2.0, 3.0, yaw=math.pi / 2))
+    assert (n, e, d) == (2.0, 1.0, -3.0)
+    assert yaw == pytest.approx(0.0)
+    assert vision_bridge.IDENTITY_ALIGNMENT.offset_m() == 0.0
+
+
+def test_alignment_puts_the_pose_exactly_on_px4():
+    """The defining property. A vision frame 30 m adrift and 10 deg rotated is
+    the 2026-08-12 handover; after aligning, the transformed pose IS PX4's."""
+    pose = _pose(30.0, -12.0, z=48.0, yaw=math.radians(70.0))
+    px4 = vision_bridge.Px4Pose(north=5.0, east=-3.0, down=-49.0,
+                                yaw=math.radians(30.0))
+    align = vision_bridge.align_to_px4(pose, px4)
+    n, e, d, _, _, yaw = align.to_px4_ned(pose)
+    assert (n, e, d) == pytest.approx((px4.north, px4.east, px4.down))
+    assert yaw == pytest.approx(px4.yaw)
+
+
+def test_alignment_preserves_motion_it_did_not_measure():
+    """Rigid, not a snap-to-PX4. Vision travel after the alignment must still
+    arrive as travel of the same LENGTH -- otherwise the transform would be
+    quietly rescaling the one signal EKF2 has left once GNSS is gone."""
+    a, b = _pose(30.0, -12.0), _pose(37.0, -4.0)
+    px4 = vision_bridge.Px4Pose(north=5.0, east=-3.0, down=-49.0, yaw=0.4)
+    align = vision_bridge.align_to_px4(a, px4)
+    na, ea, _, _, _, _ = align.to_px4_ned(a)
+    nb, eb, _, _, _, _ = align.to_px4_ned(b)
+    assert math.hypot(nb - na, eb - ea) == pytest.approx(
+        math.hypot(b.x - a.x, b.y - a.y))
+
+
+def test_alignment_rotates_travel_with_the_yaw_it_corrected():
+    """A translation-only fix would leave the frames rotated against each
+    other, so every metre flown after the handover would point a few degrees
+    wrong and the error would grow with distance. Vision travelling due ENU-east
+    under a 90 deg yaw correction must come out along a correspondingly rotated
+    bearing, not along raw east."""
+    a, b = _pose(0.0, 0.0, yaw=math.pi / 2), _pose(10.0, 0.0, yaw=math.pi / 2)
+    # Vision says north (ENU yaw pi/2), PX4 says east (NED yaw pi/2).
+    px4 = vision_bridge.Px4Pose(north=0.0, east=0.0, down=0.0, yaw=math.pi / 2)
+    align = vision_bridge.align_to_px4(a, px4)
+    assert align.yaw == pytest.approx(math.pi / 2)
+    nb, eb, _, _, _, _ = align.to_px4_ned(b)
+    # Raw ENU east == NED (0, 10); rotated 90 deg clockwise it is (-10, 0).
+    assert (nb, eb) == pytest.approx((-10.0, 0.0))
+
+
+def test_offset_m_reports_the_error_that_would_have_been_inherited():
+    pose = _pose(0.0, 0.0, yaw=math.pi / 2)
+    px4 = vision_bridge.Px4Pose(north=30.0, east=40.0, down=0.0, yaw=0.0)
+    assert vision_bridge.align_to_px4(pose, px4).offset_m() == pytest.approx(50.0)
+
+
+def test_sender_applies_the_alignment_to_every_later_estimate(conn):
+    s = vision_bridge.VisionPositionSender(conn)
+    px4 = vision_bridge.Px4Pose(north=100.0, east=-50.0, down=-49.0, yaw=0.0)
+    s.realign(_pose(0.0, 0.0, z=49.0, yaw=math.pi / 2), px4)
+    assert s.realigned == 1
+    assert s.send(_pose(0.0, 0.0, z=49.0, yaw=math.pi / 2), now=1.0)
+    args = conn.mav.vision_position_estimate_send.call_args[0]
+    assert args[1:3] == pytest.approx((100.0, -50.0))
+
+
+def test_realigning_replaces_rather_than_accumulates(conn):
+    """Each transition solves the transform afresh against PX4. Composing them
+    would fold a stale offset into the new one and leave the handover carrying
+    exactly the error it exists to remove."""
+    s = vision_bridge.VisionPositionSender(conn)
+    pose = _pose(10.0, 10.0)
+    s.realign(pose, vision_bridge.Px4Pose(north=1.0, east=1.0, down=0.0, yaw=0.0))
+    s.realign(pose, vision_bridge.Px4Pose(north=7.0, east=8.0, down=0.0, yaw=0.0))
+    assert s.realigned == 2
+    n, e, _, _, _, _ = s.alignment.to_px4_ned(pose)
+    assert (n, e) == pytest.approx((7.0, 8.0))
 
 
 # --- EKF2 params -----------------------------------------------------------

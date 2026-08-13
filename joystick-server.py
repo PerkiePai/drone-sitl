@@ -236,6 +236,12 @@ class SetpointLoop(threading.Thread):
         self._vision_seen_ts = None    # pose.ts_ns of the newest pose seen
         self._vision_seen_at = None    # clock reading when it first appeared
         self._vision_age_s = None      # computed once per tick by _send_vision
+        # PX4's own local-NED pose, which is what the vision frame is aligned
+        # ONTO at each phase transition (_realign_vision_frame). Position and
+        # yaw arrive in different messages and neither is useful alone, so both
+        # stay None until their message has been seen at least once.
+        self._px4_ned = None           # (north, east, down), LOCAL_POSITION_NED
+        self._px4_yaw = None           # radians, ATTITUDE
 
     def telemetry(self):
         with self._telem_lock:
@@ -311,6 +317,44 @@ class SetpointLoop(threading.Thread):
             return None
         return health
 
+    def _px4_pose(self):
+        """PX4's own local-NED pose, or None if either half is missing.
+
+        Setpoint thread only -- both halves are written by _drain_mavlink on
+        that same thread, so this needs no lock.
+        """
+        if self._px4_ned is None or self._px4_yaw is None:
+            return None
+        north, east, down = self._px4_ned
+        return vision_bridge.Px4Pose(north=north, east=east, down=down,
+                                     yaw=self._px4_yaw)
+
+    def _realign_vision_frame(self, why):
+        """Pin the vision frame onto PX4's at a phase transition. True if taken.
+
+        The estimator drifts, PX4's estimate does not follow it, and nothing
+        closed the gap between them: at the 2026-08-12 handover EKF2 was simply
+        handed a frame 23-37 m from where it believed it was, and it flew at
+        the discrepancy. Re-solving the transform here means each phase starts
+        from zero error rather than from whatever the climb accumulated.
+
+        Deliberately NOT done every tick -- see vision_bridge.align_to_px4 for
+        why that would destroy the one property phase 1b exists to provide.
+
+        A PX4 restart resets its local frame and would invalidate the
+        alignment, but the only restart in this system is phase 0's, which
+        happens before any alignment is taken (_send_startup_params).
+        """
+        pose, _ = self.vision.latest()
+        px4 = self._px4_pose()
+        if pose is None or px4 is None:
+            return False
+        align = self.vision_sender.realign(pose, px4)
+        print(f">>> vision: frame realigned at {why} -- "
+              f"closed {align.offset_m():.1f} m and "
+              f"{math.degrees(align.yaw):+.1f} deg against PX4")
+        return True
+
     def _maybe_start_fusing_vision(self, now):
         """Phase 1: begin fusing vision alongside GNSS, once it can see.
 
@@ -331,6 +375,13 @@ class SetpointLoop(threading.Thread):
             return
         health = self._healthy_vision(now)
         if health is None:
+            return
+        # Align BEFORE the params, never after: EKF2 must never see a single
+        # unaligned EV sample. Waiting for PX4's own pose costs nothing --
+        # LOCAL_POSITION_NED and ATTITUDE both stream far faster than the
+        # camera clears the inlier gate -- and fusing a frame we could not
+        # align is the failure this whole change exists to remove.
+        if not self._realign_vision_frame("fusion start"):
             return
         self._vision_fusing = True
         vision_bridge.apply_ekf2_fusion_params(self.link)
@@ -361,6 +412,18 @@ class SetpointLoop(threading.Thread):
             print("*** gps_denied: REFUSED -- no fresh vision estimate with "
                   "enough inliers. Cutting GNSS now would leave EKF2 with no "
                   "position source at all. ***")
+            return
+        # The handover itself. Between fusion start and now the aircraft has
+        # climbed, and the climb is where flow-odom drifts worst -- it solves
+        # translation against a ground plane at barometric height, which is
+        # worst conditioned exactly when altitude is changing fast (0.36-0.61 m
+        # hovering, 23-37 m after a 3 m/s climb to the same altitude). So the
+        # frame is pinned again here, and GNSS goes away with the two estimates
+        # agreeing to the metre.
+        if not self._realign_vision_frame("the GNSS cut"):
+            print("*** gps_denied: REFUSED -- no PX4 local pose to align the "
+                  "vision frame onto. Cutting GNSS now would hand EKF2 a frame "
+                  "tens of metres from where it believes it is. ***")
             return
         vision_bridge.apply_ekf2_gps_denied_params(self.link)
         self._gps_denied = True
@@ -512,6 +575,13 @@ class SetpointLoop(threading.Thread):
             "sent": self.vision_sender.sent,
             "dropped_stale": self.vision_sender.dropped_stale,
             "received": getattr(self.vision, "received", 0),
+            # How many times the vision frame has been pinned onto PX4's, and
+            # how far the last pin moved it. `align_m` is the error EKF2 would
+            # have inherited had nothing been done -- the number this whole
+            # change is about, so it is visible in flight rather than only in
+            # the console.
+            "realigned": self.vision_sender.realigned,
+            "align_m": self.vision_sender.alignment.offset_m(),
         }
 
     def _drain_mavlink(self):
@@ -536,6 +606,7 @@ class SetpointLoop(threading.Thread):
                     self._telem["alt_m"] = -msg.z    # NED down -> altitude up
                     self._telem["vz"] = -msg.vz
                     self._telem["gs"] = math.hypot(msg.vx, msg.vy)
+                self._px4_ned = (msg.x, msg.y, msg.z)
                 self._px4_sim_s = msg.time_boot_ms / 1000.0
                 # Sim clock vs wall clock, measured over a rolling 3 s window.
                 wall = time.monotonic()
@@ -549,6 +620,13 @@ class SetpointLoop(threading.Thread):
                         with self._telem_lock:
                             self._telem["sim_rate"] = d_sim / d_wall
                         self._sim_ref = (msg.time_boot_ms, wall)
+            elif kind == "ATTITUDE":
+                # Radians, NED, already in the convention VPE wants -- unlike
+                # telemetry["heading_deg"], which comes from
+                # GLOBAL_POSITION_INT.hdg in centidegrees for the map arrow.
+                # The alignment takes this one because it is the raw quantity
+                # and needs no unwinding of a display format.
+                self._px4_yaw = msg.yaw
             elif kind == "GLOBAL_POSITION_INT":
                 self._handle_global_position(msg)
             elif kind == "HOME_POSITION":

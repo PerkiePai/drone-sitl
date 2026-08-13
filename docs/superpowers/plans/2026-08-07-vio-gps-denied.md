@@ -1017,6 +1017,14 @@ Order matters: each step isolates one failure class.
 > 23-37 m of drift during the climb and nothing realigns the vision frame to
 > PX4's at the handover, so EKF2 inherits that error and follows it away.
 > Full write-up in `SESSION.md`.
+>
+> **Status 2026-08-13, not yet flown:** the handover now pins the vision frame
+> onto PX4's at both phase transitions (`vision_bridge.FrameAlignment`), so
+> GPS-denied flight starts from zero error instead of ~30 m. Writing it turned
+> up a second bug: `VISION_POSITION_ESTIMATE` was carrying the estimator's
+> ENU/FLU attitude into NED/FRD fields, so the fused vision yaw was wrong by
+> `90 - 2*heading` degrees — up to 180. Both fixed, both unflown. 8.6 is the
+> next flight.
 
 - [x] **8.1** `DRONE_SETUP_DOWN_VIB_DAMP=False ./sim/launch-sitl.sh` → drone
       spawned, Play pressed, MJPEG on 8080. **Done 2026-08-11.**

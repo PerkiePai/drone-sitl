@@ -379,6 +379,89 @@ flown far enough to see that the phases meet at a discontinuity.
 Next, in order: realign the vision frame at handover (cheap, and (2) above is
 the larger error by far), then look at climb-phase drift.
 
+## The handover fix, and a second bug found while writing it
+
+Both changes are in; **neither has been flown yet.** 2026-08-13.
+
+### 1. The vision frame is now pinned onto PX4's at each phase transition
+
+`vision_bridge.FrameAlignment` is a rigid transform from the estimator's frame
+into PX4's local NED, re-solved by `align_to_px4` at fusion start and again at
+the GNSS cut, then held fixed. Against the numbers above it closes the full
+30.7 m and leaves the two frames agreeing to 0.00 m, while 40 m of subsequent
+vision travel still arrives as 40 m — it is a rigid transform, not a snap.
+
+Yaw is rotated as well as position. A translation-only fix would leave the
+frames rotated against each other, and every metre flown after the handover
+would then point a few degrees wrong — an error that *grows with distance*,
+which is exactly the flight this has to survive.
+
+Two deliberate choices:
+
+- **Aligned at the transitions only, never every tick.** Re-solving
+  continuously would feed EKF2 its own estimate back as an independent
+  measurement: innovations would sit at zero by construction, EKF2 would gain
+  confidence from a measurement carrying no information, and a completely
+  broken estimator would look perfect right up until GNSS was cut. Phase 1b
+  exists to prove the source in flight, which requires it to stay independent.
+- **Both transitions refuse to proceed without a PX4 pose to align onto.**
+  Fusing or cutting on an unaligned frame is the failure being removed, so it
+  is not left as a fallback. Costs nothing live: `LOCAL_POSITION_NED` and
+  `ATTITUDE` stream far faster than the camera clears the inlier gate.
+
+`align_m` and `realigned` are in the `vio` telemetry block and on the flight
+page, so the error being closed is visible at the moment of the handover
+rather than inferred afterwards from a diverging track.
+
+### 2. VISION_POSITION_ESTIMATE was carrying ENU attitude into an NED field
+
+Found while writing the alignment, and it is not cosmetic. The estimator works
+in ENU/FLU: `pipeline-streaming.py:132` takes yaw as
+`arctan2(R_flu[1,0], R_flu[0,0])`, the heading of the body-forward axis
+measured **from east, counter-clockwise**. `VisionPositionSender` converted the
+*position* to NED and passed roll/pitch/yaw through untouched — into a message
+PX4 reads as NED/FRD. So PX4 was told a number meaning "90° east-relative"
+where it expected "degrees clockwise from north".
+
+The error is `90 - 2·heading` degrees:
+
+| heading | yaw sent | error |
+|---|---|---|
+| 0 (N) | 90 | **90** |
+| 45 | 45 | 0 |
+| 90 (E) | 0 | **90** |
+| 135 | -45 | **180** |
+| 180 (S) | -90 | **90** |
+
+It vanishes at heading 45° and 225° — the reflection axis — and is a full 180°
+at 135°/315°. `EKF2_EV_CTRL=9` sets bit3, so this yaw *was* being fused: EKF2
+was told the aircraft faced somewhere it did not, and every horizontal
+correction derived from vision was applied in the wrong direction. That is a
+second, independent mechanism for the runaway, and it is heading-dependent,
+which fits an aircraft that diverged rather than merely sat offset.
+
+Pitch was mirrored too (FLU vs FRD). It matters even though EKF2 is not asked
+to fuse EV attitude beyond yaw: PX4 rebuilds a quaternion from all three angles
+and extracts yaw from that, so a mirrored pitch corrupts the one component that
+is fused.
+
+`enu_attitude_to_ned` now does the whole conversion — roll through, pitch
+negated, yaw `pi/2 - yaw` — verified exact against `R_frd_ned = S · R_flu_enu · B`
+over random attitudes.
+
+**Note for the next flight:** the old test asserted the yaw passed through, and
+passed, because it used `yaw = pi/2`. Under the old code that is heading 45° —
+the one bearing where the raw ENU number happens to be right. The test now
+sweeps headings.
+
+### What to watch when this is flown
+
+`align` on the VIO row at the moment `gps_denied` is pressed: it should read
+tens of metres (the error that used to be inherited). Then drift from a frame
+that starts at zero, rather than 60 → 318 → 1195 m from one that starts at 30.
+If it still diverges, the remaining suspect is climb-phase drift itself, which
+is untouched by either fix.
+
 ## If this resurfaces
 
 `alt_m` sinking steadily with `AUTO.LAND` latched and `offboard`/`disarm` both

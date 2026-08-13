@@ -480,6 +480,66 @@ that starts at zero, rather than 60 → 318 → 1195 m from one that starts at 3
 If it still diverges, the remaining suspect is climb-phase drift itself, which
 is untouched by either fix.
 
+## Fifth run: the fixes fly. 8.6 still does not pass, but the failure changed shape
+
+Flown 2026-08-13 with the frame alignment, the ENU->NED attitude fix, and
+`EKF2_EVP_NOISE` raised 0.5 -> 3.0.
+
+| | run 4 (2026-08-12) | run 5 (2026-08-13) |
+|---|---|---|
+| drift through the climb | 23–37 m | **0.29–0.60 m** |
+| realign at fusion start | (did not exist) | closed 0.2 m, +0.1° |
+| realign at the GNSS cut | (did not exist) | closed 0.4 m, −0.2° |
+| drift at the cut | 23–37 m | **0.46 m** |
+| after the cut | 60 → 318 → 1195 → 2544 m, 58 m/s | oscillation, ±5 → ±60 m |
+| aircraft | ran 165 m off and diverged | stayed in OFFBOARD throughout |
+
+**The handover is solved.** Both realignments had almost nothing left to close,
+because the climb no longer accumulates tens of metres. For the first ~40 s
+after GNSS was cut the aircraft held inside ~1 m with drift 0.42–1.04 m — the
+first time vision-only station keeping has ever looked right.
+
+**The climb drift collapsing from 23–37 m to 0.3 m was not the alignment.** The
+alignment cannot affect `drift_m`, which is the raw estimator against GT and
+never sees the transform. The likely cause is the attitude fix: EKF2 had been
+fusing a vision yaw wrong by up to 180°, which made the aircraft fly badly
+during the climb, which swept the camera and wrecked flow-odom's own input. The
+estimator was being blamed for a fault upstream of it. Note run 5 also ran at
+8.9 fps against run 4's 5.3, so some of the gain is a fresher sim, not the fix.
+
+**What now fails: a slow, growing oscillation.** Roughly 40–60 s period, ±5 m
+growing to ±60 m, with 550–600 inliers and no rejections throughout. It is a
+control-loop instability, not a tracking failure — the monotonic runaway is
+gone and nothing diverges at speed.
+
+**Next suspect: `EKF2_EV_DELAY`.** It is still at its default while the real
+path is camera → estimator → ZMQ → server → MAVLink. EKF2 applying vision at
+the wrong timestamp is phase lag in a position loop, and phase lag is exactly
+what produces a slow growing oscillation. Measure the true latency and set it
+before touching `EKF2_EVP_NOISE` again.
+
+## Two operational findings from the same session
+
+**`alt` is negative on the pad and that is correct.** `sites.py` puts the
+georeference origin at stage z = 0 and `ground_z` at −25.0, so a drone standing
+on the ground is ~25 m below PX4's local origin. `relative_alt` reads 0.07 m,
+correctly. Takeoff to 50 m displays as ~+25. (`sim/launch-sitl.sh:39` still
+says −26.99; that comment is stale.)
+
+**Arming can fail with `Preflight Fail: height estimate not stable`.** The
+message is misleading — the height was steady. The trigger is
+`pre_flt_fail_innov_height`, fed by the *baro* innovation against
+`_hgt_innov_test_lim = 1.5f`, a compile-time constant in
+`PreFlightChecker.hpp:199` that no parameter can relax. Cause: EKF2 initialised
+while the drone was still settling onto the collision plane, because the
+one-command launch now reboots PX4 the instant the server starts. Rebooting
+again on a settled sim took `baro_vpos` from −1.76 to −0.91 and cleared it.
+Ruled out by test, not assumption: the GPS origin altitude (0.0 against the
+aircraft's −24.94) is innocent, and so is GPS-altitude fusion.
+
+**Fix worth making:** gate the phase-0 reboot on the aircraft actually being at
+rest, rather than firing it at startup.
+
 ## If this resurfaces
 
 `alt_m` sinking steadily with `AUTO.LAND` latched and `offboard`/`disarm` both

@@ -46,7 +46,7 @@ restarts.
 EKF2_FUSION_PARAMS = (
     ("EKF2_EV_CTRL", 9, MAV_PARAM_TYPE_INT32),
     ("EKF2_EV_NOISE_MD", 1, MAV_PARAM_TYPE_INT32),
-    ("EKF2_EVP_NOISE", 0.5, MAV_PARAM_TYPE_REAL32),
+    ("EKF2_EVP_NOISE", 3.0, MAV_PARAM_TYPE_REAL32),
     ("EKF2_EVA_NOISE", 0.2, MAV_PARAM_TYPE_REAL32),
 )
 """Phase 1b -- turn vision fusion ON while GNSS is still on. Safe in flight.
@@ -66,9 +66,24 @@ every Cesium-tile site tested so far -- that climb is not optional.
                     feed one sensor in twice and read as spurious agreement.
   EKF2_EV_NOISE_MD  ekf2_params.c:814, default 0. 1 = use the noise params
                     below rather than a reported variance we do not compute.
-  EKF2_EVP_NOISE    ekf2_params.c:837, default 0.1 m -- far too tight for a
-  EKF2_EVA_NOISE    ekf2_params.c:857, default 0.1 rad -- drifting estimator;
-                    EKF2 would reject its own vision source as inconsistent.
+  EKF2_EVP_NOISE    ekf2_params.c:837, default 0.1 m. 3.0 -- see below.
+  EKF2_EVA_NOISE    ekf2_params.c:857, default 0.1 rad -- far too tight for a
+                    drifting estimator; EKF2 would reject its own vision
+                    source as inconsistent.
+
+`EKF2_EVP_NOISE` was 0.5 until 2026-08-13, and 0.5 is a statement that the
+vision position is good to half a metre. Flown, it is not. Once GNSS is cut and
+the control loop CLOSES on the estimate, flow-odom starts producing position
+jumps of 8-13 m between consecutive samples -- with 550-600 healthy inliers, so
+not a tracking dropout. At 0.5 EKF2 believes each jump and flies at it, the
+aircraft lurches, the camera sweeps, tracking degrades, and the next solve is
+worse. Measured 2026-08-13: 0.33 m drift at the cut (a clean handover) to
+12 m within 15 frames, and the aircraft ran 165 m off.
+
+3.0 m is chosen to sit ABOVE that jump amplitude, so EKF2 filters the jumps
+instead of chasing them, while vision still constrains position far better than
+dead reckoning. It is a statement about what this estimator actually delivers
+in flight, not a tuning knob to relax until the symptom goes away.
 """
 
 EKF2_GPS_FLIGHT_PARAMS = (

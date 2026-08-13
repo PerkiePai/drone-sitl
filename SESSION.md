@@ -537,8 +537,30 @@ again on a settled sim took `baro_vpos` from −1.76 to −0.91 and cleared it.
 Ruled out by test, not assumption: the GPS origin altitude (0.0 against the
 aircraft's −24.94) is innocent, and so is GPS-altitude fusion.
 
-**Fix worth making:** gate the phase-0 reboot on the aircraft actually being at
-rest, rather than firing it at startup.
+**Fixed 2026-08-13.** Phase 0 now holds until the airframe has been at rest for
+`SETTLE_S` **sim** seconds (`_px4_at_rest`), and sends nothing at all while it
+waits — the ordinary params would only be lost in the reboot gap anyway.
+Verified on a genuine cold start, server launched the instant PX4 reported
+`Ready for takeoff`:
+
+```
+>>> vision: HOLDING phase 0 until the airframe is at rest for 3 sim s (speed 0.01 m/s)
+>>> vision: airframe settled -- running phase 0 now
+>>> vision: set EKF2_HGT_REF and rebooting PX4 so it takes effect
+```
+
+`baro_vpos` came out at **0.039 m** — better than the 0.91 m from manually
+rebooting an already-settled sim, and far inside the 1.5 m limit. `Preflight
+check: OK`, and ARM through the web page took 1.4 s.
+
+Being at rest is a *proxy* for the barometer having settled, not a proof of it.
+If this ever resurfaces on an aircraft that is provably still, gate on the baro
+innovation itself rather than lengthening the wait.
+
+Note the gate gets applied to phase 0 only. `_send_startup_params` is also the
+recovery path on a heartbeat gap, and re-gating it there would refuse to
+re-assert the vision params on an aircraft that is airborne by then — exactly
+when losing them matters most.
 
 ## If this resurfaces
 

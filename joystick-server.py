@@ -63,6 +63,28 @@ cases with room to spare. The estimator's own floor for tracking at all is 30
 (pipeline-streaming.py --min-track).
 """
 
+SETTLE_SPEED_MS = 0.05
+"""Speed below which the airframe counts as at rest, m/s.
+
+Measured on the pad with the sim idle: `gs` sits at 0.00-0.01 and `vz` at
+0.00, so 0.05 clears physics noise with room to spare while still catching an
+aircraft that is genuinely still dropping onto the collision plane.
+"""
+
+SETTLE_S = 3.0
+"""How long the airframe must stay at rest before phase 0 reboots PX4, in SIM
+SECONDS.
+
+Sim, not wall, for the reason this codebase has now learned four times
+(DEFAULT_MAX_AGE_S, PX4_RESTART_GAP_S, the VPE ageing): the aircraft settles in
+simulated seconds, and at sim_rate 0.4 a wall-clock budget would be two and a
+half times longer than intended.
+
+The drone spawns at `spawn_z` and falls ~0.44 m onto `ground_z`
+(sim/sites.py) -- about 0.3 s of free fall plus damping. 3 s is generous
+against that.
+"""
+
 PX4_RESTART_GAP_S = 10.0
 """Heartbeat silence that means PX4 restarted rather than merely lagged.
 
@@ -258,6 +280,11 @@ class SetpointLoop(threading.Thread):
         # stay None until their message has been seen at least once.
         self._px4_ned = None           # (north, east, down), LOCAL_POSITION_NED
         self._px4_yaw = None           # radians, ATTITUDE
+        self._px4_vel = None           # (vx, vy, vz) m/s, LOCAL_POSITION_NED
+        # Sim-clock reading when the airframe first looked at rest, or None if
+        # it is moving. Phase 0 waits on this -- see _px4_at_rest.
+        self._at_rest_since = None
+        self._settle_logged = False
 
     def telemetry(self):
         with self._telem_lock:
@@ -449,7 +476,77 @@ class SetpointLoop(threading.Thread):
               f"({health.get('n_inliers')} inliers, "
               f"drift {health.get('drift_m')}).")
 
+    def _px4_at_rest(self):
+        """True once the airframe has held still for SETTLE_S sim seconds.
+
+        Setpoint thread only -- reads state written by _drain_mavlink on that
+        same thread.
+
+        Phase 0 reboots PX4, and EKF2 picks its height reference as it comes
+        back up. Rebooting into an aircraft that is still dropping onto the
+        collision plane bakes that transient into the reference: the barometer
+        innovation then sits ~1.76 m from truth for the rest of the session,
+        against the 1.5 m limit at PreFlightChecker.hpp:199 -- a COMPILE-TIME
+        constant no parameter can relax -- and PX4 refuses to arm with
+        `Preflight Fail: height estimate not stable`. Observed 2026-08-13; the
+        message is misleading, because the height is perfectly steady, it is
+        just steadily wrong. Rebooting again on a settled sim took the
+        innovation to 0.91 m and cleared it.
+
+        This became reachable when the launcher collapsed to one command: the
+        server now starts the instant PX4 does, where before it was typed by
+        hand a minute later, so the race was there all along and nobody could
+        lose it.
+
+        Being at rest is a PROXY for the barometer having settled, not a proof
+        of it. It targets the transient actually observed. If this resurfaces
+        on an aircraft that is provably still, the thing to gate on is the baro
+        innovation itself rather than a longer wait here.
+        """
+        if self._px4_vel is None or self._px4_sim_s is None:
+            return False        # nothing has told us where it is yet
+        now = self._px4_sim_s
+        if math.sqrt(sum(v * v for v in self._px4_vel)) > SETTLE_SPEED_MS:
+            self._at_rest_since = None
+            return False
+        # `now < since` means PX4's clock restarted under us. Treat that as the
+        # settle never having happened rather than as a huge elapsed time.
+        if self._at_rest_since is None or now < self._at_rest_since:
+            self._at_rest_since = now
+        return (now - self._at_rest_since) >= SETTLE_S
+
+    def _wait_for_settle(self):
+        """True if phase 0 should hold off this heartbeat. Setpoint thread only.
+
+        Logged once each way rather than per heartbeat: this runs at PX4's 1 Hz
+        and the wait is normally a few seconds.
+        """
+        if self._px4_at_rest():
+            if self._settle_logged:
+                print(">>> vision: airframe settled -- running phase 0 now")
+                self._settle_logged = False
+            return False
+        if not self._settle_logged:
+            self._settle_logged = True
+            speed = (None if self._px4_vel is None
+                     else math.sqrt(sum(v * v for v in self._px4_vel)))
+            print(f">>> vision: HOLDING phase 0 until the airframe is at rest "
+                  f"for {SETTLE_S:.0f} sim s "
+                  f"(speed {'unknown' if speed is None else f'{speed:.2f} m/s'}"
+                  f"). Rebooting PX4 mid-motion is what makes EKF2 refuse to "
+                  f"arm with `height estimate not stable`. If the aircraft is "
+                  f"FLYING, phase 0 will not run at all -- land, or restart "
+                  f"with --no-vision.")
+        return True
+
     def _send_startup_params(self):
+        # Phase 0 is a reboot, so nothing goes out at all until the airframe is
+        # at rest -- not even the ordinary params below, which would only be
+        # lost in the reboot gap. Returning without setting _params_sent is
+        # what makes the next heartbeat try again.
+        if (self.vision is not None and not self._vision_rebooted
+                and self._wait_for_settle()):
+            return
         self.link.set_param("COM_RCL_EXCEPT", offboard.COM_RCL_EXCEPT_OFFBOARD,
                             offboard.MAV_PARAM_TYPE_INT32)
         self.link.set_param("MIS_TAKEOFF_ALT", self.takeoff_alt,
@@ -623,6 +720,7 @@ class SetpointLoop(threading.Thread):
                     self._telem["vz"] = -msg.vz
                     self._telem["gs"] = math.hypot(msg.vx, msg.vy)
                 self._px4_ned = (msg.x, msg.y, msg.z)
+                self._px4_vel = (msg.vx, msg.vy, msg.vz)
                 self._px4_sim_s = msg.time_boot_ms / 1000.0
                 # Sim clock vs wall clock, measured over a rolling 3 s window.
                 wall = time.monotonic()

@@ -434,13 +434,17 @@ ORIGIN = (13.66156872, 100.298235, 0.0)
 
 
 def _vision_loop(js, port_offset, pose=None, received_at=None, inliers=600,
-                 px4_ned=(0.0, 0.0, -49.0), px4_yaw=0.0):
+                 px4_ned=(0.0, 0.0, -49.0), px4_yaw=0.0, settled=True):
     """A loop with vision, and with PX4's own pose already seen.
 
     `px4_ned`/`px4_yaw` stand in for LOCAL_POSITION_NED and ATTITUDE, which PX4
     streams continuously and which are therefore present long before any phase
     transition. They are what the vision frame is aligned onto; pass
     `px4_ned=None` to model the pathological case where they are missing.
+
+    `settled` models an airframe already at rest on the pad, which is what
+    phase 0 waits for and the normal state by the time anyone starts flying.
+    Pass `settled=False` for the cold-start race instead.
     """
     conn = mavutil.mavlink_connection(
         f"udpout:127.0.0.1:{FAKE_PX4_PORT + port_offset}")
@@ -449,6 +453,10 @@ def _vision_loop(js, port_offset, pose=None, received_at=None, inliers=600,
                            vision=vision, vision_origin=ORIGIN)
     loop._px4_ned = px4_ned
     loop._px4_yaw = px4_yaw
+    if settled:
+        loop._px4_vel = (0.0, 0.0, 0.0)
+        loop._px4_sim_s = js.SETTLE_S + 1.0
+        loop._at_rest_since = 0.0
     return conn, loop, vision
 
 
@@ -476,9 +484,13 @@ def test_setpoint_still_goes_out_when_vision_is_stale():
     js = _load_server()
     px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{FAKE_PX4_PORT + 21}")
     try:
-        # received 60 s ago -- far past DEFAULT_MAX_AGE_S
+        # received 60 s ago -- far past DEFAULT_MAX_AGE_S. `settled=False`
+        # leaves PX4's clock unseen, which is what puts _vision_clock on the
+        # WALL-clock branch this `received_at` is measured against; with a sim
+        # clock present the age would be computed in sim seconds instead.
         _, loop, _ = _vision_loop(js, 21, _pose(),
-                                  received_at=time.monotonic() - 60.0)
+                                  received_at=time.monotonic() - 60.0,
+                                  settled=False)
         loop.start()
         setpoints = _collect(px4, 1.0)
         assert len(setpoints) >= 10, "stale vision must not gap the setpoints"
@@ -1014,3 +1026,140 @@ def test_stopping_kills_the_child(tmp_path):
     assert proc is not None and proc.poll() is None
     est.stop()
     assert proc.poll() is not None, "the child outlived the server"
+
+
+# --- phase 0 waits for the airframe to settle ------------------------------
+
+def _moving_loop(js, port_offset, speed=1.0, sim_s=100.0):
+    _, loop, _ = _vision_loop(js, port_offset, _pose(),
+                              received_at=time.monotonic(), settled=False)
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._px4_vel = (0.0, 0.0, -speed)
+    loop._px4_sim_s = sim_s
+    return loop
+
+
+def test_phase_0_does_not_reboot_into_a_moving_airframe():
+    """EKF2 picks its height reference as PX4 comes back up. Rebooting while
+    the drone is still dropping onto the collision plane bakes that transient
+    in: the baro innovation then sits ~1.76 m off against the 1.5 m limit at
+    PreFlightChecker.hpp:199 -- a compile-time constant -- and PX4 refuses to
+    arm with `height estimate not stable`. Observed live 2026-08-13."""
+    js = _load_server()
+    loop = _moving_loop(js, 44)
+    reboots = []
+    loop.link.reboot_autopilot = lambda: reboots.append(1)
+
+    for _ in range(5):
+        loop._send_startup_params()
+
+    assert reboots == [], "rebooted into a moving airframe"
+    assert not loop._params_sent, "must retry on the next heartbeat"
+
+
+def test_phase_0_reboots_once_the_airframe_has_been_still_long_enough():
+    js = _load_server()
+    loop = _moving_loop(js, 45)
+    reboots = []
+    loop.link.reboot_autopilot = lambda: reboots.append(1)
+
+    loop._send_startup_params()                 # moving: held
+    assert reboots == []
+
+    loop._px4_vel = (0.0, 0.0, 0.0)             # comes to rest
+    loop._send_startup_params()                 # at rest, but only just
+    assert reboots == [], "must hold for SETTLE_S, not fire on first stillness"
+
+    loop._px4_sim_s += js.SETTLE_S + 0.1        # ...and stays still
+    loop._send_startup_params()
+    assert reboots == [1]
+
+
+def test_the_settle_timer_restarts_if_the_airframe_moves_again():
+    """A bounce off the collision plane must not count toward the settle: the
+    whole point is that EKF2 sees a still aircraft, not an averagely still
+    one."""
+    js = _load_server()
+    loop = _moving_loop(js, 46)
+    reboots = []
+    loop.link.reboot_autopilot = lambda: reboots.append(1)
+
+    loop._px4_vel = (0.0, 0.0, 0.0)
+    loop._send_startup_params()                 # settle clock starts
+    loop._px4_sim_s += js.SETTLE_S - 0.1        # nearly there...
+    loop._px4_vel = (0.0, 0.0, -1.0)            # ...then it moves
+    loop._send_startup_params()
+    loop._px4_vel = (0.0, 0.0, 0.0)
+    loop._px4_sim_s += js.SETTLE_S - 0.1        # not enough on its own now
+    loop._send_startup_params()
+
+    assert reboots == [], "the settle timer did not restart on motion"
+
+
+def test_the_settle_is_measured_in_sim_seconds():
+    """The aircraft settles in SIMULATED seconds. At sim_rate 0.4 a wall-clock
+    budget would run two and a half times longer than intended -- the same
+    wall-vs-sim confusion that has now bitten this path four times."""
+    js = _load_server()
+    loop = _moving_loop(js, 47)
+    reboots = []
+    loop.link.reboot_autopilot = lambda: reboots.append(1)
+
+    loop._px4_vel = (0.0, 0.0, 0.0)
+    loop._send_startup_params()
+    # Wall time passes; PX4's clock does NOT. Nothing may happen.
+    time.sleep(0.2)
+    loop._send_startup_params()
+    assert reboots == [], "settle was judged against the wall clock"
+
+    loop._px4_sim_s += js.SETTLE_S + 0.1
+    loop._send_startup_params()
+    assert reboots == [1]
+
+
+def test_nothing_at_all_is_sent_while_phase_0_waits():
+    """Not even the ordinary params: PX4 is about to be rebooted and anything
+    sent into that gap is lost, so a held phase 0 is a silent one."""
+    js = _load_server()
+    loop = _moving_loop(js, 48)
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+    loop.link.reboot_autopilot = lambda: None
+
+    loop._send_startup_params()
+
+    assert sent == [], sent
+
+
+def test_settling_is_not_required_without_vision():
+    """A plain GPS flight never reboots PX4, so it must not wait on an
+    airframe that may be flying already."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 49}")
+    loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0), rate_hz=20.0)
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+    loop._px4_vel = (0.0, 0.0, -5.0)            # climbing hard
+
+    loop._send_startup_params()
+
+    assert "COM_RCL_EXCEPT" in sent, sent
+    assert loop._params_sent
+
+
+def test_the_settle_gate_is_not_reapplied_after_the_reboot():
+    """It gates phase 0 only. _send_startup_params is also the RECOVERY path
+    (_check_px4_restart), and re-gating it would refuse to re-assert vision
+    params on an aircraft that is airborne by then -- exactly when losing them
+    matters most."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 50, _pose(), received_at=time.monotonic())
+    loop._vision_rebooted = True                # phase 0 already done
+    loop._px4_vel = (0.0, 0.0, -3.0)            # airborne and climbing
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+
+    loop._send_startup_params()
+
+    assert "EKF2_GPS_CTRL" in sent, sent
+    assert loop._params_sent

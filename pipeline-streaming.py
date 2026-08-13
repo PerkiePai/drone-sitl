@@ -52,7 +52,7 @@ class Estimator:
     flow_odometry.py:520.
     """
 
-    def __init__(self, meta, scale=1.0, min_track=30, use_gt=True):
+    def __init__(self, meta, scale=1.0, min_track=30, use_gt=True, mag_gain=0.0):
         self.K = np.asarray(meta["K"], dtype=float)
         self.R_CtoI = np.asarray(meta["R_CtoI"], dtype=float)
         self.scale = scale
@@ -63,7 +63,14 @@ class Estimator:
             self.K[:2, :] *= scale
         self.Kinv = np.linalg.inv(self.K)
 
-        self.state = MahonyState.from_heading(float(meta.get("heading_deg", 0.0)))
+        # mag_gain stays 0.0 by default (ADR-0005): the magnetometer channel is
+        # recorded so offline analysis can show what it would have corrected,
+        # not acted on live. MahonyState.update() ignores `mag` entirely while
+        # its own mag_gain is 0, so calibrating and feeding it every tick below
+        # costs nothing when the flag is left at the default.
+        self.state = MahonyState.from_heading(float(meta.get("heading_deg", 0.0)),
+                                              mag_gain=mag_gain)
+        self.mag_calibrated = False
         self.pos = np.zeros(3)      # ENU, anchored at the first frame
         self.baro_alt = None
         self.baro0 = None
@@ -77,7 +84,15 @@ class Estimator:
     # --- sensor inputs -----------------------------------------------------
 
     def on_imu(self, msg, dt):
-        self.state.update(msg["w"], msg["a"], dt)
+        mag = msg.get("m")
+        if mag is not None and not self.mag_calibrated:
+            # One-time factory-compass calibration (flow_odometry.py's batch
+            # loop averages ~50 samples; streaming just takes the first tick
+            # that has one -- close enough for a slowly-varying field, and the
+            # gain stays 0 either way).
+            self.state.calibrate_mag(mag)
+            self.mag_calibrated = True
+        self.state.update(msg["w"], msg["a"], dt, mag=mag)
 
     def on_baro(self, msg):
         self.baro_alt = float(msg["alt_m"])
@@ -135,6 +150,7 @@ class Estimator:
         drift = None
         if self.last_gt is not None:
             drift = float(np.linalg.norm(self.pos[:2] - self.last_gt[:2]))
+        gt = self.last_gt
         return {
             "ts_ns": int(msg["ts_ns"]),
             "frame": int(msg.get("frame", 0)),
@@ -145,6 +161,14 @@ class Estimator:
             "drift_m": drift,          # None, never 0.0, when GT is absent
             "n_frames": int(self.n_frames),
             "n_solved": int(self.n_solved),
+            # SCORING ONLY (design D4, ADR-0004) -- forwarded so
+            # joystick-server.py can compute aircraft excursion against PX4's
+            # OWN estimate, which self.pos cannot be scored against without
+            # this. None, never 0.0, when GT is absent -- same convention as
+            # drift_m.
+            "gt_x": None if gt is None else float(gt[0]),
+            "gt_y": None if gt is None else float(gt[1]),
+            "gt_z": None if gt is None else float(gt[2]),
         }
 
 
@@ -157,6 +181,10 @@ def main(argv=None):
     ap.add_argument("--stride", type=int, default=1,
                     help="process every Nth frame; a longer baseline tracks better")
     ap.add_argument("--min-track", type=int, default=30)
+    ap.add_argument("--mag-gain", type=float, default=0.0,
+                    help="magnetometer fusion gain into the Mahony filter's yaw. "
+                         "0.0 (default, ADR-0005) records the channel without "
+                         "acting on it -- turning it on is this one flag")
     ap.add_argument("--print-every", type=int, default=0,
                     help="print every Nth processed frame (0 = never)")
     ap.add_argument("--no-gt", action="store_true",
@@ -206,7 +234,8 @@ def main(argv=None):
                 if est is None:
                     est = Estimator(msg, scale=args.scale,
                                     min_track=args.min_track,
-                                    use_gt=not args.no_gt)
+                                    use_gt=not args.no_gt,
+                                    mag_gain=args.mag_gain)
                     print(f">>> primed from meta: site={msg.get('site')} "
                           f"vib_damp={msg.get('vib_damp')} "
                           f"heading={msg.get('heading_deg')}", flush=True)

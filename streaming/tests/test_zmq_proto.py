@@ -16,6 +16,25 @@ def test_imu_round_trip():
     assert got == payload
 
 
+def test_imu_round_trip_with_magnetometer():
+    """The `m` field: body-FRD magnetic field, added under Task 9 (ADR-0005) as
+    a heading reference. Recorded at zero fusion gain -- see
+    pipeline-streaming.py --mag-gain -- but the wire format has to carry it."""
+    payload = {"ts_ns": 1, "w": [0.0, 0.0, 0.0], "a": [0.0, 0.0, -9.81],
+               "m": [0.21, 0.05, 0.41]}
+    _, got = zmq_proto.unpack(zmq_proto.pack(zmq_proto.TOPIC_IMU, payload))
+    assert got == payload
+
+
+def test_imu_round_trip_without_magnetometer():
+    """A vehicle with no magnetometer sensor omits `m` entirely -- a silently
+    absent field is the failure mode this project keeps paying for, so the
+    absence has to be a missing key, not None, and this pins that shape."""
+    payload = {"ts_ns": 1, "w": [0.0, 0.0, 0.0], "a": [0.0, 0.0, -9.81]}
+    _, got = zmq_proto.unpack(zmq_proto.pack(zmq_proto.TOPIC_IMU, payload))
+    assert "m" not in got
+
+
 def test_frame_carries_raw_jpeg_bytes_untouched():
     """The frame topic is the only binary payload; msgpack must not coerce it
     to str, or cv2.imdecode gets garbage."""

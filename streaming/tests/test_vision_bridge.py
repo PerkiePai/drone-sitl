@@ -127,6 +127,20 @@ def test_none_pose_sends_nothing(conn):
     conn.mav.vision_position_estimate_send.assert_not_called()
 
 
+def test_vision_pose_has_no_ground_truth_fields():
+    """The fence that replaces D4's process separation (ADR-0004).
+
+    Ground truth now crosses into this process, carried on the SAME `vio` ZMQ
+    message as the estimate, purely for joystick-server.py to score aircraft
+    excursion. VisionPositionSender.send() only ever reads a VisionPose --
+    never the raw ZMQ dict -- so as long as VisionPose itself cannot carry a
+    gt_* field, nothing here can leak into what PX4 is told. This is the
+    structural guarantee: if a future change ever adds one to the dataclass,
+    this test is what notices."""
+    fields = vision_bridge.VisionPose.__dataclass_fields__
+    assert not any(name.startswith("gt") for name in fields), fields
+
+
 # --- frame alignment -------------------------------------------------------
 
 def _pose(x, y, z=10.0, yaw=math.pi / 2):
@@ -272,6 +286,18 @@ def test_only_reboot_required_params_are_in_the_boot_phase():
             == set(vision_bridge.HGT_REF_NEEDS_REBOOT))
 
 
+def test_boot_phase_enables_flight_logging_from_boot_to_shutdown():
+    """SDLOG_MODE=2 (logger/params.c:68) so a flight is captured even if arming
+    fails partway -- the whole point of ADR-0003, which found no ulog had ever
+    survived a VIO session because Pegasus deletes the rootfs on exit."""
+    p = dict((n, v) for n, v, _ in vision_bridge.EKF2_BOOT_PARAMS)
+    assert p["SDLOG_MODE"] == 2
+    assert p["SDLOG_PROFILE"] == 131          # bit0 default + bit1 EKF2 replay + bit7 CV
+    for name in ("SDLOG_MODE", "SDLOG_PROFILE"):
+        assert dict((n, t) for n, _, t in vision_bridge.EKF2_BOOT_PARAMS)[name] \
+            == offboard.MAV_PARAM_TYPE_INT32
+
+
 def test_the_fusion_phase_is_safe_to_apply_with_gnss_on():
     """Phase 1 must be flyable on GPS: it turns vision ON without taking
     anything away, so the aircraft can climb to where the camera can see."""
@@ -285,8 +311,8 @@ def test_cutting_gnss_is_a_phase_of_its_own():
 
 
 def test_reboot_sets_the_boot_params_before_restarting(conn):
-    """Reboot first and the param is still unset when PX4 reads it -- the whole
-    sequence would be a no-op that looks like it worked."""
+    """Reboot first and the params are still unset when PX4 reads them -- the
+    whole sequence would be a no-op that looks like it worked."""
     link = offboard.OffboardLink(conn)
     order = []
     link.set_param = lambda name, value, ptype: order.append(("param", name))
@@ -294,7 +320,8 @@ def test_reboot_sets_the_boot_params_before_restarting(conn):
 
     vision_bridge.reboot_for_boot_params(link)
 
-    assert order == [("param", "EKF2_HGT_REF"), ("reboot", None)], order
+    assert order == [("param", n) for n, _, _ in vision_bridge.EKF2_BOOT_PARAMS] \
+        + [("reboot", None)], order
 
 
 def test_reboot_autopilot_sends_the_documented_command(conn):

@@ -19,7 +19,7 @@ import cv2
 import zmq
 from isaacsim.core.api.world import World
 from pegasus.simulator.logic.vehicle_manager import VehicleManager
-from pegasus.simulator.logic.sensors import IMU, Barometer
+from pegasus.simulator.logic.sensors import IMU, Barometer, Magnetometer
 import omni.usd
 import omni.replicator.core as rep
 from pxr import UsdGeom
@@ -77,11 +77,13 @@ def find_body_prim():
 cam_path = find_cam_path("down_cam")
 imu = None
 baro = None
+mag = None
 veh = None
 if vehicles:
     veh = vehicles[0]
     imu = next((s for s in veh._sensors if isinstance(s, IMU)), None)
     baro = next((s for s in veh._sensors if isinstance(s, Barometer)), None)
+    mag = next((s for s in veh._sensors if isinstance(s, Magnetometer)), None)
 
 if not vehicles or imu is None:
     print("*** No drone/IMU. Launch through sim/launch-sitl.sh first. ***")
@@ -132,6 +134,16 @@ else:
               "body attitude, so the camera<->IMU extrinsic is TIME-VARYING and "
               "the published R_CtoI is only an approximation. Relaunch with "
               "DRONE_SETUP_DOWN_VIB_DAMP=False for VIO. ***")
+
+    # --- magnetometer: a heading reference, carried at zero gain (ADR-0005) ---
+    # A silently absent field is the failure mode this project keeps paying
+    # for (INT32 params, the missing ENU->NED yaw conversion), so an absent
+    # sensor is announced on `meta` rather than the `imu` topic just quietly
+    # never carrying `m`.
+    if mag is None:
+        print("*** No magnetometer sensor found on this vehicle -- the `imu` "
+              "topic will carry no 'm' field, and the estimator has no heading "
+              "reference to calibrate. ***")
 
     # --- extrinsic: analytic, then cross-checked against the live stage -----
     R_body_cam = analytic_R_body_cam(img_roll_deg)
@@ -190,6 +202,7 @@ else:
         "img_roll_deg": float(img_roll_deg),
         "data_fps": DATA_FPS,
         "frame_fps": FRAME_FPS,
+        "has_mag": mag is not None,
     }
 
     IMG_EVERY = max(1, round(DATA_FPS / max(1, FRAME_FPS)))
@@ -235,10 +248,17 @@ else:
         si = imu.state
         w = si.get("angular_velocity", (0.0, 0.0, 0.0))
         a = si.get("linear_acceleration", (0.0, 0.0, 0.0))
-        _send(zmq_proto.TOPIC_IMU, {
+        imu_msg = {
             "frame": fr, "ts_ns": ts_ns,
             "w": [float(w[0]), float(w[1]), float(w[2])],
-            "a": [float(a[0]), float(a[1]), float(a[2])]})
+            "a": [float(a[0]), float(a[1]), float(a[2])]}
+        if mag is not None:
+            # Body-FRD, matching MahonyState.calibrate_mag/update's convention
+            # -- Pegasus's own magnetometer.py already rotates into FRD-in-NED
+            # (magnetometer.py:95-103), the same frame the gyro/accel are in.
+            m = mag.state.get("magnetic_field", (0.0, 0.0, 0.0))
+            imu_msg["m"] = [float(m[0]), float(m[1]), float(m[2])]
+        _send(zmq_proto.TOPIC_IMU, imu_msg)
 
         if baro is not None:
             sb = baro.state

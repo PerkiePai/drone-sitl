@@ -8,3 +8,6 @@ sim/secrets.env
 # NvStreamer ETW traces. Isaac's WebRTC streamer drops these in the CWD and they
 # run to tens of megabytes each.
 NvStreamer-*.etli
+
+# Flight logs: sim/save-ulog.sh output and joystick-server.py's run CSVs.
+logs/

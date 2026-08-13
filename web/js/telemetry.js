@@ -98,6 +98,11 @@ function paintVio(v) {
   // `--`, never 0.0: no GT topic is "we cannot tell", not "no drift".
   el('t-vio-drift').textContent =
     v.drift_m === null || v.drift_m === undefined ? '--' : v.drift_m.toFixed(1);
+  // Aircraft excursion vs the hold point at the cut -- `--` before a cut has
+  // been taken, not 0.0. See CONTEXT.md: this is not the same quantity as
+  // drift_m above.
+  el('t-vio-exc').textContent =
+    v.excursion_m === null || v.excursion_m === undefined ? '--' : v.excursion_m.toFixed(1);
   el('t-vio-pts').textContent =
     v.n_inliers === null || v.n_inliers === undefined ? '--' : v.n_inliers;
   el('t-vio-fps').textContent =

@@ -952,6 +952,141 @@ def test_zmq_thread_never_touches_the_mavlink_connection():
         sub.close()
 
 
+# --- aircraft excursion and the phase string (Task 9, ADR-0004) ------------
+
+def test_excursion_is_none_before_any_cut():
+    """Estimator drift can be non-null the whole flight; excursion must not
+    be, since no hold point has been taken and there is nothing to be far
+    from yet."""
+    js = _load_server()
+    _, loop, vision = _vision_loop(js, 90, _pose(), received_at=time.monotonic())
+    vision._last_msg["gt_x"], vision._last_msg["gt_y"] = 10.0, 20.0
+
+    assert loop._excursion_m() is None
+    assert loop._vio_status(time.monotonic())["excursion_m"] is None
+
+
+def test_excursion_tracks_ground_truth_from_the_hold_point_taken_at_the_cut():
+    """CONTEXT.md: excursion is ground truth against where it was commanded to
+    hold, never the estimator's own report of itself."""
+    js = _load_server()
+    _, loop, vision = _vision_loop(js, 91, _pose(), received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+
+    vision._last_msg["gt_x"], vision._last_msg["gt_y"] = 100.0, 200.0
+    loop._run_command("gps_denied")
+    assert loop.telemetry()["gps_denied"] is True
+    assert loop._excursion_m() == pytest.approx(0.0)
+
+    vision._last_msg["gt_x"], vision._last_msg["gt_y"] = 103.0, 204.0
+    assert loop._excursion_m() == pytest.approx(5.0)   # 3-4-5 triangle
+
+
+def test_excursion_is_none_when_the_cut_had_no_ground_truth():
+    """--no-gt on the estimator, or GT simply not fresh at the instant of the
+    cut, must not silently invent a hold point at the origin."""
+    js = _load_server()
+    _, loop, vision = _vision_loop(js, 92, _pose(), received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+
+    assert "gt_x" not in vision._last_msg
+    loop._run_command("gps_denied")
+    assert loop.telemetry()["gps_denied"] is True
+    assert loop._hold_point_gt is None
+    assert loop._excursion_m() is None
+
+    vision._last_msg["gt_x"], vision._last_msg["gt_y"] = 500.0, 500.0
+    assert loop._excursion_m() is None, (
+        "a hold point must not be inferred after the fact from whatever GT "
+        "happens to arrive later")
+
+
+def test_excursion_goes_back_to_none_once_gnss_is_restored():
+    """A restored flight is not being held to phase 2's hold point -- showing
+    a number against a stale anchor would misreport a normal GPS flight as
+    excursing."""
+    js = _load_server()
+    _, loop, vision = _vision_loop(js, 93, _pose(), received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+    vision._last_msg["gt_x"], vision._last_msg["gt_y"] = 0.0, 0.0
+    loop._run_command("gps_denied")
+    vision._last_msg["gt_x"], vision._last_msg["gt_y"] = 30.0, 40.0
+    assert loop._excursion_m() == pytest.approx(50.0)
+
+    loop._run_command("gps_restore")
+
+    assert loop.telemetry()["gps_denied"] is False
+    assert loop._excursion_m() is None
+
+
+def test_phase_follows_context_md_numbering():
+    """0 before the boot reboot, 1b once fusing, 2 once cut, 1 once restored --
+    CONTEXT.md's phase vocabulary, read back off the loop's own state rather
+    than re-derived by the caller."""
+    js = _load_server()
+    _, loop, vision = _vision_loop(js, 94, _pose(), received_at=time.monotonic())
+    assert loop._phase() == "0", "not yet rebooted for EKF2_HGT_REF"
+
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._vision_rebooted = True
+    assert loop._phase() == "1", "GNSS flight, vision not yet fusing"
+
+    loop._maybe_start_fusing_vision(time.monotonic())
+    assert loop._phase() == "1b"
+
+    loop._run_command("gps_denied")
+    assert loop._phase() == "2"
+
+    loop._run_command("gps_restore")
+    assert loop._phase() == "1b"
+
+
+def test_phase_is_1_when_the_server_has_no_vision_at_all():
+    """--no-vision must not be misreported as phase 0 forever."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 95}")
+    loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0), rate_hz=20.0)
+    assert loop._phase() == "1"
+
+
+def test_run_csv_row_matches_the_telemetry_it_was_written_alongside(tmp_path):
+    """The CSV must not be a second, independently-derived account of the
+    flight -- excursion_m and fresh in the row have to be the exact values
+    _vio_status() reported that same tick, or the two ways of reading a run
+    back could disagree."""
+    js = _load_server()
+    _, loop, vision = _vision_loop(js, 96, _pose(), received_at=time.monotonic())
+    loop._params_sent = True
+    loop._vision_rebooted = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+    vision._last_msg["gt_x"], vision._last_msg["gt_y"] = 0.0, 0.0
+    loop._run_command("gps_denied")
+    vision._last_msg["gt_x"], vision._last_msg["gt_y"] = 3.0, 4.0
+
+    loop._csv = js.RunCSV(str(tmp_path / "run.csv"))
+    now = time.monotonic()
+    vio_status = loop._vio_status(now)
+    loop._write_csv_row(vio_status)
+    loop._csv.close()
+
+    import csv as csvmod
+    with open(tmp_path / "run.csv") as fh:
+        row = list(csvmod.DictReader(fh))[0]
+    assert row["phase"] == "2"
+    assert float(row["excursion_m"]) == pytest.approx(vio_status["excursion_m"])
+    assert float(row["excursion_m"]) == pytest.approx(5.0)   # 3-4-5 triangle
+    assert row["fresh"] == str(vio_status["fresh"])
+    assert row["gt_x"] == "3.0" and row["gt_y"] == "4.0"
+
+
 # --- the estimator child process -------------------------------------------
 
 def _child(tmp_path, body):

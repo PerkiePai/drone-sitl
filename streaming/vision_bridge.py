@@ -33,14 +33,29 @@ with GNSS already disabled.
 
 EKF2_BOOT_PARAMS = (
     ("EKF2_HGT_REF", 0, MAV_PARAM_TYPE_INT32),
+    ("SDLOG_MODE", 2, MAV_PARAM_TYPE_INT32),
+    ("SDLOG_PROFILE", 131, MAV_PARAM_TYPE_INT32),
 )
-"""Phase 0 -- @reboot_required, so PX4 must be restarted after these are set.
+"""Phase 0 -- params PX4 only re-reads at boot, so PX4 must be restarted after
+these are set. Not just EKF2 vision params despite the name -- SDLOG_* rides
+along because phase 0 already pays for a reboot (ADR-0003).
 
 `EKF2_HGT_REF` ekf2_params.c:657, default 1 (GPS). 0 = barometric, which is
 where the height genuinely comes from. *** @reboot_required true
 (ekf2_params.c:656). *** A PARAM_SET at runtime updates the STORED value -- QGC
 will show 0 -- but EKF2 does not re-read its height reference until PX4
 restarts.
+
+`SDLOG_MODE` logger/params.c:68, default 0 (armed until disarm). 2 = boot until
+shutdown, so a flight is captured even if it never arms cleanly.
+@reboot_required true (logger/params.c:65).
+
+`SDLOG_PROFILE` logger/params.c:147, default 1 (mission messages only). 131 =
+bit0 (1, default set) + bit1 (2, full-rate EKF2 replay) + bit7 (128, computer
+vision) -- 1+2+128=131. Replay topics unlock `src/modules/replay` on the
+resulting ulog (ADR-0003); computer-vision topics carry the vision fusion
+innovations this whole system exists to measure. @reboot_required true
+(logger/params.c:144).
 """
 
 EKF2_FUSION_PARAMS = (

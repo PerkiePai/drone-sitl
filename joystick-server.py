@@ -15,6 +15,7 @@ Design: docs/superpowers/specs/2026-07-30-joystick-offboard-design.md
 """
 import argparse
 import asyncio
+import csv
 import json
 import math
 import os
@@ -175,6 +176,42 @@ class VisionSubscriber(threading.Thread):
             sock.close(linger=0)
 
 
+class RunCSV:
+    """One row per setpoint tick under --vision: sim time, PX4's own pose,
+    ground truth, the raw vision estimate, aircraft excursion, estimator
+    drift, frame alignment and vision health -- Task 9's classification
+    flight (ADR-0002) reads this back after the fact, since nothing computed
+    any of it before now. `phase` follows CONTEXT.md's numbering.
+
+    Flushed every row, not buffered: a run ending in a crash is exactly the
+    case this exists to survive (ADR-0003, which also covers why the ulog
+    saved by sim/save-ulog.sh needs a matching --run-name to land beside this).
+    """
+
+    FIELDS = ("sim_s", "phase",
+              "px4_n", "px4_e", "px4_d", "px4_yaw",
+              "gt_x", "gt_y", "gt_z",
+              "vio_x", "vio_y", "vio_z", "vio_yaw",
+              "excursion_m", "drift_m", "align_m", "realigned",
+              "n_inliers", "fresh", "dropped_stale", "sim_rate")
+
+    def __init__(self, path):
+        self.path = path
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self._fh = open(path, "w", newline="")
+        self._w = csv.writer(self._fh)
+        self._w.writerow(self.FIELDS)
+        self._fh.flush()
+
+    def write(self, row):
+        self._w.writerow("" if row.get(f) is None else row.get(f)
+                         for f in self.FIELDS)
+        self._fh.flush()
+
+    def close(self):
+        self._fh.close()
+
+
 class SetpointLoop(threading.Thread):
     """Sole owner of the MAVLink connection.
 
@@ -192,11 +229,14 @@ class SetpointLoop(threading.Thread):
 
     def __init__(self, conn, state, rate_hz=20.0, takeoff_alt=5.0, warmup_s=1.0,
                  mission_speed=3.0, arrival_radius=2.0,
-                 vision=None, vision_origin=None):
+                 vision=None, vision_origin=None, csv_path=None):
         super().__init__(daemon=True)
         self.conn = conn
         self.state = state
         self.link = offboard.OffboardLink(conn)
+        # Task 9 instrumentation: only meaningful under --vision, since every
+        # field but sim_s/phase comes off the vision telemetry.
+        self._csv = RunCSV(csv_path) if csv_path is not None else None
         # Vision is opt-in end to end: no source means no EKF2 param changes,
         # no origin, and no VPE stream. Disabling GNSS fusion is never a
         # side effect of starting the server.
@@ -285,6 +325,12 @@ class SetpointLoop(threading.Thread):
         # it is moving. Phase 0 waits on this -- see _px4_at_rest.
         self._at_rest_since = None
         self._settle_logged = False
+        # Ground truth at the moment of the GNSS cut -- "where it was
+        # commanded to hold" (CONTEXT.md, aircraft excursion). None until a cut
+        # has actually been taken, or if no gt topic reached the estimator at
+        # that instant; either way excursion_m stays None rather than being
+        # computed against a stale or fabricated anchor.
+        self._hold_point_gt = None
 
     def telemetry(self):
         with self._telem_lock:
@@ -471,6 +517,16 @@ class SetpointLoop(threading.Thread):
                   "vision frame onto. Cutting GNSS now would hand EKF2 a frame "
                   "tens of metres from where it believes it is. ***")
             return
+        # The excursion anchor (ADR-0004): "where it was commanded to hold" is
+        # ground truth AT THIS INSTANT, not PX4's estimate -- scoring PX4
+        # against its own position would show a rock-steady hover while the
+        # aircraft flew away, which is exactly the failure 8.6 needs to catch.
+        last = getattr(self.vision, "_last_msg", None) or {}
+        gx, gy = last.get("gt_x"), last.get("gt_y")
+        self._hold_point_gt = (gx, gy) if gx is not None and gy is not None else None
+        if self._hold_point_gt is None:
+            print("*** gps_denied: no ground truth in the latest estimate -- "
+                  "aircraft excursion will not be computable this flight. ***")
         vision_bridge.apply_ekf2_gps_denied_params(self.link)
         self._gps_denied = True
         with self._telem_lock:
@@ -703,6 +759,36 @@ class SetpointLoop(threading.Thread):
                               else clock_now - received_at)
         return pose, clock_now, received_at
 
+    def _phase(self):
+        """Current flight phase, CONTEXT.md's numbering. Setpoint thread only."""
+        if self.vision is None:
+            return "1"          # vision never configured: plain GPS flight
+        if not self._vision_rebooted:
+            return "0"
+        if self._gps_denied:
+            return "2"
+        if self._vision_fusing:
+            return "1b"
+        return "1"
+
+    def _excursion_m(self):
+        """Distance from the hold point taken at the cut, in ground truth.
+
+        None whenever it is not meaningful: no cut has been taken, the cut had
+        no ground truth to anchor on, or GNSS has since been restored -- a
+        restored flight is not being held to phase 2's hold point at all, and
+        showing a number against a stale anchor would misreport the aircraft
+        as excursing when it is simply flying under GNSS again.
+        """
+        if not self._gps_denied or self._hold_point_gt is None:
+            return None
+        last = getattr(self.vision, "_last_msg", None) or {}
+        gx, gy = last.get("gt_x"), last.get("gt_y")
+        if gx is None or gy is None:
+            return None
+        hx, hy = self._hold_point_gt
+        return math.hypot(gx - hx, gy - hy)
+
     def _vio_status(self, now):
         """The `vio` telemetry block, or None when vision is not configured.
 
@@ -725,6 +811,11 @@ class SetpointLoop(threading.Thread):
             "n_inliers": last.get("n_inliers"),
             # None, never 0.0 -- no GT topic is not zero drift.
             "drift_m": last.get("drift_m"),
+            # Aircraft excursion (CONTEXT.md): where the airframe truly is vs
+            # where it was told to hold, from ground truth -- NOT drift_m,
+            # which is the estimator's own error and never sees a hold point.
+            # None until a cut has actually been taken (ADR-0004, ADR-0001).
+            "excursion_m": self._excursion_m(),
             "fps": last.get("fps"),
             "sent": self.vision_sender.sent,
             "dropped_stale": self.vision_sender.dropped_stale,
@@ -737,6 +828,35 @@ class SetpointLoop(threading.Thread):
             "realigned": self.vision_sender.realigned,
             "align_m": self.vision_sender.alignment.offset_m(),
         }
+
+    def _write_csv_row(self, vio_status):
+        """Append one RunCSV row. Setpoint thread only -- reads state written
+        by _drain_mavlink on that same thread, plus vio_status just computed
+        this tick by _vio_status(), so nothing here re-derives the age/fresh
+        judgement or can disagree with the telemetry the operator is reading.
+        """
+        last = getattr(self.vision, "_last_msg", None) or {}
+        n, e, d = self._px4_ned if self._px4_ned is not None else (None, None, None)
+        self._csv.write({
+            "sim_s": self._px4_sim_s,
+            "phase": self._phase(),
+            "px4_n": n, "px4_e": e, "px4_d": d, "px4_yaw": self._px4_yaw,
+            "gt_x": last.get("gt_x"), "gt_y": last.get("gt_y"),
+            "gt_z": last.get("gt_z"),
+            "vio_x": last.get("x"), "vio_y": last.get("y"), "vio_z": last.get("z"),
+            "vio_yaw": last.get("yaw"),
+            "excursion_m": (vio_status or {}).get("excursion_m"),
+            "drift_m": last.get("drift_m"),
+            "align_m": self.vision_sender.alignment.offset_m()
+                if self.vision_sender is not None else None,
+            "realigned": self.vision_sender.realigned
+                if self.vision_sender is not None else None,
+            "n_inliers": last.get("n_inliers"),
+            "fresh": (vio_status or {}).get("fresh"),
+            "dropped_stale": self.vision_sender.dropped_stale
+                if self.vision_sender is not None else None,
+            "sim_rate": self._telem.get("sim_rate"),
+        })
 
     def _drain_mavlink(self):
         while True:
@@ -829,6 +949,8 @@ class SetpointLoop(threading.Thread):
             # lock and nesting the two would introduce a cycle.
             mission_status = self.mission.status()
             vio_status = self._vio_status(now_mono)
+            if self._csv is not None:
+                self._write_csv_row(vio_status)
             with self._telem_lock:
                 self._telem["cmd_vx"] = vx
                 self._telem["cmd_yaw_rate"] = yaw_rate
@@ -1195,6 +1317,10 @@ def main():
                                                      DEFAULT_SITE),
                     help="sim/sites.py key; supplies the GPS origin under "
                          "--vision")
+    ap.add_argument("--run-name", default=None,
+                    help="names ./logs/<run-name>/run.csv under --vision. "
+                         "Pass the same name to sim/save-ulog.sh so the ulog "
+                         "lands beside it. Defaults to a timestamp.")
     args = ap.parse_args()
 
     import uvicorn
@@ -1202,6 +1328,7 @@ def main():
     vision = None
     vision_origin = None
     estimator = None
+    csv_path = None
     if args.vision:
         if not args.site:
             ap.error("--vision needs --site (or SITL_SITE) for the GPS origin: "
@@ -1212,6 +1339,13 @@ def main():
         import sites
         site = sites.get_site(args.site)
         vision_origin = (site.latitude, site.longitude, site.height)
+        # Task 9 instrumentation (ADR-0002/0003/0004): a run CSV alongside the
+        # ulog sim/save-ulog.sh copies out, so a classification flight can be
+        # read back afterwards instead of only watched live.
+        run_name = args.run_name or time.strftime("%Y%m%d-%H%M%S")
+        csv_path = os.path.join(ROOT, "logs", run_name, "run.csv")
+        print(f">>> run CSV: logs/{run_name}/run.csv -- pass "
+              f"\"{run_name}\" to sim/save-ulog.sh to keep the ulog beside it")
         if args.estimator:
             estimator = EstimatorProcess(
                 os.path.join(ROOT, ESTIMATOR_SCRIPT),
@@ -1239,7 +1373,8 @@ def main():
     loop_thread = SetpointLoop(conn, state, args.rate, args.takeoff_alt,
                                args.offboard_warmup, args.mission_speed,
                                args.arrival_radius,
-                               vision=vision, vision_origin=vision_origin)
+                               vision=vision, vision_origin=vision_origin,
+                               csv_path=csv_path)
     loop_thread.start()
 
     print(f">>> MAVLink offboard link: {args.mavlink}")
@@ -1258,6 +1393,8 @@ def main():
         # run's child cannot start and the failure looks like a broken server.
         if estimator is not None:
             estimator.stop()
+        if loop_thread._csv is not None:
+            loop_thread._csv.close()
 
 
 if __name__ == "__main__":

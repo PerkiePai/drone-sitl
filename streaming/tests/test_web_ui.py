@@ -289,7 +289,7 @@ def test_the_vio_row_is_hidden_until_the_server_offers_vision():
     assert 'id="telem-vio"' in html
     row = html.split('id="telem-vio"')[1].split(">")[0]
     assert "hidden" in row, "the VIO row must start hidden"
-    for field in ("t-vio", "t-vio-drift", "t-vio-pts", "t-vio-fps",
+    for field in ("t-vio", "t-vio-drift", "t-vio-exc", "t-vio-pts", "t-vio-fps",
                   "t-vio-align"):
         assert f'id="{field}"' in html
 
@@ -365,6 +365,26 @@ def test_absent_drift_renders_as_dashes_never_zero():
     seg = js.split("t-vio-drift")[1].split(";")[0]
     assert "'--'" in seg
     assert "null" in seg
+
+
+def test_absent_excursion_renders_as_dashes_never_zero():
+    """No cut taken yet -- or one taken with no ground truth to anchor on --
+    means "cannot tell", the same convention drift_m uses, and for the same
+    reason: 0.0 would read as a perfect hold rather than as unmeasured."""
+    js = _read("web", "js", "telemetry.js")
+    seg = js.split("t-vio-exc")[1].split(";")[0]
+    assert "'--'" in seg
+    assert "null" in seg
+
+
+def test_excursion_is_distinct_from_drift_in_the_markup():
+    """CONTEXT.md: estimator drift and aircraft excursion are different
+    quantities and the page must label them differently, or an operator
+    reading `drift 0.4` during a diverging hold has no way to notice the
+    aircraft itself is 40 m off."""
+    html = _read("web", "index.html")
+    row = html.split('id="telem-vio"')[1].split("</div>")[0]
+    assert 'id="t-vio-drift"' in row and 'id="t-vio-exc"' in row
 
 
 def test_telemetry_carries_no_vio_block_without_the_vision_flag():

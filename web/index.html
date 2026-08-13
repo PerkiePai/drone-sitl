@@ -35,6 +35,10 @@
   <div id="telem-vio" hidden>
     <span>vio <b id="t-vio" class="bad">--</b></span>
     <span>drift <b id="t-vio-drift">--</b> m</span>
+    <!-- Aircraft excursion: ground truth vs the hold point taken at the GNSS
+         cut. Different from drift above, which is the estimator's own error
+         and never sees a hold point -- see CONTEXT.md. -->
+    <span>exc <b id="t-vio-exc">--</b> m</span>
     <span>pts <b id="t-vio-pts">--</b></span>
     <span>fix <b id="t-vio-fps">--</b> Hz</span>
     <!-- How far the last phase transition had to shift the vision frame to

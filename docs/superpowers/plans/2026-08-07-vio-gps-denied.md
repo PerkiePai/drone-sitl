@@ -55,6 +55,7 @@ PX4 **v1.14.3** at `~/PX4-Autopilot`.
 | 6 | `--vision` wiring | `joystick-server.py` |
 | 7 | VIO row on the page | `web/`, `streaming/tests/test_web_ui.py` |
 | 8 | Live bring-up | — |
+| 9 | Diagnostic instrumentation | `sim/save-ulog.sh`, `streaming/vision_bridge.py`, `vio-streamer.py`, `pipeline-streaming.py`, `joystick-server.py` |
 
 Tasks 1–3 are pure unit work, no sim required. Task 4 needs Isaac; Task 5 can be
 driven from a recorded dataset without it.
@@ -1018,13 +1019,24 @@ Order matters: each step isolates one failure class.
 > PX4's at the handover, so EKF2 inherits that error and follows it away.
 > Full write-up in `SESSION.md`.
 >
-> **Status 2026-08-13, not yet flown:** the handover now pins the vision frame
-> onto PX4's at both phase transitions (`vision_bridge.FrameAlignment`), so
-> GPS-denied flight starts from zero error instead of ~30 m. Writing it turned
-> up a second bug: `VISION_POSITION_ESTIMATE` was carrying the estimator's
-> ENU/FLU attitude into NED/FRD fields, so the fused vision yaw was wrong by
-> `90 - 2*heading` degrees — up to 180. Both fixed, both unflown. 8.6 is the
-> next flight.
+> **Status 2026-08-13, run 5 flown:** the frame alignment and the ENU→NED
+> attitude fix both flew. **The handover is solved** — drift through the climb
+> fell from 23–37 m to 0.29–0.60 m, both realignments had almost nothing left to
+> close, and the aircraft stayed in OFFBOARD throughout. What remains is a slow
+> **growing oscillation**, ~40–60 s period, ±5 m growing to ±60 m, with 550–600
+> inliers and no rejections. It is a control/estimation instability, not a
+> tracking failure.
+>
+> **8.6 is redefined** (ADR-0001): 180 s vision-only, pass requires a non-growing
+> excursion envelope, peak excursion recorded as a number. 60 s is barely one
+> period of the observed mode and cannot distinguish damped from unstable.
+>
+> **Task 9 comes first** (ADR-0002): the next flight changes no parameter and
+> classifies the mode instead. Reasons the plan did not anticipate — no flight has
+> ever been recorded (ADR-0003), nothing computes aircraft excursion as opposed to
+> estimator drift (ADR-0004), the estimator has no heading reference at all while
+> EKF2 does (ADR-0005), and `EKF2_EV_DELAY` is measured on a clock whose rate
+> wanders (ADR-0006).
 
 - [x] **8.1** `DRONE_SETUP_DOWN_VIB_DAMP=False ./sim/launch-sitl.sh` → drone
       spawned, Play pressed, MJPEG on 8080. **Done 2026-08-11.**
@@ -1041,8 +1053,9 @@ Order matters: each step isolates one failure class.
       **Partial** — origin landed and the VIO row works, but `EKF2_HGT_REF` is
       @reboot_required and cannot take effect when applied at connect time.
       See SESSION.md 2026-08-11.
-- [ ] **8.6** Arm, take off, hover 60 s vision-only. Pass bar is **holding
-      station**, not zero drift.
+- [ ] **8.6** Arm, take off, hover **180 s** vision-only. Pass bar is a
+      **non-growing aircraft-excursion envelope**, not zero drift (ADR-0001).
+      Blocked on Task 9 — nothing currently computes the pass/fail number.
 - [ ] **8.7** Manual flight — forward/back/turn. Watch drift accumulate.
 - [ ] **8.8** Fly a short map route vision-only. This exercises
       `MAV_FRAME_GLOBAL_RELATIVE_ALT_INT` against a vision-only estimator, the
@@ -1052,6 +1065,116 @@ Order matters: each step isolates one failure class.
       Restart it; recovery without restarting the sim.
 - [ ] **8.10** Record results in `SESSION.md`, including the Step 4.3 branch
       taken and measured drift over 60 s.
+
+---
+
+## Task 9 — Diagnostic instrumentation
+
+Everything here is **measurement**. Nothing changes how the aircraft flies, which
+is what lets the whole batch ship before a single flight (ADR-0002) — the
+classification run stays a clean observation of the current system.
+
+Ships as one batch, then one flight.
+
+> **Status 2026-08-13:** 9.1–9.3 implemented and offline-verified (247/249
+> tests pass in `streaming/tests/` + `sim/tests/`; the 2 failures are
+> pre-existing and environmental — a live Isaac session's real recorder was up
+> during this run, which is exactly what those two tests assume is not the
+> case). `sim/save-ulog.sh` was run against the **live** PX4 process from an
+> already-in-progress session and correctly copied a 394 MB `.ulg` out via
+> `/proc/<pid>/cwd` — the mechanism is proven. **9.1d is not fully closed**:
+> that live PX4 was never rebooted with the new `SDLOG_PROFILE=131`, so the
+> copied ulog predates the computer-vision topics and `estimator_aid_src_ev_pos`
+> was not confirmed present. 9.4 (the classification flight) has not been
+> flown with this instrumentation — see `SESSION.md` for what's live right now
+> and why a reboot wasn't forced mid-session.
+
+### Step 9.1 — Get the flight recorder back
+
+- [x] **9.1a** `sim/save-ulog.sh`: resolve PX4's working directory via
+      `/proc/$(pgrep -f build/px4_sitl_default/bin/px4)/cwd`, copy `log/**/*.ulg`
+      into `./logs/<timestamp>/`. Must run **while Isaac is still up** — the
+      rootfs is a `tempfile.TemporaryDirectory` that dies with the process
+      (`px4_launch_tool.py:44,63`). Refuse loudly if no PX4 process is found,
+      rather than silently copying nothing. **Done and live-verified** — ran
+      against the currently-running PX4 and copied a real `.ulg` out.
+- [x] **9.1b** Add to `EKF2_BOOT_PARAMS` in `streaming/vision_bridge.py`:
+      `SDLOG_MODE=2` (boot→shutdown) and `SDLOG_PROFILE=131` (bits 0 default,
+      1 EKF2 replay, 7 computer vision). Both are `@reboot_required`
+      (`logger/params.c:65,144`) and phase 0 already reboots, so they cost
+      nothing extra. Both are INT32 — they go through the bit-pattern path in
+      `offboard.set_param`, and the existing param-set test must cover them.
+      **Done** — `test_boot_phase_enables_flight_logging_from_boot_to_shutdown`.
+- [x] **9.1c** The docstring on `EKF2_BOOT_PARAMS` currently says these are EKF2
+      vision params. Widen it: the tuple is now "params PX4 only re-reads at
+      boot", which is what phase 0 has always actually meant. **Done.**
+- [~] **9.1d** Verify on the ground: launch, run `save-ulog.sh`, confirm a
+      non-empty `.ulg` and that `estimator_aid_src_ev_pos` is present in it.
+      A broken capture must not be discovered after the 180 s flight.
+      **Partial** — the copy mechanism is proven live, but the checked-out
+      `.ulg` came from a PX4 that booted before `SDLOG_PROFILE=131` existed, so
+      the CV topics were not confirmed. Needs a fresh phase-0 reboot to close.
+
+### Step 9.2 — Give the estimator a magnetometer channel (gain 0)
+
+- [x] **9.2a** `vio-streamer.py`: read Pegasus's `Magnetometer` sensor alongside
+      `IMU`/`Barometer` and add `mx, my, mz` to the `imu` topic payload. If the
+      vehicle has no magnetometer sensor, publish nothing and say so on `meta` —
+      a silently absent field is the failure mode this project keeps paying for.
+      **Done** — syntax-checked; this file only runs inside Kit, so it is
+      unverified live until the streamer is restarted (see status note above).
+- [x] **9.2b** `streaming/zmq_proto.py` round-trip test covers the new fields,
+      including the absent case. **Done.**
+- [x] **9.2c** `pipeline-streaming.py`: pass `mag=` through to
+      `MahonyState.update()` and call `calibrate_mag()` once at prime.
+      **`mag_gain` stays 0.0** for this flight (ADR-0005) — the channel is
+      recorded, not acted on. Expose it as a flag so turning it on later is one
+      argument. **Done** — `--mag-gain`, default 0.0; behaviour exercised
+      directly (calibrates once, tolerates an absent `m` field, gain-0 update
+      does not raise).
+
+### Step 9.3 — Measure aircraft excursion, not just estimator drift
+
+- [x] **9.3a** `pipeline-streaming.py`: include ground truth in the `vio` message
+      alongside the estimate. The GT subscriber stays out of the update path —
+      D4's isolation test must still pass unchanged. **Done** — `gt_x/gt_y/gt_z`,
+      None when absent; exercised directly, confirmed GT never touches `self.pos`.
+- [x] **9.3b** `joystick-server.py`: compute excursion from the hold point at
+      the moment of the cut, add it to the `vio` telemetry block, render it on
+      the VIO row next to `drift_m`. Two different numbers, two different labels
+      — see `CONTEXT.md` on *estimator drift* versus *aircraft excursion*.
+      **Done** — `_excursion_m()`, `t-vio-exc` on the page, resets to `--` on
+      GNSS restore rather than showing a stale number.
+- [x] **9.3c** Test that `VisionPositionSender` never reads the ground-truth
+      field (ADR-0004). This is the fence that replaces D4's process separation.
+      **Done** — `test_vision_pose_has_no_ground_truth_fields`.
+- [x] **9.3d** 20 Hz run CSV from `joystick-server`: sim time, PX4 local pose,
+      GT, estimator pose, excursion, `drift_m`, `align_m`, `realigned`,
+      `n_inliers`, `fresh`, `dropped_stale`, `sim_rate`, phase. One row per tick,
+      one file per run, written next to the ulog. **Done** — `RunCSV`,
+      `./logs/<run-name>/run.csv`, flushed every row; `--run-name` lines it up
+      with `sim/save-ulog.sh <name>`. Verified end-to-end (write/read-back) and
+      cross-checked against `_vio_status()` in the same tick.
+
+### Step 9.4 — The classification flight
+
+- [ ] **9.4a** Fly the standard profile to the cut, then hold **180 s**. Change
+      no parameter. Save the ulog before shutting Isaac down.
+- [ ] **9.4b** Classify the mode from the CSV: an orbit or spiral indicts
+      heading; a straight-line back-and-forth indicts lag or loop gain.
+- [ ] **9.4c** From the ulog, plot applied EV delay (`estimator_aid_src_ev_pos`
+      fusion timestamp vs sample timestamp) against `sim_rate`. If it tracks the
+      rate, `EKF2_EV_DELAY` is a sim artifact and the answer is to stabilise the
+      rate, not to tune the param (ADR-0006).
+- [ ] **9.4d** Plot recorded magnetometer heading against the Mahony yaw and
+      against GT yaw. This is what says whether the compass would have held it.
+- [ ] **9.4e** Offline replay sweep (`src/modules/replay`) over `EKF2_EV_DELAY`,
+      `EKF2_EVP_NOISE` and `EKF2_EV_CTRL` with and without bit 3. **Open-loop**:
+      it ranks candidates and kills bad ones; it cannot tell you the aircraft
+      would have stopped oscillating.
+- [ ] **9.4f** Record in `SESSION.md`, in the same run-by-run style.
+
+Only then does 8.6 get attempted again, with whatever single change 9.4 justified.
 
 ---
 

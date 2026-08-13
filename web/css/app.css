@@ -78,6 +78,11 @@ button:active:not(:disabled) { transform:translateY(1px); filter:brightness(1.5)
 #gpsd button { padding:9px 14px; border-radius:8px; border:1px solid #444;
                background:#222; color:#eee; font-size:14px; }
 #gpsd button:disabled { opacity:.35; }
+/* The abort, in amber rather than the row's grey. It appears only mid-incident
+   and the eye has to find it without reading. Not red: red on this page means
+   the recorder is live, and a second red would dilute both. Higher specificity
+   than `#gpsd button` on purpose -- an id alone would lose to it. */
+#gpsd #c-gps_restore { background:#5a3d00; border-color:#fc6; color:#fd9; }
 /* No colour of its own: paintGpsDenied sets good/wait/bad here, and a colour
    in this rule would win over none of them but confuse the next reader. */
 #gpsd-stat { font-size:13px; font-variant-numeric:tabular-nums; }

@@ -76,6 +76,10 @@
        so it gets its own control rather than a place in the command row. -->
   <div id="gpsd" hidden>
     <button id="c-gps_denied">GO GPS-DENIED</button>
+    <!-- The abort. Shown only once GNSS is actually cut, because that is the
+         only time it does anything, and it must be reachable without a shell
+         on the box while the aircraft is drifting away. -->
+    <button id="c-gps_restore" hidden>RESTORE GNSS</button>
     <span id="gpsd-stat">GNSS on — climb until VIO is healthy</span>
   </div>
   <div id="rec">

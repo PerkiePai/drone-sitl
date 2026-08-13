@@ -294,6 +294,36 @@ def test_the_vio_row_is_hidden_until_the_server_offers_vision():
         assert f'id="{field}"' in html
 
 
+def test_the_restore_button_exists_and_is_wired():
+    """The way back from the cut. Without it, recovery from a diverging
+    vision-only flight is `px4-param set EKF2_GPS_CTRL 7` in a shell on the
+    box -- which is where it was on 2026-08-13, with the aircraft 180 m off
+    and making 3.8 m/s."""
+    html = _read("web", "index.html")
+    assert 'id="c-gps_restore"' in html
+    row = html.split('id="c-gps_restore"')[1].split(">")[0]
+    assert "hidden" in row, "it must not show before the cut is taken"
+
+    main = _read("web", "js", "main.js")
+    assert "gps_restore" in main, "the button is not bound to a command"
+
+    js = _read("web", "js", "telemetry.js")
+    assert "gps_restore: t => !t.gps_denied" in js, (
+        "no confirmation rule: the page could not tell the operator whether "
+        "PX4 acted")
+
+
+def test_the_restore_button_is_never_disabled():
+    """The moment it is wanted is the moment the aircraft is heading somewhere
+    it should not be. Only its visibility is conditional -- `hidden` toggles,
+    `disabled` never does."""
+    js = _read("web", "js", "telemetry.js")
+    seg = js.split("paintGpsDenied")[1]
+    assert "restore.hidden = false" in seg and "restore.hidden = true" in seg
+    assert "restore.disabled" not in seg, (
+        "a recovery control that can be greyed out is not a recovery control")
+
+
 def test_every_button_row_sets_its_own_colours():
     """The page is dark-themed by `body`, but buttons do NOT inherit that --
     an unstyled row falls back to the UA default and renders near-white on

@@ -562,6 +562,39 @@ recovery path on a heartbeat gap, and re-gating it there would refuse to
 re-assert the vision params on an aircraft that is airborne by then — exactly
 when losing them matters most.
 
+## The cut is no longer one-way
+
+`RESTORE GNSS` on the flight page, 2026-08-13. It applies
+`EKF2_GPS_CTRL=7` and clears `_gps_denied`, landing back in **phase 1b** —
+GNSS on with vision still fused — which is the state the cut was taken from and
+the one that lets you watch the estimate recover and cut again.
+
+The button is worth the code because of how the day actually went: every
+GPS-denied flight diverged, and the recovery action was
+`px4-param set EKF2_GPS_CTRL 7` typed into a shell on the box, while the
+aircraft accelerated away. Measured on one of them: 180 m off, 3.8 m/s.
+
+**Deliberately ungated, unlike the cut.** Every refusal in `_go_gps_denied` is
+there because cutting GNSS onto a bad source can put the aircraft in the
+ground. Restoring it has no such failure mode, so it takes no preconditions and
+can never refuse — a recovery control that can say no is not one. It is also
+never `disabled` on the page, only hidden until the cut is taken.
+
+Clearing `_gps_denied` matters as much as the param: without it,
+`_send_startup_params` re-asserts the cut on the next heartbeat gap and the
+restore silently undoes itself.
+
+Verified end to end through the page: arm → takeoff → offboard → fuse → cut →
+`GNSS RESTORED` in 0.2 s, ending at `EKF2_GPS_CTRL=7`, `cs_gps: True`,
+`cs_ev_pos: True`, still in OFFBOARD.
+
+**Watch out when the estimator restarts mid-flight:** `drift_m` compares the
+estimator's position against a GT anchor set at the ORIGINAL spawn, so a fresh
+estimator on a drone that has moved reports the whole displacement as drift
+(211 m in this test). The frame alignment handles it correctly — it closed
+211.2 m at the cut, which is exactly its job — but the drift number is
+meaningless until the run is restarted from the pad.
+
 ## If this resurfaces
 
 `alt_m` sinking steadily with `AUTO.LAND` latched and `offboard`/`disarm` both

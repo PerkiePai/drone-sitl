@@ -330,13 +330,16 @@ class SetpointLoop(threading.Thread):
     def submit(self, name):
         """Called from the web thread. Queue only -- never touches `conn`."""
         if (name in ("arm", "disarm", "takeoff", "land", "offboard")
-                or name == "gps_denied"
+                or name in ("gps_denied", "gps_restore")
                 or name in self.MISSION_COMMANDS):
             self.commands.put(name)
 
     def _run_command(self, name):
         if name == "gps_denied":
             self._go_gps_denied()
+            return
+        if name == "gps_restore":
+            self._restore_gnss()
             return
         method = self.MISSION_COMMANDS.get(name)
         if method is not None:
@@ -538,6 +541,44 @@ class SetpointLoop(threading.Thread):
                   f"FLYING, phase 0 will not run at all -- land, or restart "
                   f"with --no-vision.")
         return True
+
+    def _restore_gnss(self):
+        """Undo the cut: GNSS back on, vision still fused. Setpoint thread only.
+
+        The abort, and the only way back from `gps_denied` -- until 2026-08-13
+        the cut was one-way and recovery meant `px4-param set EKF2_GPS_CTRL 7`
+        in a shell on the box. That was tolerable while GPS-denied flight was
+        the thing being proven and someone was always sitting at the terminal.
+        It stopped being tolerable once the estimator was diverging on every
+        flight: the recovery action was a shell command, on a machine the
+        operator might not be at, while the aircraft accelerated away. Flown
+        2026-08-13, 180 m off and making 3.8 m/s, and the fix was a command
+        line.
+
+        Takes NO preconditions and can never refuse. Every refusal in
+        `_go_gps_denied` is there because cutting GNSS onto a bad source can
+        put the aircraft in the ground; restoring it has no such failure mode.
+        A recovery control that can say no is not a recovery control.
+
+        Clearing `_gps_denied` also stops `_send_startup_params` from
+        re-asserting the cut on the next heartbeat gap -- without that, the
+        restore would silently undo itself.
+        """
+        if self.vision is None:
+            print("*** gps_restore: server was not started with --vision, so "
+                  "GNSS was never cut. ***")
+            return
+        vision_bridge.apply_ekf2_gnss_restore_params(self.link)
+        was_denied = self._gps_denied
+        self._gps_denied = False
+        with self._telem_lock:
+            self._telem["gps_denied"] = False
+        print(f">>> GNSS RESTORED: EKF2_GPS_CTRL="
+              f"{vision_bridge.EKF2_GPS_CTRL_DEFAULT}, vision still fusing "
+              f"alongside it"
+              + ("." if was_denied else " (it had not been cut).")
+              + " `gps_denied` is available again once you are happy with the "
+                "estimate.")
 
     def _send_startup_params(self):
         # Phase 0 is a reboot, so nothing goes out at all until the airframe is

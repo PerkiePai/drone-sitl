@@ -115,6 +115,28 @@ is the only irreversible-feeling step in the sequence and the one worth being
 able to point at, so it is not buried in a block of six.
 """
 
+EKF2_GNSS_RESTORE_PARAMS = (
+    ("EKF2_GPS_CTRL", EKF2_GPS_CTRL_DEFAULT, MAV_PARAM_TYPE_INT32),
+)
+"""Phase 2, undone. The abort, and the exact inverse of EKF2_GPS_DENIED_PARAMS.
+
+Returns to PHASE 1B -- GNSS on with vision still fused -- rather than to
+phase 1, because that is the state the cut was taken from and the one it should
+fall back to. Vision keeps streaming and stays observable, so the operator can
+watch it recover and cut again once it looks good, which is the whole recovery
+workflow. `apply_ekf2_gps_flight_params` is the other direction, for a startup
+that must assert ordinary GPS flight from an unknown prior state.
+
+**Deliberately ungated, unlike the cut.** Every refusal in `_go_gps_denied`
+exists because cutting GNSS onto a bad vision source can put the aircraft in
+the ground. Restoring GNSS has no such failure mode: the worst case is that a
+healthy source is added to a flight that was managing without it. A recovery
+control that can refuse is not a recovery control.
+
+Nothing here re-enables anything vision-side, so it is safe to send at any
+time, including when GNSS was never cut.
+"""
+
 EKF2_VISION_PARAMS = EKF2_BOOT_PARAMS + EKF2_FUSION_PARAMS + EKF2_GPS_DENIED_PARAMS
 """Every param the vision profile touches. The phases above are how they are
 APPLIED; this is what the whole profile amounts to."""
@@ -350,6 +372,15 @@ def apply_ekf2_gps_denied_params(link):
     aircraft in the ground if the vision source is not already known good.
     """
     _apply(link, EKF2_GPS_DENIED_PARAMS)
+
+
+def apply_ekf2_gnss_restore_params(link):
+    """Undo phase 2: turn GNSS fusion back on. Setpoint thread only.
+
+    The abort. Takes no preconditions and cannot refuse -- see
+    EKF2_GNSS_RESTORE_PARAMS for why that asymmetry with the cut is deliberate.
+    """
+    _apply(link, EKF2_GNSS_RESTORE_PARAMS)
 
 
 def reboot_for_boot_params(link):

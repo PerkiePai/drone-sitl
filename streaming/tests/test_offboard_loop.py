@@ -1163,3 +1163,110 @@ def test_the_settle_gate_is_not_reapplied_after_the_reboot():
 
     assert "EKF2_GPS_CTRL" in sent, sent
     assert loop._params_sent
+
+
+# --- restoring GNSS --------------------------------------------------------
+
+def _denied_loop(js, port_offset):
+    """A loop that has actually taken the cut, via the real command path."""
+    _, loop, _ = _vision_loop(js, port_offset, _pose(),
+                              received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+    loop._run_command("gps_denied")
+    assert loop.telemetry()["gps_denied"] is True, "setup failed: never cut"
+    return loop
+
+
+def test_restoring_gnss_turns_fusion_back_on():
+    """Until 2026-08-13 the cut was one-way and recovery meant a shell command
+    on the box. Flown that day: 180 m off and making 3.8 m/s, fixed by
+    `px4-param set EKF2_GPS_CTRL 7` at a terminal."""
+    js = _load_server()
+    loop = _denied_loop(js, 51)
+    sent = {}
+    loop.link.set_param = lambda name, value, ptype: sent.__setitem__(name, value)
+
+    loop._run_command("gps_restore")
+
+    assert sent["EKF2_GPS_CTRL"] == vision_bridge.EKF2_GPS_CTRL_DEFAULT
+    assert sent["EKF2_GPS_CTRL"] != 0
+    assert loop.telemetry()["gps_denied"] is False
+
+
+def test_restoring_gnss_leaves_vision_fusing():
+    """The inverse of the cut, so it lands back in PHASE 1B -- GNSS on with
+    vision still fused and observable. That is the state the cut was taken
+    from, and it is what lets the operator watch the estimate recover and cut
+    again rather than having to restart the flight."""
+    js = _load_server()
+    loop = _denied_loop(js, 52)
+    sent = {}
+    loop.link.set_param = lambda name, value, ptype: sent.__setitem__(name, value)
+
+    loop._run_command("gps_restore")
+
+    assert loop._vision_fusing, "vision must keep fusing after the restore"
+    assert loop.telemetry()["vision_fusing"] is True
+    assert sent.get("EKF2_EV_CTRL") != 0, "the restore must not unfuse vision"
+
+
+def test_restoring_gnss_is_never_refused():
+    """Every refusal on the cut exists because cutting onto a bad source can
+    put the aircraft in the ground. Restoring has no such failure mode, and a
+    recovery control that can say no is not a recovery control. Here the
+    estimator is dead -- which REFUSES the cut -- and the restore must still
+    go through."""
+    js = _load_server()
+    loop = _denied_loop(js, 53)
+    loop.vision.pose = None                  # estimator has died
+    loop.vision.received_at = None
+    loop.vision._last_msg = {"n_inliers": 0, "drift_m": None, "fps": 0.0}
+    sent = {}
+    loop.link.set_param = lambda name, value, ptype: sent.__setitem__(name, value)
+
+    loop._run_command("gps_restore")
+
+    assert sent["EKF2_GPS_CTRL"] == vision_bridge.EKF2_GPS_CTRL_DEFAULT
+    assert loop.telemetry()["gps_denied"] is False
+
+
+def test_a_heartbeat_gap_does_not_re_cut_gnss_after_a_restore():
+    """_send_startup_params re-asserts whatever phase we are in on any
+    heartbeat gap. If the restore did not clear _gps_denied it would silently
+    undo itself the moment PX4 hiccuped -- the operator would press the button,
+    watch it work, and then watch GNSS vanish again."""
+    js = _load_server()
+    loop = _denied_loop(js, 54)
+    loop._vision_rebooted = True
+    loop._run_command("gps_restore")
+
+    sent = {}
+    loop.link.set_param = lambda name, value, ptype: sent.__setitem__(name, value)
+    loop._send_startup_params()              # as a heartbeat gap would
+
+    assert sent.get("EKF2_GPS_CTRL", vision_bridge.EKF2_GPS_CTRL_DEFAULT) != 0, (
+        "the gap re-cut GNSS after a restore")
+    assert loop.telemetry()["gps_denied"] is False
+
+
+def test_restore_is_accepted_from_the_page():
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 55, _pose(), received_at=time.monotonic())
+    loop.submit("gps_restore")
+    assert loop.commands.get_nowait() == "gps_restore"
+
+
+def test_restore_without_vision_does_not_touch_ekf2():
+    """No --vision means GNSS was never cut, so there is nothing to undo and
+    nothing that should be written to EKF2."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 56}")
+    loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0), rate_hz=20.0)
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+
+    loop._run_command("gps_restore")
+
+    assert sent == [], sent

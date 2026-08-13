@@ -39,6 +39,7 @@ const EXPECT = {
   offboard: t => t.mode === 'OFFBOARD',
   land:     t => t.mode === 'AUTO.LAND',
   gps_denied: t => t.gps_denied,
+  gps_restore: t => !t.gps_denied,
 };
 // Budget for PX4 to act, expressed in SIM seconds -- because PX4 SITL runs in
 // lockstep with Isaac, so sim time is the only clock it experiences.
@@ -118,13 +119,20 @@ function paintGpsDenied(t) {
   row.hidden = false;
 
   const btn = el('c-gps_denied');
+  const restore = el('c-gps_restore');
   const stat = el('gpsd-stat');
   if (t.gps_denied) {
     btn.disabled = true;
+    // The way back. Hidden until the cut is taken, because that is the only
+    // state it changes anything in -- and never disabled, because the moment
+    // it is wanted is the moment the aircraft is heading somewhere it should
+    // not be.
+    restore.hidden = false;
     stat.textContent = 'GNSS OFF — flying on vision';
     stat.className = 'good';
     return;
   }
+  restore.hidden = true;
   // Gated on the server's own precondition, not merely on freshness: on the
   // pad the estimator is fresh and confident with zero features, and EKF2 is
   // not fusing it at all until it can see.

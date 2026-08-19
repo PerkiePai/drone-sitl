@@ -56,6 +56,7 @@ PX4 **v1.14.3** at `~/PX4-Autopilot`.
 | 7 | VIO row on the page | `web/`, `streaming/tests/test_web_ui.py` |
 | 8 | Live bring-up | — |
 | 9 | Diagnostic instrumentation | `sim/save-ulog.sh`, `streaming/vision_bridge.py`, `vio-streamer.py`, `pipeline-streaming.py`, `joystick-server.py` |
+| 10 | `MPC_XY_*` gain sweep | `streaming/vision_bridge.py`, `joystick-server.py`, `sim/mpc_gain_sweep.py`, `sim/analyze_gain_sweep.py` |
 
 Tasks 1–3 are pure unit work, no sim required. Task 4 needs Isaac; Task 5 can be
 driven from a recorded dataset without it.
@@ -1187,6 +1188,924 @@ Ships as one batch, then one flight.
 
 Only then does 8.6 get attempted again, with whatever single change 9.4 justified.
 
+> **Status 2026-08-14, Task 9 closed:** 9.4 justified no single parameter
+> change (SESSION.md, Task 9.4b-e) — heading, the track's shape,
+> `EKF2_EV_DELAY`, and every `EKF2_EV_*` vision-fusion param were each
+> individually ruled out, including a replay sweep that killed all four. What
+> is left is downstream of EKF2, in the position controller's own `MPC_XY_*`
+> gains — Task 10.
+
+---
+
+## Task 10 — `MPC_XY_*` gain sweep for vision-only station-keeping
+
+**Spec:** `docs/superpowers/specs/2026-08-14-mpc-xy-gain-sweep-design.md`
+(decisions D1–D5 below refer to that document, not the D1–D7 in "Plan
+validation", which are the original 2026-08-07 design's).
+
+**Consumes:** the existing `/ws` command protocol (`{"type": "cmd", "name":
+...}`, `joystick-server.py:1220`) and telemetry push (`joystick-server.py:1168`).
+**Produces:** one new command, `set_param`; a `sim_s` telemetry field; a
+campaign driver and an offline ranking script.
+
+9.4e's own limitation is what points here: replay is open-loop, so it could
+only rule EKF2 tuning out, not confirm what *would* fix the excursion. The
+position controller flies today on PX4's stock, GPS-tuned `MPC_XY_*`
+defaults, never adapted for a noisier vision source — the only untested lever
+left, and the only one a live flight can screen quickly (design doc, "Why
+this exists").
+
+> **Status 2026-08-19:** not started.
+
+### Step 10.1 — `MPC_XY_DEFAULTS` and `revert_mpc_gains`
+
+Pure data plus one function, offline-testable exactly like
+`EKF2_GNSS_RESTORE_PARAMS` / `apply_ekf2_gnss_restore_params` already are.
+
+- [ ] **10.1a Failing test.** Append to
+      `streaming/tests/test_vision_bridge.py`, after the `# --- EKF2 params
+      ---` section (before `# --- SET_GPS_GLOBAL_ORIGIN ---`):
+
+```python
+# --- MPC_XY_* gains (Task 10) -----------------------------------------------
+
+def test_mpc_defaults_match_px4s_own_stock_values():
+    """mc_pos_control_params.c:270,282,295,307 -- PX4's own shipped values,
+    and D2's `baseline` candidate row."""
+    defaults = dict((n, v) for n, v, _ in vision_bridge.MPC_XY_DEFAULTS)
+    assert defaults == {
+        "MPC_XY_P": 0.95,
+        "MPC_XY_VEL_P_ACC": 1.8,
+        "MPC_XY_VEL_I_ACC": 0.4,
+        "MPC_XY_VEL_D_ACC": 0.2,
+    }
+
+
+def test_revert_mpc_gains_sends_exactly_the_four_defaults(conn):
+    link = offboard.OffboardLink(conn)
+    vision_bridge.revert_mpc_gains(link)
+    sent = {c[0][2].decode(): (c[0][3], c[0][4])
+            for c in conn.mav.param_set_send.call_args_list}
+    assert len(sent) == len(vision_bridge.MPC_XY_DEFAULTS)
+    for name, value, ptype in vision_bridge.MPC_XY_DEFAULTS:
+        assert sent[name] == (pytest.approx(float(value)), ptype)
+```
+
+```bash
+conda run -n drone pytest streaming/tests/test_vision_bridge.py -q
+```
+Expect: `AttributeError: module 'vision_bridge' has no attribute 'MPC_XY_DEFAULTS'`.
+
+- [ ] **10.1b Implement.** In `streaming/vision_bridge.py`, insert after
+      `HGT_REF_NEEDS_REBOOT`'s docstring (line 165), before `DEFAULT_MAX_AGE_S`:
+
+```python
+MPC_XY_DEFAULTS = (
+    ("MPC_XY_P", 0.95, MAV_PARAM_TYPE_REAL32),
+    ("MPC_XY_VEL_P_ACC", 1.8, MAV_PARAM_TYPE_REAL32),
+    ("MPC_XY_VEL_I_ACC", 0.4, MAV_PARAM_TYPE_REAL32),
+    ("MPC_XY_VEL_D_ACC", 0.2, MAV_PARAM_TYPE_REAL32),
+)
+"""PX4's own stock position-controller gains (mc_pos_control_params.c:270,
+282,295,307) -- none @reboot_required, unlike EKF2_HGT_REF, confirmed by their
+absence from that file's docblocks. This is Task 10's `baseline` candidate
+(docs/superpowers/specs/2026-08-14-mpc-xy-gain-sweep-design.md, D2) and also
+what `revert_mpc_gains` restores to.
+"""
+```
+
+      And after `apply_ekf2_gnss_restore_params` (line 398), before
+      `reboot_for_boot_params`:
+
+```python
+def revert_mpc_gains(link):
+    """D4: RESTORE GNSS reverts MPC_XY_* too, symmetric with EKF2_GPS_CTRL.
+
+    Whatever gain set was active during a GPS-denied hold must not carry into
+    a route or manual flight afterward. Called from `_go_gps_restore`
+    alongside `apply_ekf2_gnss_restore_params` -- like that revert, this one
+    can never make things worse, so it takes no gate and no precondition.
+    """
+    _apply(link, MPC_XY_DEFAULTS)
+```
+
+- [ ] **10.1c Run tests, verify pass.**
+
+```bash
+conda run -n drone pytest streaming/tests/test_vision_bridge.py -q
+```
+Expect: PASS.
+
+- [ ] **10.1d Commit.**
+
+```bash
+git add streaming/vision_bridge.py streaming/tests/test_vision_bridge.py
+git commit -m "feat(vio): add MPC_XY_DEFAULTS and revert_mpc_gains"
+```
+
+### Step 10.2 — `sim_s` telemetry, and the `set_param` command
+
+The gain sweep is timed entirely in sim-seconds (70 s screen, 180 s confirm,
+20 s settle) — this project has already hit the wall-vs-sim-clock bug three
+times (`PX4_RESTART_GAP_S`, the VPE timestamp theory, the staleness budget;
+SESSION.md, "the bug class to expect here"). `run.csv` has always had `sim_s`;
+the pushed telemetry never has, so a websocket client has no sim clock to time
+against. Fixing that here is what lets Step 10.4's driver avoid becoming bug
+number four.
+
+- [ ] **10.2a Failing test.** Append to `streaming/tests/test_offboard_loop.py`
+      (end of file, after `test_restore_without_vision_does_not_touch_ekf2`):
+
+```python
+# --- sim_s telemetry and set_param (Task 10) --------------------------------
+
+def test_local_position_ned_updates_alt_and_sim_s_telemetry():
+    """sim_s is PX4's own clock, which under lockstep IS sim time -- Task 10's
+    gain-sweep driver waits on it rather than wall time (SESSION.md's
+    wall-vs-sim-clock lesson, already hit three times in this project)."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 100}")
+    loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0), rate_hz=20.0)
+    msgs = iter([_local_pos(time_boot_ms=42_000, z=-24.9)])
+    loop.conn.recv_match = lambda **kw: next(msgs, None)
+
+    loop._drain_mavlink()
+
+    assert loop.telemetry()["alt_m"] == pytest.approx(24.9)
+    assert loop.telemetry()["sim_s"] == pytest.approx(42.0)
+
+
+def test_set_param_is_accepted_from_the_page():
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 101, _pose(), received_at=time.monotonic())
+    loop.submit_set_param("MPC_XY_P", 0.5, offboard.MAV_PARAM_TYPE_REAL32)
+    assert loop.commands.get_nowait() == (
+        "set_param", "MPC_XY_P", 0.5, offboard.MAV_PARAM_TYPE_REAL32)
+
+
+def test_run_command_applies_a_set_param_tuple():
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 102, _pose(), received_at=time.monotonic())
+    sent = {}
+    loop.link.set_param = (
+        lambda name, value, ptype: sent.__setitem__(name, (value, ptype)))
+
+    loop._run_command(("set_param", "MPC_XY_P", 0.5,
+                       offboard.MAV_PARAM_TYPE_REAL32))
+
+    assert sent["MPC_XY_P"] == (0.5, offboard.MAV_PARAM_TYPE_REAL32)
+```
+
+```bash
+conda run -n drone pytest streaming/tests/test_offboard_loop.py -q
+```
+Expect: the first test fails on `sim_s` (KeyError or `!= pytest.approx(42.0)`,
+since the key does not exist yet); the second fails with `AttributeError:
+'SetpointLoop' object has no attribute 'submit_set_param'`; the third fails
+because `_run_command` does not accept a tuple (`AttributeError` on
+`getattr(self.link, name)` where `name` is a tuple, or similar).
+
+- [ ] **10.2b Implement `sim_s` telemetry.** In `joystick-server.py`, add to
+      the `_telem` init dict (near `"streaming_s": 0.0,`):
+
+```python
+            # PX4's own clock (time_boot_ms / 1000), which under lockstep IS
+            # sim time. None until the first LOCAL_POSITION_NED. A websocket
+            # client (Task 10's gain-sweep driver) times its holds against
+            # this, never against wall time -- see that file's _wait_for.
+            "sim_s": None,
+```
+
+      And in `_drain_mavlink`'s `LOCAL_POSITION_NED` branch, right after
+      `self._px4_sim_s = msg.time_boot_ms / 1000.0` (line 885):
+
+```python
+                self._px4_sim_s = msg.time_boot_ms / 1000.0
+                with self._telem_lock:
+                    self._telem["sim_s"] = self._px4_sim_s
+```
+
+- [ ] **10.2c Implement `set_param` dispatch.** In `joystick-server.py`,
+      add a new method next to `submit` (line 376):
+
+```python
+    def submit_set_param(self, name, value, param_type):
+        """Called from the web thread. Queue only -- never touches `conn`.
+
+        A separate method rather than routing through `submit(name)`: that
+        one is a bare-string allowlist gate and every existing caller (the
+        page, the mission verbs) relies on it staying that shape. set_param
+        carries a payload, so it gets its own front door and its own tuple
+        shape on the queue instead of overloading `submit`'s contract.
+        """
+        self.commands.put(("set_param", name, value, param_type))
+```
+
+      Change `_run_command` (line 383) to handle both shapes:
+
+```python
+    def _run_command(self, item):
+        if isinstance(item, tuple):
+            _, name, value, param_type = item
+            self.link.set_param(name, value, param_type)
+            print(f">>> set_param: {name}={value}")
+            return
+        name = item
+        if name == "gps_denied":
+            self._go_gps_denied()
+            return
+        if name == "gps_restore":
+            self._restore_gnss()
+            return
+        method = self.MISSION_COMMANDS.get(name)
+        if method is not None:
+            getattr(self.mission, method)()
+        else:
+            getattr(self.link, name)()
+        print(f">>> command: {name}")
+```
+
+      And route it from the websocket handler (`elif kind == "cmd":`,
+      line 1220):
+
+```python
+                elif kind == "cmd":
+                    if msg["name"] == "set_param":
+                        loop_thread.submit_set_param(
+                            msg["param"], msg["value"], msg["param_type"])
+                    else:
+                        loop_thread.submit(msg["name"])
+```
+
+- [ ] **10.2d Run tests, verify pass.**
+
+```bash
+conda run -n drone pytest streaming/tests/test_offboard_loop.py -q
+```
+Expect: PASS.
+
+- [ ] **10.2e Websocket round-trip.** Extend
+      `streaming/tests/test_web_ui.py`'s
+      `test_websocket_accepts_control_messages_and_pushes_telemetry` — add
+      after the existing `await ws.send(json.dumps({"type": "cmd", "name":
+      "arm"}))` line:
+
+```python
+            await ws.send(json.dumps({
+                "type": "cmd", "name": "set_param", "param": "MPC_XY_P",
+                "value": 0.5, "param_type": 9}))   # MAV_PARAM_TYPE_REAL32
+```
+
+      No PX4 is attached in this test, so the assertion stays what it already
+      is (`later["streaming_s"] > 0`) — this only confirms the message parses
+      and does not crash the loop, which is what the original bug this file
+      exists for (silent WebSocket-upgrade failure) would have hidden.
+
+```bash
+conda run -n drone pytest streaming/tests/test_web_ui.py -q
+```
+Expect: PASS.
+
+- [ ] **10.2f Commit.**
+
+```bash
+git add joystick-server.py streaming/tests/test_offboard_loop.py \
+       streaming/tests/test_web_ui.py
+git commit -m "feat(vio): add sim_s telemetry and the set_param command"
+```
+
+### Step 10.3 — D4: `RESTORE GNSS` reverts `MPC_XY_*` too
+
+- [ ] **10.3a Failing test.** Append to `streaming/tests/test_offboard_loop.py`,
+      in the `# --- restoring GNSS ---` section, after
+      `test_restoring_gnss_leaves_vision_fusing`:
+
+```python
+def test_restoring_gnss_reverts_mpc_gains_to_defaults():
+    """D4: whatever gain set was active during a GPS-denied hold must not
+    silently carry into a route or manual flight afterward -- symmetric with
+    the EKF2_GPS_CTRL revert this same command already performs."""
+    js = _load_server()
+    loop = _denied_loop(js, 59)
+    sent = {}
+    loop.link.set_param = lambda name, value, ptype: sent.__setitem__(name, value)
+
+    loop._run_command("gps_restore")
+
+    for name, value, _ in vision_bridge.MPC_XY_DEFAULTS:
+        assert sent[name] == value
+```
+
+```bash
+conda run -n drone pytest streaming/tests/test_offboard_loop.py -q
+```
+Expect: FAIL — `KeyError: 'MPC_XY_P'` (not sent yet).
+
+- [ ] **10.3b Implement.** In `joystick-server.py`'s `_restore_gnss` (line
+      601), add the call right after the existing EKF2 revert:
+
+```python
+        vision_bridge.apply_ekf2_gnss_restore_params(self.link)
+        vision_bridge.revert_mpc_gains(self.link)
+```
+
+- [ ] **10.3c Run tests, verify pass.**
+
+```bash
+conda run -n drone pytest streaming/tests/test_offboard_loop.py -q
+```
+Expect: PASS.
+
+- [ ] **10.3d Commit.**
+
+```bash
+git add joystick-server.py streaming/tests/test_offboard_loop.py
+git commit -m "feat(vio): RESTORE GNSS reverts MPC_XY_* too (D4)"
+```
+
+### Step 10.4 — `sim/mpc_gain_sweep.py`, the campaign driver
+
+Like Tasks 4, 5 and 7 (see "Plan validation"), the websocket-client parts of
+this file are Isaac/PX4-live-only and are not TDD'd against a mock — they are
+exercised live in Steps 10.6–10.7. `should_abort` (D5) is pure and gets a real
+failing-test/implement pair; everything else is Implement-only, structured so
+10.6/10.7 are "run this command" rather than "write this code live".
+
+- [ ] **10.4a Failing test.** Create `sim/tests/test_mpc_gain_sweep.py`:
+
+```python
+"""D5's screening-abort check. No PX4, no Isaac Sim, no socket."""
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "sim"))
+import mpc_gain_sweep as sweep  # noqa: E402
+
+
+def test_should_abort_is_false_with_no_data_yet():
+    assert not sweep.should_abort(None, None, None)
+
+
+def test_should_abort_on_excursion_past_the_worst_peak_seen():
+    assert sweep.should_abort(401.0, alt_m=20.0, alt_at_cut_m=20.0)
+    assert not sweep.should_abort(399.0, alt_m=20.0, alt_at_cut_m=20.0)
+
+
+def test_should_abort_on_a_genuine_descent():
+    assert sweep.should_abort(0.0, alt_m=-1.0, alt_at_cut_m=20.0)
+    assert not sweep.should_abort(0.0, alt_m=5.0, alt_at_cut_m=20.0)
+
+
+def test_should_abort_ignores_a_near_ground_z_reading_without_a_cut_baseline():
+    """SESSION.md, run 6: a very negative alt_m near ground_z is not
+    necessarily a strike -- without alt_at_cut_m there is nothing to compare
+    it against, so it must not trip the abort."""
+    assert not sweep.should_abort(0.0, alt_m=-24.89, alt_at_cut_m=None)
+```
+
+```bash
+conda run -n drone pytest sim/tests/test_mpc_gain_sweep.py -q
+```
+Expect: `ModuleNotFoundError: No module named 'mpc_gain_sweep'`.
+
+- [ ] **10.4b Implement `should_abort` and the module scaffold.** Create
+      `sim/mpc_gain_sweep.py`:
+
+```python
+#!/usr/bin/env python3
+"""Drives a multi-candidate MPC_XY_* gain campaign over joystick-server.py's
+existing /ws protocol -- arm/takeoff/gps_denied/gps_restore/land/disarm plus
+one new command, set_param. One continuous session: Isaac Sim, PX4 and
+joystick-server.py all stay up for the whole campaign; no PX4 reboot between
+candidates, since none of the four gains are @reboot_required. See
+docs/superpowers/specs/2026-08-14-mpc-xy-gain-sweep-design.md.
+
+Run from the `drone` conda env against an ALREADY-RUNNING server (this script
+does not start Isaac or joystick-server.py itself, matching how
+sim/save-ulog.sh doesn't either):
+
+    conda run -n drone python sim/mpc_gain_sweep.py \
+        --candidates screen --campaign-name 20260815-screen
+    conda run -n drone python sim/mpc_gain_sweep.py \
+        --candidates confirm:more_damping --campaign-name 20260815-confirm
+"""
+import argparse
+import asyncio
+import json
+import os
+import sys
+import time
+
+import websockets
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "streaming"))
+from offboard import MAV_PARAM_TYPE_REAL32  # noqa: E402
+
+GAIN_PARAMS = ("MPC_XY_P", "MPC_XY_VEL_P_ACC", "MPC_XY_VEL_I_ACC",
+              "MPC_XY_VEL_D_ACC")
+
+# D2's candidate set. All four gains are floats (mc_pos_control_params.c:270,
+# 282,295,307), so every value here goes on the wire as MAV_PARAM_TYPE_REAL32
+# -- never the INT32 bit-pattern path offboard.set_param also handles.
+CANDIDATES = {
+    "baseline":     (0.95, 1.8, 0.40, 0.2),
+    "more_damping": (0.95, 1.8, 0.40, 0.5),
+    "gentler_p":    (0.50, 1.2, 0.40, 0.2),
+    "low_integral": (0.95, 1.8, 0.05, 0.2),
+    "gentle_combo": (0.50, 1.2, 0.05, 0.5),
+}
+CANDIDATE_ORDER = ("baseline", "more_damping", "gentler_p", "low_integral",
+                   "gentle_combo")
+"""Flight order for a screening campaign. analyze_gain_sweep.py slices
+run.csv's phase-2 segments in this same order -- the sidecar records it
+explicitly rather than making the analyzer guess."""
+
+SCREEN_HOLD_S = 70.0
+CONFIRM_HOLD_S = 180.0
+SETTLE_S = 20.0
+OFFBOARD_TIMEOUT_S = 30.0
+
+ABORT_EXCURSION_M = 400.0
+"""D5: well past the worst peak seen so far, ~268 m (SESSION.md, run 6)."""
+ABORT_ALT_DROP_M = 20.0
+"""D5: a genuine descent, not the flat-ground_z-plane sign-convention trap
+SESSION.md documents for readings near the ground."""
+
+
+def should_abort(excursion_m, alt_m, alt_at_cut_m):
+    """D5's screening abort check, pure so it needs no socket to test.
+
+    `alt_m` is height above the launch point (telemetry's own convention --
+    joystick-server.py computes it as `-msg.z`), not raw NED down, so a
+    reading near ground_z is not mistaken for a strike (SESSION.md's "first
+    read misread this as a crash"). Any missing value means the telemetry
+    has not confirmed a real reading yet, so it never triggers an abort.
+    """
+    if excursion_m is not None and excursion_m > ABORT_EXCURSION_M:
+        return True
+    if (alt_m is not None and alt_at_cut_m is not None
+            and (alt_at_cut_m - alt_m) > ABORT_ALT_DROP_M):
+        return True
+    return False
+```
+
+```bash
+conda run -n drone pytest sim/tests/test_mpc_gain_sweep.py -q
+```
+Expect: PASS.
+
+- [ ] **10.4c Commit the tested piece.**
+
+```bash
+git add sim/mpc_gain_sweep.py sim/tests/test_mpc_gain_sweep.py
+git commit -m "feat(vio): should_abort, the D5 gain-sweep screening check"
+```
+
+- [ ] **10.4d Implement the driver.** Append to `sim/mpc_gain_sweep.py`:
+
+```python
+class Campaign:
+    """Drives every candidate in `plan` (a list of (name, hold_s)) over one
+    open websocket connection. `sidecar` records what actually flew, in
+    order -- analyze_gain_sweep.py trusts that order rather than re-deriving
+    it from timestamps."""
+
+    def __init__(self, ws, campaign_name):
+        self.ws = ws
+        self.sidecar = {"campaign": campaign_name, "candidates": []}
+
+    async def _recv_telem(self):
+        return json.loads(await self.ws.recv())
+
+    async def _cmd(self, name):
+        await self.ws.send(json.dumps({"type": "cmd", "name": name}))
+
+    async def _set_gain(self, param_name, value):
+        await self.ws.send(json.dumps({
+            "type": "cmd", "name": "set_param", "param": param_name,
+            "value": value, "param_type": MAV_PARAM_TYPE_REAL32}))
+
+    async def _wait_for(self, predicate, timeout_s, sim_time=True):
+        """Poll telemetry (pushed at 5 Hz) until predicate(telem) is True or
+        timeout_s elapses. sim_time=True (the default -- everything this
+        driver waits on is a flight-time bar) measures elapsed time on PX4's
+        own clock (telem["sim_s"]) rather than wall time: sim_rate wanders
+        0.17-0.65 in this project (SESSION.md), and a wall-clock wait would
+        hold for the wrong amount of simulated flight time. Returns the last
+        telemetry frame seen either way -- callers check what actually
+        happened rather than trusting the predicate held.
+        """
+        start_wall = time.monotonic()
+        start_sim = None
+        telem = None
+        while True:
+            telem = await self._recv_telem()
+            if sim_time:
+                if telem.get("sim_s") is None:
+                    continue
+                if start_sim is None:
+                    start_sim = telem["sim_s"]
+                elapsed = telem["sim_s"] - start_sim
+            else:
+                elapsed = time.monotonic() - start_wall
+            if predicate(telem):
+                return telem
+            if elapsed >= timeout_s:
+                return telem
+
+    async def fly_candidate(self, name, hold_s):
+        gains = CANDIDATES[name]
+        record = {"name": name, "gains": dict(zip(GAIN_PARAMS, gains)),
+                  "hold_s": hold_s, "status": "flying"}
+        self.sidecar["candidates"].append(record)
+        print(f">>> candidate {name}: {record['gains']}")
+
+        for param_name, value in zip(GAIN_PARAMS, gains):
+            await self._set_gain(param_name, value)
+
+        await self._cmd("arm")
+        await self._cmd("takeoff")
+        telem = await self._wait_for(lambda t: t.get("mode") == "OFFBOARD",
+                                     OFFBOARD_TIMEOUT_S)
+        if telem.get("mode") != "OFFBOARD":
+            record["status"] = "failed_to_offboard"
+            return record
+
+        await self._wait_for(lambda t: t.get("vision_fusing"),
+                             OFFBOARD_TIMEOUT_S)
+        await self._wait_for(lambda t: False, SETTLE_S)   # just settle
+
+        await self._cmd("gps_denied")
+        telem = await self._wait_for(lambda t: t.get("gps_denied"), 5.0,
+                                     sim_time=False)
+        if not telem.get("gps_denied"):
+            await asyncio.sleep(5.0)
+            await self._cmd("gps_denied")
+            telem = await self._wait_for(lambda t: t.get("gps_denied"), 5.0,
+                                         sim_time=False)
+            if not telem.get("gps_denied"):
+                record["status"] = "failed_to_cut"
+                return record
+
+        alt_at_cut = telem.get("alt_m")
+        aborted = False
+
+        def _hold_predicate(t):
+            nonlocal aborted
+            vio = t.get("vio") or {}
+            if should_abort(vio.get("excursion_m"), t.get("alt_m"),
+                            alt_at_cut):
+                aborted = True
+                return True
+            return False
+
+        await self._wait_for(_hold_predicate, hold_s)
+
+        await self._cmd("gps_restore")
+        await self._wait_for(lambda t: not t.get("gps_denied"), 10.0,
+                             sim_time=False)
+        await self._cmd("land")
+        await self._wait_for(lambda t: t.get("mode") == "AUTO.LAND", 10.0,
+                             sim_time=False)
+        await self._cmd("disarm")
+
+        record["status"] = "aborted" if aborted else "flown"
+        print(f">>> candidate {name}: {record['status']}")
+        return record
+
+    def save_sidecar(self, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(self.sidecar, f, indent=2)
+
+
+def _plan_for(candidates_arg):
+    if candidates_arg == "screen":
+        return [(name, SCREEN_HOLD_S) for name in CANDIDATE_ORDER]
+    if candidates_arg.startswith("confirm:"):
+        name = candidates_arg.split(":", 1)[1]
+        if name not in CANDIDATES:
+            raise SystemExit(f"unknown candidate {name!r}; choose from "
+                             f"{sorted(CANDIDATES)}")
+        return [(name, CONFIRM_HOLD_S)]
+    raise SystemExit(f"--candidates must be 'screen' or 'confirm:<name>', "
+                     f"got {candidates_arg!r}")
+
+
+async def run_campaign(uri, candidates_arg, campaign_name):
+    plan = _plan_for(candidates_arg)
+    async with websockets.connect(uri) as ws:
+        campaign = Campaign(ws, campaign_name)
+        for name, hold_s in plan:
+            await campaign.fly_candidate(name, hold_s)
+        sidecar_path = os.path.join(
+            ROOT, "logs", campaign_name, f"campaign_{campaign_name}.json")
+        campaign.save_sidecar(sidecar_path)
+        print(f">>> sidecar written to {sidecar_path}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--uri", default="ws://127.0.0.1:8090/ws")
+    ap.add_argument("--candidates", required=True,
+                    help="'screen' (all 5 at 70 s) or 'confirm:<name>' "
+                         "(one candidate at 180 s)")
+    ap.add_argument("--campaign-name", required=True,
+                    help="names the sidecar JSON; pass the SAME value as "
+                         "joystick-server.py's --run-name at server-start "
+                         "time so run.csv and the sidecar line up")
+    args = ap.parse_args()
+    asyncio.run(run_campaign(args.uri, args.candidates, args.campaign_name))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **10.4e Commit.**
+
+```bash
+git add sim/mpc_gain_sweep.py
+git commit -m "feat(vio): mpc_gain_sweep.py campaign driver"
+```
+
+### Step 10.5 — `sim/analyze_gain_sweep.py`, the ranking script
+
+Pure file-reading and arithmetic, no socket — full TDD, no live-only carve-out.
+
+- [ ] **10.5a Failing test.** Create `sim/tests/test_analyze_gain_sweep.py`:
+
+```python
+"""sim/analyze_gain_sweep.py's segment-slicing and trend-slope math, against
+a synthetic run.csv + sidecar with known phase-2 segments and a known slope.
+No PX4, no Isaac Sim."""
+import json
+import os
+import sys
+
+import pytest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "sim"))
+import analyze_gain_sweep as ags  # noqa: E402
+
+
+def _row(sim_s, phase, excursion_m):
+    return {"sim_s": str(sim_s), "phase": phase,
+            "excursion_m": "" if excursion_m is None else str(excursion_m)}
+
+
+def test_phase2_segments_splits_on_phase_boundaries():
+    rows = ([_row(0, "1", None), _row(1, "1b", None)]
+           + [_row(t, "2", 1.0) for t in range(2, 5)]
+           + [_row(5, "1", None)]
+           + [_row(t, "2", 2.0) for t in range(6, 9)])
+    segments = ags.phase2_segments(rows)
+    assert len(segments) == 2
+    assert len(segments[0]) == 3
+    assert len(segments[1]) == 3
+
+
+def test_peak_excursion_ignores_blank_values():
+    rows = [_row(0, "2", 1.0), _row(1, "2", None), _row(2, "2", 5.5),
+            _row(3, "2", 3.0)]
+    assert ags.peak_excursion(rows) == 5.5
+
+
+def test_trend_slope_is_flat_for_a_settled_hold():
+    rows = [_row(t, "2", 10.0) for t in range(0, 30)]
+    slope = ags.trend_slope(rows, window_s=20.0)
+    assert abs(slope) < ags.SLOPE_TOLERANCE
+    assert ags.classify(slope) == "settling"
+
+
+def test_trend_slope_is_positive_for_a_linear_growth():
+    rows = [_row(t, "2", float(t)) for t in range(0, 30)]   # 1 m/s growth
+    slope = ags.trend_slope(rows, window_s=20.0)
+    assert slope == pytest.approx(1.0, abs=0.01)
+    assert ags.classify(slope) == "growing"
+
+
+def test_rank_candidates_orders_by_peak_excursion(tmp_path):
+    csv_path = tmp_path / "run.csv"
+    with open(csv_path, "w") as f:
+        f.write("sim_s,phase,excursion_m\n")
+        for t in range(0, 10):
+            f.write(f"{t},2,20.0\n")             # candidate A: flat at 20 m
+        for t in range(10, 20):
+            f.write(f"{t},1,\n")                  # gap between candidates
+        for t in range(20, 30):
+            f.write(f"{t},2,5.0\n")              # candidate B: flat at 5 m
+
+    sidecar_path = tmp_path / "campaign.json"
+    sidecar = {"campaign": "test", "candidates": [
+        {"name": "A", "gains": {}, "hold_s": 10, "status": "flown"},
+        {"name": "B", "gains": {}, "hold_s": 10, "status": "flown"},
+    ]}
+    with open(sidecar_path, "w") as f:
+        json.dump(sidecar, f)
+
+    results = ags.rank_candidates(str(csv_path), str(sidecar_path))
+    assert [r["name"] for r in results] == ["B", "A"]   # 5 m ranks before 20 m
+```
+
+```bash
+conda run -n drone pytest sim/tests/test_analyze_gain_sweep.py -q
+```
+Expect: `ModuleNotFoundError: No module named 'analyze_gain_sweep'`.
+
+- [ ] **10.5b Implement.** Create `sim/analyze_gain_sweep.py`:
+
+```python
+#!/usr/bin/env python3
+"""Reads a gain-sweep campaign's run.csv + campaign_<name>.json sidecar and
+prints a ranked table: peak excursion_m and final-20s trend slope per
+candidate, in flight order (D2, D3). See
+docs/superpowers/specs/2026-08-14-mpc-xy-gain-sweep-design.md.
+"""
+import argparse
+import csv
+import json
+
+SLOPE_TOLERANCE = 0.01
+"""m/s. Below this, a fit slope is noise, not a real trend (D3)."""
+
+
+def load_run_csv(path):
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def phase2_segments(rows):
+    """Every contiguous run of phase=="2" rows, in flight order -- the k-th
+    segment belongs to the k-th candidate flown (the campaign sidecar
+    preserves that order)."""
+    segments = []
+    current = []
+    for row in rows:
+        if row["phase"] == "2":
+            current.append(row)
+        elif current:
+            segments.append(current)
+            current = []
+    if current:
+        segments.append(current)
+    return segments
+
+
+def peak_excursion(segment):
+    values = [float(r["excursion_m"]) for r in segment if r["excursion_m"]]
+    return max(values) if values else None
+
+
+def trend_slope(segment, window_s=20.0):
+    """Least-squares slope of excursion_m over the final window_s sim
+    seconds of the hold. Positive beyond SLOPE_TOLERANCE means growing (D3);
+    this returns the number, classify() applies the label."""
+    timed = [(float(r["sim_s"]), float(r["excursion_m"]))
+            for r in segment if r["sim_s"] and r["excursion_m"]]
+    if len(timed) < 2:
+        return None
+    end_t = timed[-1][0]
+    window = [(t, x) for t, x in timed if t >= end_t - window_s]
+    if len(window) < 2:
+        window = timed
+    n = len(window)
+    mean_t = sum(t for t, _ in window) / n
+    mean_x = sum(x for _, x in window) / n
+    num = sum((t - mean_t) * (x - mean_x) for t, x in window)
+    den = sum((t - mean_t) ** 2 for t, _ in window)
+    return num / den if den else 0.0
+
+
+def classify(slope):
+    if slope is None:
+        return "unknown"
+    return "growing" if slope > SLOPE_TOLERANCE else "settling"
+
+
+def rank_candidates(run_csv_path, sidecar_path):
+    rows = load_run_csv(run_csv_path)
+    with open(sidecar_path) as f:
+        sidecar = json.load(f)
+    segments = phase2_segments(rows)
+    flown = [c for c in sidecar["candidates"] if c["status"] == "flown"]
+    results = []
+    for candidate, segment in zip(flown, segments):
+        slope = trend_slope(segment)
+        results.append({
+            "name": candidate["name"],
+            "gains": candidate["gains"],
+            "peak_excursion_m": peak_excursion(segment),
+            "trend_slope_mps": slope,
+            "trend": classify(slope),
+        })
+    results.sort(key=lambda r: (r["peak_excursion_m"] is None,
+                                r["peak_excursion_m"] or 0.0))
+    return results
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("run_csv")
+    ap.add_argument("sidecar_json")
+    args = ap.parse_args()
+    results = rank_candidates(args.run_csv, args.sidecar_json)
+    print(f"{'candidate':<15} {'peak_m':>8} {'slope_m/s':>10} {'trend':>10}")
+    for r in results:
+        print(f"{r['name']:<15} {r['peak_excursion_m']:>8.1f} "
+              f"{r['trend_slope_mps']:>10.3f} {r['trend']:>10}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **10.5c Run tests, verify pass.**
+
+```bash
+conda run -n drone pytest sim/tests/test_analyze_gain_sweep.py -q
+```
+Expect: PASS.
+
+- [ ] **10.5d Full offline suite, verify nothing regressed.**
+
+```bash
+conda run -n drone pytest streaming/tests/ sim/tests/ -q
+```
+Expect: PASS (same 247/249 baseline as Task 9 — the 2 known environmental
+failures only, per SESSION.md).
+
+- [ ] **10.5e Commit.**
+
+```bash
+git add sim/analyze_gain_sweep.py sim/tests/test_analyze_gain_sweep.py
+git commit -m "feat(vio): analyze_gain_sweep.py ranking script"
+```
+
+### Step 10.6 — The screening campaign (manual, live)
+
+- [ ] **10.6a** Bring the stack up:
+
+```bash
+DRONE_SETUP_DOWN_VIB_DAMP=False VIO=1 ./sim/launch-sitl.sh
+python joystick-server.py --takeoff-alt 50 --run-name 20260815-screen
+```
+
+- [ ] **10.6b** Run the screen:
+
+```bash
+conda run -n drone python sim/mpc_gain_sweep.py \
+    --candidates screen --campaign-name 20260815-screen
+```
+
+      Watch for `failed_to_offboard` / `failed_to_cut` / `aborted` in the
+      console — any of those on `baseline` specifically means something is
+      wrong with the harness, not the candidate, since `baseline` is what
+      every prior run already flew successfully.
+
+- [ ] **10.6c** `sim/save-ulog.sh 20260815-screen` before shutting Isaac down
+      (ADR-0003 — the ulog dies with the process otherwise).
+
+- [ ] **10.6d** Rank the results:
+
+```bash
+conda run -n drone python sim/analyze_gain_sweep.py \
+    logs/20260815-screen/run.csv \
+    logs/20260815-screen/campaign_20260815-screen.json
+```
+
+- [ ] **10.6e** Record the ranked table in `SESSION.md`, in the same
+      run-by-run style as Task 9.
+
+### Step 10.7 — The confirmation flight (manual, live)
+
+- [ ] **10.7a** Whichever candidate ranked best on both peak excursion and
+      trend (D3) gets one full 180 s flight, unless `baseline` won — a
+      baseline win means the sweep found nothing, which is Task 10's own
+      valid negative result (design doc, "Goal"), and 8.6 is not retried.
+
+```bash
+python joystick-server.py --takeoff-alt 50 --run-name 20260815-confirm
+conda run -n drone python sim/mpc_gain_sweep.py \
+    --candidates confirm:<winning-candidate> --campaign-name 20260815-confirm
+sim/save-ulog.sh 20260815-confirm
+```
+
+- [ ] **10.7b** Judge the confirmation flight against ADR-0001's actual bar —
+      non-growing excursion envelope over three or more oscillation periods,
+      not the 70 s screening bar. If it passes, **8.6 passes**; check it off
+      in Task 8 and record the winning gain set in `SESSION.md`.
+
+- [ ] **10.7c** Record the outcome — pass or fail — in `SESSION.md` and in
+      Task 8's status blockquote either way. A failing confirmation is a
+      real result too: it means the position-controller gains were not the
+      lever either, and per the design doc's "Why this exists", suspicion
+      moves back upstream to the vision estimator's own closed-loop
+      behavior, out of this plan's scope.
+
 ---
 
 ## Plan validation
@@ -1194,15 +2113,27 @@ Only then does 8.6 get attempted again, with whatever single change 9.4 justifie
 Covers every design decision: D1 (Task 6), D2 (Tasks 4–5), D3 (Steps 4.2–4.3),
 D4 (Steps 5.2, 7), D5 (Task 3), D6 (Task 3 + Step 6.2), D7 (scope throughout).
 
+Task 10 implements the separate 2026-08-14 gain-sweep design's own D1–D5
+(distinct numbering, cross-referenced at Task 10's header): D1 (Step 10.2,
+`set_param` as a websocket command rather than a second MAVLink client), D2
+(Step 10.4's `CANDIDATES`), D3 (Step 10.5's `SLOPE_TOLERANCE` / `classify`),
+D4 (Step 10.3), D5 (Step 10.4's `should_abort`).
+
 Names are consistent across tasks: `MahonyState.from_heading`,
 `zmq_proto.pack/unpack`, `VisionPose`, `VisionPositionSender.send`,
-`apply_ekf2_vision_params`, `send_gps_global_origin`, `enu_to_ned`.
+`apply_ekf2_vision_params`, `send_gps_global_origin`, `enu_to_ned`,
+`MPC_XY_DEFAULTS`, `revert_mpc_gains`, `should_abort`, `phase2_segments`.
 
 **Known gaps, deliberate:** Tasks 4, 5 and 7 give structure and interfaces rather
 than complete code — Task 4 depends on Step 4.1's Kit-interpreter check and Step
 4.3's live safety result, Task 5's tuning depends on Step 5.2's measured
 comparison against batch, and Task 7 depends on the telemetry shape Task 6 lands.
-Tasks 1–3, which are pure and testable offline, carry complete code.
+Tasks 1–3, which are pure and testable offline, carry complete code. Task 10
+follows the same split: `should_abort` (Step 10.4a-c) and
+`analyze_gain_sweep.py` (Step 10.5, fully pure) are TDD'd; `Campaign` and its
+websocket-driven flight sequencing (Step 10.4d) are Isaac/PX4-live-only,
+structure without a mock, exercised in Steps 10.6–10.7 exactly as Task 9's
+9.4 exercised Task 9's instrumentation.
 
 **Riskiest step:** 4.3. If `rep.orchestrator.step()` is unsafe under lockstep on
 this build, VIO frames carry ~1 render period of pose skew and accuracy drops.

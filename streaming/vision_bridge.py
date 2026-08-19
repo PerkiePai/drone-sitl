@@ -164,6 +164,19 @@ does not change. Kept as data so the caller can act rather than silently
 believing a param it can see took effect.
 """
 
+MPC_XY_DEFAULTS = (
+    ("MPC_XY_P", 0.95, MAV_PARAM_TYPE_REAL32),
+    ("MPC_XY_VEL_P_ACC", 1.8, MAV_PARAM_TYPE_REAL32),
+    ("MPC_XY_VEL_I_ACC", 0.4, MAV_PARAM_TYPE_REAL32),
+    ("MPC_XY_VEL_D_ACC", 0.2, MAV_PARAM_TYPE_REAL32),
+)
+"""PX4's own stock position-controller gains (mc_pos_control_params.c:270,
+282,295,307) -- none @reboot_required, unlike EKF2_HGT_REF, confirmed by their
+absence from that file's docblocks. This is Task 10's `baseline` candidate
+(docs/superpowers/specs/2026-08-14-mpc-xy-gain-sweep-design.md, D2) and also
+what `revert_mpc_gains` restores to.
+"""
+
 DEFAULT_MAX_AGE_S = 0.5
 """How long an estimate may go unrefreshed before it is dropped, in SIM SECONDS.
 
@@ -396,6 +409,17 @@ def apply_ekf2_gnss_restore_params(link):
     EKF2_GNSS_RESTORE_PARAMS for why that asymmetry with the cut is deliberate.
     """
     _apply(link, EKF2_GNSS_RESTORE_PARAMS)
+
+
+def revert_mpc_gains(link):
+    """D4: RESTORE GNSS reverts MPC_XY_* too, symmetric with EKF2_GPS_CTRL.
+
+    Whatever gain set was active during a GPS-denied hold must not carry into
+    a route or manual flight afterward. Called from `_go_gps_restore`
+    alongside `apply_ekf2_gnss_restore_params` -- like that revert, this one
+    can never make things worse, so it takes no gate and no precondition.
+    """
+    _apply(link, MPC_XY_DEFAULTS)
 
 
 def reboot_for_boot_params(link):

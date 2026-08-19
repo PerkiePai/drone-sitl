@@ -385,6 +385,30 @@ def test_float_params_are_sent_as_their_value(conn):
     assert conn.mav.param_set_send.call_args[0][3] == pytest.approx(0.5)
 
 
+# --- MPC_XY_* gains (Task 10) -----------------------------------------------
+
+def test_mpc_defaults_match_px4s_own_stock_values():
+    """mc_pos_control_params.c:270,282,295,307 -- PX4's own shipped values,
+    and D2's `baseline` candidate row."""
+    defaults = dict((n, v) for n, v, _ in vision_bridge.MPC_XY_DEFAULTS)
+    assert defaults == {
+        "MPC_XY_P": 0.95,
+        "MPC_XY_VEL_P_ACC": 1.8,
+        "MPC_XY_VEL_I_ACC": 0.4,
+        "MPC_XY_VEL_D_ACC": 0.2,
+    }
+
+
+def test_revert_mpc_gains_sends_exactly_the_four_defaults(conn):
+    link = offboard.OffboardLink(conn)
+    vision_bridge.revert_mpc_gains(link)
+    sent = {c[0][2].decode(): (c[0][3], c[0][4])
+            for c in conn.mav.param_set_send.call_args_list}
+    assert len(sent) == len(vision_bridge.MPC_XY_DEFAULTS)
+    for name, value, ptype in vision_bridge.MPC_XY_DEFAULTS:
+        assert sent[name] == (pytest.approx(float(value)), ptype)
+
+
 # --- SET_GPS_GLOBAL_ORIGIN -------------------------------------------------
 
 def test_origin_uses_degE7_and_millimetres(conn):

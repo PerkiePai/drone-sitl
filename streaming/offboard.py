@@ -24,6 +24,21 @@ MAV_FRAME_BODY_NED = 8
 # its frame switch (mavlink_receiver.cpp:1025), so this works in BODY_NED.
 VEL_YAWRATE_TYPE_MASK = 1479
 
+# Global-frame position setpoints, for autonomous waypoints. PX4 projects
+# lat/lon to local NED itself, using the estimator's own reference
+# (mavlink_receiver.cpp:1063-1093), so nothing on this side owns a map
+# projection and our idea of a position cannot drift from PX4's.
+#
+# Altitude is relative to HOME. PX4 requires home_position.valid_alt and
+# returns SILENTLY without it (mavlink_receiver.cpp:1107-1110), which is why
+# the server gates FLY on having received HOME_POSITION.
+MAV_FRAME_GLOBAL_RELATIVE_ALT_INT = 6
+
+# type_mask: ignore velocity (bits 3-5), acceleration (bits 6-8) and yaw_rate
+# (bit 11). USE position (bits 0-2 clear) and yaw (bit 10 clear), so the nose
+# -- and therefore the camera -- points along the leg being flown.
+POS_YAW_TYPE_MASK = 2552
+
 MAV_CMD_DO_SET_MODE = 176
 MAV_CMD_COMPONENT_ARM_DISARM = 400
 MAV_PARAM_TYPE_INT32 = 6
@@ -203,6 +218,24 @@ class OffboardLink:
             0.0, 0.0, 0.0,                      # afx, afy, afz -- masked off
             0.0,                                # yaw        -- masked off
             yaw_rate)                           # rad/s; 0 holds heading
+
+    def send_position_global(self, lat, lon, rel_alt_m, yaw_deg):
+        """Fly to a lat/lon at an altitude relative to home, nose on yaw_deg.
+
+        Same contract as send_velocity: setpoint-thread only. Altitude is
+        RELATIVE to home, not AMSL -- matching the altitude the UI displays.
+        """
+        self.conn.mav.set_position_target_global_int_send(
+            0,                                  # time_boot_ms (PX4 ignores)
+            self.target_system, self.target_component,
+            MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            POS_YAW_TYPE_MASK,
+            int(lat * 1e7), int(lon * 1e7),     # degrees -> 1e7 fixed point
+            float(rel_alt_m),
+            0.0, 0.0, 0.0,                      # vx, vy, vz    -- masked off
+            0.0, 0.0, 0.0,                      # afx, afy, afz -- masked off
+            math.radians(yaw_deg),
+            0.0)                                # yaw_rate      -- masked off
 
     def _command_long(self, command, *params):
         padded = list(params) + [0.0] * (7 - len(params))

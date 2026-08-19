@@ -1,0 +1,85 @@
+:root { color-scheme: dark; }
+body { margin:0; background:#111; color:#ddd; font:14px system-ui,sans-serif;
+       display:flex; flex-direction:column; align-items:center; gap:10px;
+       padding:10px; touch-action:none; user-select:none;
+       -webkit-user-select:none; }
+#panels { display:flex; gap:10px; flex-wrap:wrap; justify-content:center;
+          width:100%; }
+#video { width:min(92vw,640px); aspect-ratio:16/10; background:#000;
+         border:1px solid #333; object-fit:cover; }
+#mapwrap { width:min(92vw,640px); display:flex; flex-direction:column;
+           gap:6px; }
+#map { width:100%; aspect-ratio:16/10; background:#000;
+       border:1px solid #333; }
+/* Leaflet ships light-themed controls that glare on a dark flight page. */
+.leaflet-container { background:#000; font:12px system-ui,sans-serif; }
+.leaflet-control-attribution { background:rgba(0,0,0,.6); color:#888; }
+.leaflet-control-attribution a { color:#aaa; }
+/* The drone: a triangle rotated to the live heading. A divIcon, not an
+   image marker -- vendored Leaflet has no image sprites to 404 on. */
+.drone-icon { display:flex; align-items:center; justify-content:center; }
+.drone-arrow { width:0; height:0; border-left:9px solid transparent;
+               border-right:9px solid transparent; border-bottom:22px solid #6f6;
+               filter:drop-shadow(0 0 3px #000); transform-origin:50% 65%; }
+.wp-icon { display:flex; align-items:center; justify-content:center;
+           width:22px; height:22px; border-radius:50%; background:#fc6;
+           color:#111; font:bold 12px system-ui,sans-serif;
+           border:2px solid #111; cursor:pointer; }
+.wp-icon.active { background:#6f6; }
+#mapbar { display:flex; gap:6px; align-items:center; flex-wrap:wrap;
+          justify-content:center; }
+#mapbar button { padding:9px 14px; border-radius:8px; border:1px solid #444;
+                 background:#222; color:#eee; font-size:14px; }
+#mapbar button:disabled { opacity:.35; }
+#mapbar input { width:62px; padding:7px; border-radius:6px;
+                border:1px solid #444; background:#222; color:#eee;
+                font-size:14px; }
+#mstat { min-height:1.3em; font-size:13px; text-align:center; color:#9a9a9a;
+         font-variant-numeric:tabular-nums; }
+#telem { display:flex; gap:14px; flex-wrap:wrap; justify-content:center;
+         font-variant-numeric:tabular-nums; }
+#telem b { color:#fff; font-weight:600; }
+.bad { color:#f66; } .good { color:#6f6; } .wait { color:#fc6; }
+#controls { display:flex; gap:22px; align-items:center; }
+#pad { display:grid; grid-template-columns:repeat(3,74px);
+       grid-template-rows:repeat(3,74px); gap:6px; }
+#alt { display:grid; grid-template-rows:repeat(2,74px); gap:6px; width:74px; }
+#controls button { border-radius:10px; border:1px solid #444;
+                   background:#222; color:#eee; display:flex;
+                   flex-direction:column; align-items:center;
+                   justify-content:center; gap:2px; line-height:1; }
+#controls button .g { font-size:24px; }
+#controls button .t { font-size:10px; letter-spacing:.5px; color:#9a9a9a; }
+#controls button.on { background:#2a6; border-color:#6f6; }
+#controls button.on .t { color:#dff; }
+.cap { font-size:11px; color:#888; text-align:center; margin-top:4px; }
+#cmds { display:flex; gap:6px; flex-wrap:wrap; justify-content:center; }
+#cmds button { padding:9px 14px; border-radius:8px; border:1px solid #444;
+               background:#222; color:#eee; font-size:14px; }
+#cmds button:disabled { opacity:.35; }
+/* Instant local feedback that the click landed, independent of the network:
+   it fires even if the WebSocket is dead. */
+button:active:not(:disabled) { transform:translateY(1px); filter:brightness(1.5); }
+/* Only on real pointers -- :hover on a touchscreen sticks after tapping. */
+@media (hover:hover) {
+  button:hover:not(:disabled) { border-color:#888; }
+}
+/* Flashes when the command actually goes out over the WebSocket, so a
+   registered click is distinguishable from a dropped one. */
+#cmds button.sent { background:#2a6; border-color:#6f6; }
+#status { min-height:1.3em; font-size:13px; text-align:center; }
+/* The recorder. A dataset that silently records nothing is the failure this
+   row exists to make impossible to miss, so the live state is a red dot and a
+   climbing image count, not a word. */
+#rec { display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+       justify-content:center; }
+#rec button { padding:9px 14px; border-radius:8px; border:1px solid #444;
+              background:#222; color:#eee; font-size:14px; }
+#rec button:disabled { opacity:.35; }
+#rec button.recording { background:#622; border-color:#f66; color:#fbb; }
+#rec-stat { font-size:13px; color:#9a9a9a; font-variant-numeric:tabular-nums; }
+#rec-dot { width:11px; height:11px; border-radius:50%; background:#333;
+           border:1px solid #444; }
+#rec-dot.live { background:#f33; border-color:#f66; animation:recpulse 1s infinite; }
+#rec-dot.stalled { background:#f33; border-color:#f66; animation:none; }
+@keyframes recpulse { 50% { opacity:.25; } }

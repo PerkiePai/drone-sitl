@@ -63,6 +63,18 @@ def server():
         proc.wait(timeout=10)
 
 
+async def _telem_where(ws, predicate, tries=25):
+    """Telemetry is pushed at 5 Hz and commands are applied asynchronously, so
+    wait for a frame that satisfies the predicate rather than assuming the
+    very next one does."""
+    last = None
+    for _ in range(tries):
+        last = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+        if predicate(last):
+            return last
+    raise AssertionError(f"condition never held; last telemetry: {last}")
+
+
 def test_websocket_accepts_control_messages_and_pushes_telemetry(server):
     """The real thing: upgrade a WebSocket against a live uvicorn, push every
     message type the UI sends, and confirm telemetry still flows afterwards."""
@@ -105,3 +117,160 @@ def test_server_logs_no_websocket_support_warning(server):
     assert "No supported WebSocket library" not in out, (
         f"uvicorn refused the WebSocket upgrade:\n{out}")
     assert "Unsupported upgrade request" not in out
+
+
+def test_config_exposes_mission_speed_for_eta(server):
+    """The map shows ETA to the next waypoint, which is a lie unless it uses
+    the speed the server actually clamped PX4 to."""
+    import urllib.request
+    with urllib.request.urlopen(f"http://127.0.0.1:{WEB_PORT}/config") as r:
+        cfg = json.loads(r.read())
+    assert cfg["video_port"] == 8080
+    assert cfg["mission_speed"] == 3.0
+
+
+def test_mission_can_be_planned_flown_paused_and_cleared_over_the_socket(server):
+    """Full protocol round-trip against a live uvicorn, no PX4 needed."""
+    websockets = pytest.importorskip("websockets")
+
+    async def exercise():
+        async with websockets.connect(f"ws://127.0.0.1:{WEB_PORT}/ws") as ws:
+            await asyncio.wait_for(ws.recv(), timeout=10)
+
+            await ws.send(json.dumps({
+                "type": "mission", "action": "fly",
+                "points": [[40.0, -74.0], [40.001, -74.0]], "alt": 12.0}))
+            t = await _telem_where(ws, lambda t: t["mission"]["count"] == 2)
+            assert t["mission"]["state"] == "RUNNING"
+
+            await ws.send(json.dumps({"type": "mission", "action": "pause"}))
+            t = await _telem_where(ws, lambda t: t["mission"]["state"] == "PAUSED")
+
+            # RESUME: same action, no points -- continues the loaded route
+            await ws.send(json.dumps({"type": "mission", "action": "fly"}))
+            t = await _telem_where(ws, lambda t: t["mission"]["state"] == "RUNNING")
+            assert t["mission"]["count"] == 2      # route retained
+
+            await ws.send(json.dumps({"type": "mission", "action": "clear"}))
+            t = await _telem_where(ws, lambda t: t["mission"]["count"] == 0)
+            assert t["mission"]["state"] == "IDLE"
+
+    asyncio.run(exercise())
+
+
+def test_pressing_a_direction_pauses_a_running_mission(server):
+    """The takeover edge. Polling held() at 20 Hz would miss a press-release
+    inside one tick and keep flying the route; a WS message cannot be missed."""
+    websockets = pytest.importorskip("websockets")
+
+    async def exercise():
+        async with websockets.connect(f"ws://127.0.0.1:{WEB_PORT}/ws") as ws:
+            await asyncio.wait_for(ws.recv(), timeout=10)
+            await ws.send(json.dumps({
+                "type": "mission", "action": "fly",
+                "points": [[40.0, -74.0]], "alt": 12.0}))
+            await _telem_where(ws, lambda t: t["mission"]["state"] == "RUNNING")
+
+            await ws.send(json.dumps({"type": "axis", "dir": "fwd",
+                                      "pressed": True}))
+            t = await _telem_where(ws, lambda t: t["mission"]["state"] == "PAUSED")
+            assert t["mission"]["count"] == 1     # route retained, not cleared
+
+    asyncio.run(exercise())
+
+
+def test_telemetry_carries_a_recorder_block_with_isaac_down(server):
+    """Isaac is not running in the test suite, and that is the common case on
+    the page too -- before launch-sitl.sh finishes. It must read as `offline`
+    with the button disabled, not as a missing key the UI then throws on."""
+    websockets = pytest.importorskip("websockets")
+
+    async def exercise():
+        async with websockets.connect(f"ws://127.0.0.1:{WEB_PORT}/ws") as ws:
+            t = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            assert t["rec"]["state"] == "offline"
+            assert t["rec"]["can_start"] is False
+
+    asyncio.run(exercise())
+
+
+def test_a_record_press_with_no_isaac_reports_a_reason_and_keeps_flying(server):
+    """The command cannot succeed, so what matters is that it fails visibly and
+    that the flight path is untouched: telemetry keeps arriving and the socket
+    keeps taking commands."""
+    websockets = pytest.importorskip("websockets")
+
+    async def exercise():
+        async with websockets.connect(f"ws://127.0.0.1:{WEB_PORT}/ws") as ws:
+            await asyncio.wait_for(ws.recv(), timeout=10)
+            await ws.send(json.dumps({"type": "record", "action": "start"}))
+
+            t = await _telem_where(ws, lambda t: t["rec"]["cmd_error"])
+            assert "sim" in t["rec"]["cmd_error"].lower()
+            assert t["rec"]["state"] == "offline"
+
+            # The socket is still live and still driving the aircraft.
+            await ws.send(json.dumps({"type": "axis", "dir": "fwd",
+                                      "pressed": True}))
+            t = await _telem_where(ws, lambda t: t["streaming_s"] > 0)
+
+    asyncio.run(exercise())
+
+
+def _fetch(path):
+    import urllib.request
+    with urllib.request.urlopen(f"http://127.0.0.1:{WEB_PORT}{path}") as r:
+        return r.status, r.read().decode()
+
+
+def test_the_record_button_and_its_module_are_actually_served(server):
+    """ES modules fail as a chain: if /js/recorder.js 404s, main.js never
+    finishes importing and NOTHING on the page updates -- telemetry, map and
+    d-pad included. A missing file is silent in the browser and fatal here."""
+    status, html = _fetch("/")
+    assert status == 200
+    assert 'id="c-record"' in html
+    assert 'id="rec-stat"' in html
+
+    status, recorder_js = _fetch("/js/recorder.js")
+    assert status == 200
+    assert "paintRecorder" in recorder_js
+
+    _, main_js = _fetch("/js/main.js")
+    assert "recorder.js" in main_js and "paintRecorder(t)" in main_js
+
+
+def test_every_element_recorder_js_paints_exists_on_the_page(server):
+    """A typo'd id makes el(...) return null, and the TypeError kills the whole
+    telemetry paint on every frame -- the map and the flight readouts freeze
+    because of a mistake in the recorder row."""
+    import re
+
+    _, recorder_js = _fetch("/js/recorder.js")
+    _, html = _fetch("/")
+    ids = set(re.findall(r"el\('([\w-]+)'\)", recorder_js))
+    assert ids, "no el('...') lookups found; did the module change shape?"
+    missing = [i for i in ids if f'id="{i}"' not in html]
+    assert not missing, f"recorder.js paints ids that index.html lacks: {missing}"
+
+
+def test_releasing_a_direction_does_not_pause(server):
+    """Only pressed=True pauses. If releases paused too, the mission would
+    re-pause forever and RESUME could never take."""
+    websockets = pytest.importorskip("websockets")
+
+    async def exercise():
+        async with websockets.connect(f"ws://127.0.0.1:{WEB_PORT}/ws") as ws:
+            await asyncio.wait_for(ws.recv(), timeout=10)
+            await ws.send(json.dumps({
+                "type": "mission", "action": "fly",
+                "points": [[40.0, -74.0]], "alt": 12.0}))
+            await _telem_where(ws, lambda t: t["mission"]["state"] == "RUNNING")
+
+            await ws.send(json.dumps({"type": "axis", "dir": "fwd",
+                                      "pressed": False}))
+            for _ in range(4):
+                t = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            assert t["mission"]["state"] == "RUNNING"
+
+    asyncio.run(exercise())

@@ -34,8 +34,14 @@ HEADING_OFFSET_DEG = 0.0     # if QGC heading is off by a constant, correct it h
 SPAWN_XYZ          = [0.0, 0.0, 0.5]   # local meters from origin (x=E, y=N, z=Up).
                                        # Set z yourself to sit just above YOUR ground plane.
 # --- ground-plane un-flip ---------------------------------------------------
-FIX_GROUND_FLIP    = True              # find the ground plane and rotate it to lie flat again
-                                       # (Cesium georef tips a fresh plane up into a "wall")
+FIX_GROUND_FLIP    = False             # the stage builder authors the plane flat in a Z-up
+                                       # stage, so there is nothing to un-flip and running
+                                       # fix_ground_plane() would BREAK a correct plane by
+                                       # forcing rotateX=90. Set True only for the
+                                       # paste-into-Script-Editor path on a hand-built
+                                       # Y-up stage, which is what it was always for: a
+                                       # Z-up-authored plane only LOOKS tipped in a Y-up
+                                       # stage — the Cesium georeference never tipped it.
 GROUND_FLIP_DEG    = 90.0             # corrective rotation about X (deg). Try -90.0 if it tips the wrong way.
 # --- wind (applied in Isaac — PX4 cannot inject wind into Pegasus) -----------
 ADD_WIND           = False      # add wind via Pegasus's own drag path (lockstep-safe; won't break QGC).
@@ -73,6 +79,34 @@ REC_DIR            = "~/flight_recordings"   # MP4s saved here, timestamped per 
 
 # Manual fallback if the Cesium georeference can't be read off the stage:
 FALLBACK_LAT, FALLBACK_LON, FALLBACK_ALT = 40.7128, -74.0060, 10.0
+# ----------------------------------------------------------------------------
+
+# --- environment overrides ---------------------------------------------------
+# Any tunable above can be overridden with DRONE_SETUP_<NAME>, holding a Python
+# literal. sim/launch-sitl.sh uses this to fly one baked stage from different
+# takeoff points without editing this file:
+#     DRONE_SETUP_SPAWN_XYZ='[12.0, -4.0, 0.7]' DRONE_SETUP_ADD_WIND=True
+# Pasting this script into the Script Editor with no such vars set is unchanged.
+def _env_overrides(known):
+    """Return {tunable: value} parsed from the DRONE_SETUP_* environment."""
+    import ast, os
+    out = {}
+    for key, raw in sorted(os.environ.items()):
+        if not key.startswith("DRONE_SETUP_"):
+            continue
+        name = key[len("DRONE_SETUP_"):]
+        if name not in known:
+            print(f"*** {key}: no tunable named {name} in this script — ignored ***")
+            continue
+        try:
+            out[name] = ast.literal_eval(raw)
+        except (ValueError, SyntaxError):
+            out[name] = raw              # bare strings (REC_DIR, RECORD_KEY, ...)
+        print(f">>> override {name} = {out[name]!r}")
+    return out
+
+
+globals().update(_env_overrides(set(globals())))
 # ----------------------------------------------------------------------------
 
 
@@ -682,6 +716,21 @@ async def _spawn_px4_keep_stage():
         "vehicle_id": VEHICLE_ID,
         "px4_autolaunch": PX4_AUTOLAUNCH,
         "px4_dir": pg.px4_path,
+        # Explicit on purpose. px4_mavlink_backend.py's own defaults were
+        # changed 2026-08-05 for a HITL setup (real FC over VPN): tcpin->udpin,
+        # localhost->0.0.0.0, lockstep True->False. Local SITL needs the
+        # opposite of all three -- PX4's own px4-rc.simulator runs
+        # `simulator_mavlink start -c <port>`, which connects OUT over TCP, so
+        # Isaac has to be the TCP listener (tcpin) or the two sides never even
+        # share a transport. Without an explicit lockstep=True, PX4 SITL's
+        # simulator_mavlink module spins on "ERROR poll timeout" forever,
+        # because Isaac never blocks the physics step to wait for it. Relying
+        # on the backend's defaults means this file's behavior silently
+        # depends on which config PegasusSimulator happens to ship with --
+        # stating the SITL values here keeps this script correct regardless.
+        "connection_type": "tcpin",
+        "connection_ip": "localhost",
+        "enable_lockstep": True,
     })
     vcfg = MultirotorConfig()
     vcfg.backends = [PX4MavlinkBackend(cfg)]

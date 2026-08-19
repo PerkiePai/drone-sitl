@@ -401,6 +401,17 @@ else:
         # grab a frame from EVERY camera on the same data frame (shared ts_ns) so
         # cam0/cam1 are time-synced by construction.
         if fr % st["img_every"] == 0:
+            # NOTE: image content lags its own timestamp by about one render
+            # period -- get_data() returns whatever is already in the annotator
+            # buffer from the separate, slower render loop (observed: a frame
+            # stamped ts=1.00s held pixels from ~0.95s). Forcing a synchronous
+            # rep.orchestrator.step() here does NOT fix it: replicator refuses
+            # ("Synchronous call to `step` can only be performed in a standalone
+            # workflow"), the exception escapes the physics callback before any
+            # camera is read, and the run writes full CSVs with ZERO images.
+            # Measured 2026-08-07 in Isaac Sim 6 / omni.replicator.core 1.13.25.
+            # A fix has to come from the timestamp side, not by driving the
+            # renderer from inside a physics callback.
             # grab ALL cameras first, then enqueue atomically: either every camera's
             # frame for this data frame is kept, or none is. Prevents the per-camera
             # bias (cam0 enqueued first, so under queue pressure cam1 lost the race ->

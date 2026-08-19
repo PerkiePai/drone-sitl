@@ -1,0 +1,243 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Drone joystick</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#111; color:#ddd; font:14px system-ui,sans-serif;
+         display:flex; flex-direction:column; align-items:center; gap:10px;
+         padding:10px; touch-action:none; user-select:none;
+         -webkit-user-select:none; }
+  #video { width:min(92vw,640px); aspect-ratio:16/10; background:#000;
+           border:1px solid #333; object-fit:cover; }
+  #telem { display:flex; gap:14px; flex-wrap:wrap; justify-content:center;
+           font-variant-numeric:tabular-nums; }
+  #telem b { color:#fff; font-weight:600; }
+  .bad { color:#f66; } .good { color:#6f6; } .wait { color:#fc6; }
+  #controls { display:flex; gap:22px; align-items:center; }
+  #pad { display:grid; grid-template-columns:repeat(3,74px);
+         grid-template-rows:repeat(3,74px); gap:6px; }
+  #alt { display:grid; grid-template-rows:repeat(2,74px); gap:6px; width:74px; }
+  #controls button { border-radius:10px; border:1px solid #444;
+                     background:#222; color:#eee; display:flex;
+                     flex-direction:column; align-items:center;
+                     justify-content:center; gap:2px; line-height:1; }
+  #controls button .g { font-size:24px; }
+  #controls button .t { font-size:10px; letter-spacing:.5px; color:#9a9a9a; }
+  #controls button.on { background:#2a6; border-color:#6f6; }
+  #controls button.on .t { color:#dff; }
+  .cap { font-size:11px; color:#888; text-align:center; margin-top:4px; }
+  #cmds { display:flex; gap:6px; flex-wrap:wrap; justify-content:center; }
+  #cmds button { padding:9px 14px; border-radius:8px; border:1px solid #444;
+                 background:#222; color:#eee; font-size:14px; }
+  #cmds button:disabled { opacity:.35; }
+  /* Instant local feedback that the click landed, independent of the network:
+     it fires even if the WebSocket is dead. */
+  button:active:not(:disabled) { transform:translateY(1px); filter:brightness(1.5); }
+  /* Only on real pointers -- :hover on a touchscreen sticks after tapping. */
+  @media (hover:hover) {
+    button:hover:not(:disabled) { border-color:#888; }
+  }
+  /* Flashes when the command actually goes out over the WebSocket, so a
+     registered click is distinguishable from a dropped one. */
+  #cmds button.sent { background:#2a6; border-color:#6f6; }
+  #status { min-height:1.3em; font-size:13px; text-align:center; }
+</style>
+</head>
+<body>
+  <img id="video" alt="sim camera feed">
+  <div id="telem">
+    <span>link <b id="t-link" class="bad">--</b></span>
+    <span>mode <b id="t-mode">--</b></span>
+    <span>armed <b id="t-armed">--</b></span>
+    <span>alt <b id="t-alt">--</b> m</span>
+    <span>hdg <b id="t-hdg">--</b>&deg;</span>
+    <span>speed <b id="t-gs">--</b>/<b id="t-cmd">--</b> m/s</span>
+    <span>sim <b id="t-sim">--</b></span>
+  </div>
+  <div id="controls">
+    <div>
+      <div id="pad">
+        <span></span>
+        <button data-dir="fwd"><span class="g">&#9650;</span><span class="t">FWD</span></button>
+        <span></span>
+        <button data-dir="yaw_left"><span class="g">&#8634;</span><span class="t">TURN L</span></button>
+        <span></span>
+        <button data-dir="yaw_right"><span class="g">&#8635;</span><span class="t">TURN R</span></button>
+        <span></span>
+        <button data-dir="back"><span class="g">&#9660;</span><span class="t">BACK</span></button>
+        <span></span>
+      </div>
+      <div class="cap">move &amp; turn</div>
+    </div>
+    <div>
+      <div id="alt">
+        <button data-dir="up"><span class="g">&#9650;</span><span class="t">ASCEND</span></button>
+        <button data-dir="down"><span class="g">&#9660;</span><span class="t">DESCEND</span></button>
+      </div>
+      <div class="cap">altitude</div>
+    </div>
+  </div>
+  <div id="cmds">
+    <button id="c-arm">ARM</button>
+    <button id="c-takeoff">TAKEOFF</button>
+    <button id="c-offboard">OFFBOARD</button>
+    <button id="c-land">LAND</button>
+    <button id="c-disarm">DISARM</button>
+  </div>
+  <div id="status"></div>
+<script>
+const held = new Set();
+let ws = null;
+const el = id => document.getElementById(id);
+
+// What each command should do to the telemetry, so the page can report whether
+// PX4 actually ACTED on a press rather than only that the click was registered.
+// PX4 silently ignores commands it won't accept (arming refused, OFFBOARD
+// rejected), so "sent" and "worked" are genuinely different states.
+const EXPECT = {
+  arm:      t => t.armed,
+  disarm:   t => !t.armed,
+  takeoff:  t => t.mode === 'AUTO.TAKEOFF',
+  offboard: t => t.mode === 'OFFBOARD',
+  land:     t => t.mode === 'AUTO.LAND',
+};
+const CONFIRM_TIMEOUT_MS = 3000;
+let pending = null;          // {name, sentAt} awaiting confirmation
+
+function setStatus(text, cls) {
+  el('status').textContent = text;
+  el('status').className = cls || '';
+}
+
+function flash(btn) {
+  btn.classList.add('sent');
+  setTimeout(() => btn.classList.remove('sent'), 250);
+}
+
+function sendCmd(name) {
+  if (!ws || ws.readyState !== 1) {
+    setStatus(`${name.toUpperCase()} NOT sent — no connection to server`, 'bad');
+    return;
+  }
+  send({type:'cmd', name:name});
+  flash(el(`c-${name}`));
+  pending = {name: name, sentAt: Date.now()};
+  setStatus(`${name.toUpperCase()} sent, waiting for PX4…`, 'wait');
+}
+
+function checkPending(t) {
+  if (!pending) return;
+  const expect = EXPECT[pending.name];
+  if (expect && expect(t)) {
+    setStatus(`${pending.name.toUpperCase()} confirmed by PX4`, 'good');
+    pending = null;
+  } else if (Date.now() - pending.sentAt > CONFIRM_TIMEOUT_MS) {
+    setStatus(`${pending.name.toUpperCase()} — no response from PX4 after `
+              + `${CONFIRM_TIMEOUT_MS / 1000} s (command refused?)`, 'bad');
+    pending = null;
+  }
+}
+
+// The video comes from the Isaac MJPEG server on a different port, so derive
+// the host from the page rather than hard-coding an IP -- this has to work
+// from a phone as well as from the box itself.
+fetch('/config').then(r => r.json()).then(c => {
+  el('video').src = `http://${location.hostname}:${c.video_port}/detect`;
+});
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => setStatus('connected to server', 'good');
+  ws.onmessage = e => paint(JSON.parse(e.data));
+  ws.onclose = () => {
+    held.clear();
+    paintPad();
+    pending = null;          // a queued confirmation can never arrive now
+    setStatus('lost connection to server — reconnecting…', 'bad');
+    setTimeout(connect, 1000);
+  };
+}
+
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+
+function paintPad() {
+  document.querySelectorAll('#controls button').forEach(
+    b => b.classList.toggle('on', held.has(b.dataset.dir)));
+}
+
+function paint(t) {
+  el('t-link').textContent = t.connected ? 'up' : 'down';
+  el('t-link').className = t.connected ? 'good' : 'bad';
+  el('t-mode').textContent = t.mode;
+  el('t-mode').className = t.mode === 'OFFBOARD' ? 'good' : 'bad';
+  el('t-armed').textContent = t.armed ? 'yes' : 'no';
+  el('t-alt').textContent = t.alt_m.toFixed(1);
+  el('t-hdg').textContent = t.heading_deg.toFixed(0);
+
+  // Measured ground speed against what we commanded. A large persistent gap
+  // means PX4 has the setpoint but is not achieving it -- usually because the
+  // sim is running slow, not because control is broken.
+  el('t-gs').textContent = t.gs.toFixed(1);
+  el('t-cmd').textContent = Math.abs(t.cmd_vx).toFixed(1);
+
+  // Sim time vs wall clock. Below ~0.8 the drone will look sluggish no matter
+  // how correct the commands are, because physics itself is running slow.
+  if (t.sim_rate > 0) {
+    el('t-sim').textContent = `${Math.round(t.sim_rate * 100)}%`;
+    el('t-sim').className = t.sim_rate > 0.8 ? 'good'
+                          : t.sim_rate > 0.4 ? 'wait' : 'bad';
+  }
+
+  el('c-offboard').disabled = !t.ready_for_offboard;
+  ['c-arm','c-takeoff','c-land','c-disarm'].forEach(
+    id => el(id).disabled = !t.connected);
+  checkPending(t);
+}
+
+function press(dir, on) {
+  if (on === held.has(dir)) return;          // ignore key auto-repeat
+  on ? held.add(dir) : held.delete(dir);
+  send({type:'axis', dir:dir, pressed:on});
+  paintPad();
+}
+
+document.querySelectorAll('#controls button').forEach(b => {
+  const d = b.dataset.dir;
+  b.addEventListener('pointerdown', e => {
+    e.preventDefault(); b.setPointerCapture(e.pointerId); press(d, true); });
+  b.addEventListener('pointerup', e => { e.preventDefault(); press(d, false); });
+  b.addEventListener('pointercancel', () => press(d, false));
+  b.addEventListener('contextmenu', e => e.preventDefault());
+});
+
+// Arrows/WASD mirror the pad: up-down = move, left-right = turn.
+// Q/E take altitude, matching the separate column on screen.
+const KEYS = {ArrowUp:'fwd', ArrowDown:'back',
+              ArrowLeft:'yaw_left', ArrowRight:'yaw_right',
+              w:'fwd', s:'back', a:'yaw_left', d:'yaw_right',
+              q:'up', e:'down',
+              W:'fwd', S:'back', A:'yaw_left', D:'yaw_right',
+              Q:'up', E:'down'};
+addEventListener('keydown', e => {
+  if (KEYS[e.key]) { e.preventDefault(); press(KEYS[e.key], true); } });
+addEventListener('keyup', e => {
+  if (KEYS[e.key]) { e.preventDefault(); press(KEYS[e.key], false); } });
+
+// Releasing on blur stops a stuck key from latching a velocity the operator
+// has tabbed away from and can no longer see or cancel.
+addEventListener('blur', () => { [...held].forEach(d => press(d, false)); });
+
+['arm','takeoff','offboard','land','disarm'].forEach(name =>
+  el(`c-${name}`).addEventListener('click', () => sendCmd(name)));
+
+// Keepalive: the server zeroes velocity after 0.5 s of silence, and holding a
+// button sends exactly one message, so a held direction must be refreshed.
+setInterval(() => { if (held.size) send({type:'ping'}); }, 150);
+
+connect();
+</script>
+</body>
+</html>

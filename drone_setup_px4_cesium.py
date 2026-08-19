@@ -1,6 +1,7 @@
 # ============================================================================
 # PX4 + Cesium all-in-one:  spawn the drone matched to the Cesium map
-# (lat/lon/alt + heading) AND attach the two onboard ZED cameras in one run.
+# (lat/lon/alt + heading), un-flip the ground plane, add realistic gusty wind,
+# AND attach the onboard ZED cameras in one run.
 #
 #   Window > Script Editor > paste > Run (Ctrl+Enter)  -- with your Cesium (NY)
 #   stage loaded and the sim STOPPED. Then press Play.
@@ -8,8 +9,10 @@
 #   1. Reads the CesiumGeoreference origin off the stage -> sets the PX4 GPS
 #      origin so QGC shows the drone at the exact same place as the tiles.
 #   2. Spawns the PX4 drone with a chosen compass HEADING.
-#   3. Adds two ZED X One Wide cameras (down_cam fixed + detect_cam movable with
-#      keyboard pan/tilt) to the freshly spawned drone.
+#   3. Adds the DOWN camera as a real ZED X One GS (global-shutter, 2.2mm Wide),
+#      HARD-MOUNTED with no gimbal + a soft anti-vibration mount, plus a movable
+#      detect_cam (keyboard pan/tilt) to the freshly spawned drone.
+#   4. Un-flips the Cesium-tipped ground plane and adds lockstep-safe gusty wind.
 #
 #   PX4 only. Does NOT touch ArduPilot or configs.yaml.
 # ============================================================================
@@ -28,21 +31,38 @@ import omni.usd
 # Tunables
 HEADING_DEG        = 0.0     # desired compass heading: 0=North, 90=East, 180=S, 270=W
 HEADING_OFFSET_DEG = 0.0     # if QGC heading is off by a constant, correct it here
-SPAWN_XYZ          = [0.0, 0.0, 0.5]   # local meters from origin (x=E, y=N, z=Up)
+SPAWN_XYZ          = [0.0, 0.0, 0.5]   # local meters from origin (x=E, y=N, z=Up).
+                                       # Set z yourself to sit just above YOUR ground plane.
+# --- ground-plane un-flip ---------------------------------------------------
+FIX_GROUND_FLIP    = True              # find the ground plane and rotate it to lie flat again
+                                       # (Cesium georef tips a fresh plane up into a "wall")
+GROUND_FLIP_DEG    = 90.0             # corrective rotation about X (deg). Try -90.0 if it tips the wrong way.
+# --- wind (applied in Isaac — PX4 cannot inject wind into Pegasus) -----------
+ADD_WIND           = False      # add wind via Pegasus's own drag path (lockstep-safe; won't break QGC).
+                                # OFF for joystick-offboard bring-up: a random-bearing 5 m/s gusting wind
+                                # makes the drone crab sideways while you hold "forward", which muddies the
+                                # one thing that PoC is meant to show. Re-enable it afterwards as the
+                                # robustness demo (holds heading + velocity through gusts).
+WIND_SPEED_MS      = 5.0        # MEAN wind speed (m/s) — gusts vary around this
+WIND_FROM_DEG      = None       # MEAN direction wind blows FROM (deg; 270 = from West). None = random each run.
+WIND_DIR_WANDER_DEG= 45.0       # how far the mean direction slowly drifts over the flight (± deg; 0 = fixed heading)
+WIND_GUST_FRAC     = 0.5        # gust strength as a fraction of mean speed (0.5 = gusts ±~50%)
+WIND_GUST_TAU_S    = 3.0        # gust correlation time (s): smaller = choppier, larger = longer swells
+WIND_COEFF         = 0.8        # drag coefficient — how hard the wind pushes
+WIND_MIN_AGL_M     = 1.0        # wind engages only after the drone climbs this far (grounded drone untouched)
+WIND_SEED          = None       # int → reproducible wind for a dataset; None → different every run
 VEHICLE_ID         = 0
 ROBOT_MODEL        = "Iris"            # visual asset key in ROBOTS
 PX4_AUTOLAUNCH     = True              # let Pegasus start PX4 SITL (False = launch it yourself)
-ADD_CAMERAS        = True              # attach the two ZED cameras after spawn
+ADD_CAMERAS        = True              # attach the ZED cameras after spawn
 CAM_ROLL_DEG       = -90.0             # de-rotate image. -90 corrects the "forward goes right" roll (was +90 = upside down/180).
-DOWN_STABILIZE     = False             # VIO: body-rigid (tilts with drone) — constant extrinsic, required by OpenVINS.
-DOWN_FOLLOW_YAW    = True              # True = heading follows the drone yaw (turn 0->90 rotates the image 90). False = locked North-up.
-DOWN_YAW_SIGN      = 1.0               # flip to -1.0 if the image rotates opposite to the turn
-DOWN_IMG_ROLL_DEG  = -90.0             # constant roll offset of the down image (deg); -90 fixes the CCW-90 mount
+# --- DOWN camera: ZED X One GS, HARD-MOUNTED (no gimbal) + anti-vibration mount
+DOWN_IMG_ROLL_DEG  = -90.0             # constant in-image roll offset (deg); -90 aligns the GS sensor mount
 DOWN_Z_OFFSET      = -0.05             # down_cam height offset below the drone body (m)
-ADD_FPV            = True              # add a body-rigid forward FPV camera (cam1) for VIO alongside down_cam (cam0)
-FPV_TILT_DEG       = -75.0            # FPV pitch: 0=straight down, -90=straight forward; -75 = forward + 15 deg down
-FPV_FWD_OFFSET     = 0.12             # FPV mount distance forward of body centre (m)
-STREAM_CAMERAS     = False             # KEEP FALSE WHILE RECORDING: live MJPEG streams create extra render products that starve the recorder's cam1 (FPV) capture (~76% dropped at 30fps). Set True only for live viewing when NOT recording a VIO dataset.
+DOWN_VIB_DAMP      = True              # simulate the silicone anti-vibration mount the gimbal-less GS cam needs
+DOWN_VIB_TAU_S     = 0.05              # mount time constant (s): passes slow attitude (<~3 Hz),
+                                       # soaks up high-freq airframe/gust vibration. 0 / False = rigid hard mount.
+STREAM_CAMERAS     = True              # serve both feeds over HTTP (MJPEG) to any browser on the LAN
 STREAM_PORT        = 8080
 STREAM_W, STREAM_H = 640, 400          # streamed resolution (per camera)
 STREAM_FPS         = 20                # max encode/stream rate
@@ -84,8 +104,9 @@ def read_cesium_georeference():
 
 
 def setup_cameras():
-    """Attach down_cam (fixed) + detect_cam (movable, keyboard pan/tilt) to the
-    spawned drone. Must run while the sim is STOPPED."""
+    """Attach the DOWN camera (real ZED X One GS, hard-mounted + anti-vibration
+    soft mount) and a movable detect_cam (keyboard pan/tilt) to the spawned drone.
+    Must run while the sim is STOPPED."""
     import omni.timeline, omni.appwindow, omni.kit.app
     import carb, carb.input
     from pxr import UsdGeom, Gf, Sdf
@@ -128,52 +149,47 @@ def setup_cameras():
         xf = UsdGeom.Xformable(prim); xf.ClearXformOpOrder()
         return xf.AddTranslateOp(), xf.AddRotateXYZOp()
 
-    # ZED X One GS Wide optics (applied to both cameras). Native sensor 1920x1200 (16:10).
-    ZED_MODEL    = "GS"
-    ZED_FOCAL_MM = 2.2
-    ZED_HFOV     = 110.0                          # horizontal FOV (deg) — authoritative
-    ZED_SENSOR_W, ZED_SENSOR_H = 1920, 1200       # native resolution -> defines pixel aspect
-    zed_h_ap = 2 * ZED_FOCAL_MM * math.tan(math.radians(ZED_HFOV / 2.0))
-    # derive vertical aperture from the sensor aspect so pixels are SQUARE (not anamorphic);
-    # at 16:10 this gives VFOV ~= 83.5 deg, consistent across stream/record/VIO capture.
-    zed_v_ap = zed_h_ap * (ZED_SENSOR_H / ZED_SENSOR_W)
+    # ---- ZED X One GS (Wide) — physically-accurate optics / calibration -------
+    # Datasheet: Sony IMX392, 1/2.3" GLOBAL-SHUTTER (Pregius), 1920x1200 (2.3 MP),
+    # 3.45 µm square pixels, fixed-focus Wide 2.2 mm lens, ~110° HFOV, up to 60 fps.
+    # The pinhole intrinsics fall straight out of the physical sensor + focal length
+    # (no FOV back-solving), so they match a real ZED X One GS calibration:
+    #   horizontal aperture = 1920 * 3.45µm = 6.624 mm   (USD aperture is in mm)
+    #   vertical   aperture = 1200 * 3.45µm = 4.140 mm
+    #   fx = fy = focal/pixel = 2.2 / 0.00345 ≈ 637.7 px ; cx=960, cy=600
+    #   → geometric FOV ≈ 112.7° H × 86.6° V (consistent with the rated 110° Wide).
+    ZED_MODEL    = "GS"                            # global shutter (vibration-tolerant: no rolling-shutter jello)
+    ZED_PIXEL_UM = 3.45                            # IMX392 pixel pitch (µm), square pixels
+    ZED_FOCAL_MM = 2.2                             # Wide fixed-focus lens
+    ZED_SENSOR_W, ZED_SENSOR_H = 1920, 1200        # native resolution (2.3 MP)
+    zed_h_ap = ZED_SENSOR_W * ZED_PIXEL_UM / 1000.0   # 6.624 mm
+    zed_v_ap = ZED_SENSOR_H * ZED_PIXEL_UM / 1000.0   # 4.140 mm
 
     def _zedcam(path):
         return _cam(path, focal=ZED_FOCAL_MM, h_ap=zed_h_ap, v_ap=zed_v_ap)
 
-    # NADIR-STABILIZED downward camera.
-    # Mounted on a TOP-LEVEL gimbal (/World/down_gimbal), NOT under the drone body,
-    # so it never inherits the drone's yaw/pitch/roll. A per-frame callback copies
-    # only the body's world POSITION; the gimbal orientation stays locked looking
-    # straight down (world -Z). Result: always points down, no matter the heading.
+    # ---- DOWN camera: ZED X One GS, HARD-MOUNTED (no gimbal) ------------------
+    # The real ZED X One GS has NO gimbal, so it is bolted to the airframe and
+    # tilts with the drone (true nadir only when level) — exactly the real rig.
+    # To stand in for the silicone anti-vibration mount you'd use on a hard-mounted
+    # GS camera, the mount is a TOP-LEVEL frame (/World/down_mount) driven per
+    # frame: its POSITION tracks the body exactly and its ORIENTATION follows the
+    # body's FULL attitude through a first-order low-pass (DOWN_VIB_TAU_S). That
+    # passes slow attitude (<~3 Hz) but soaks up high-frequency airframe/gust
+    # vibration; together with the global shutter (no rolling-shutter jello) it
+    # yields clean, distortion-free nadir frames. A quaternion ORIENT op is used
+    # (not RotateXYZ) so the full 3-axis attitude is set without Euler ambiguity.
     body_prim = stage.GetPrimAtPath(BODY_PATH)
-    if DOWN_STABILIZE:
-        dgim = UsdGeom.Xform.Define(stage, "/World/down_gimbal"); dgt, dgr = _ops(dgim)
-        dgr.Set(Gf.Vec3f(0.0, 0.0, DOWN_IMG_ROLL_DEG))   # fixed nadir orientation (+image roll)
-        dwn_path = "/World/down_gimbal/down_cam"
-        dwn = _zedcam(dwn_path); ddt, ddr = _ops(dwn)
-        ddt.Set(Gf.Vec3d(0.0, 0.0, 0.0)); ddr.Set(Gf.Vec3f(0.0, 0.0, 0.0))  # camera looks local -Z = world down
-    else:
-        # body-rigid downward camera: constant extrinsic, required for VIO
-        dwn_path = f"{BODY_PATH}/down_cam"
-        dwn = _zedcam(dwn_path); dt, dr = _ops(dwn)
-        dt.Set(Gf.Vec3d(0.0, 0.0, -0.05)); dr.Set(Gf.Vec3f(0.0, 0.0, CAM_ROLL_DEG))
-        dgt = None
-
-    # body-rigid FORWARD FPV camera (cam1): the second independent monocular VIO
-    # sensor (CLAUDE.md north star). FIXED mount = constant extrinsic = VIO-valid
-    # (unlike the movable detect_cam). Geometry mirrors detect_cam — a fixed tilt
-    # node (rotate Y) sets the forward look, and the roll sits on the camera so the
-    # image stays upright about the optical axis. A camera looks down its local -Z,
-    # so tilt 0=down, -90=forward; FPV_TILT_DEG=-75 -> forward + 15 deg down.
-    fpv_path = None
-    if ADD_FPV:
-        fpv_mnt = UsdGeom.Xform.Define(stage, f"{BODY_PATH}/fpv_mount"); fmt, fmr = _ops(fpv_mnt)
-        fmt.Set(Gf.Vec3d(FPV_FWD_OFFSET, 0.0, 0.0))
-        fmr.Set(Gf.Vec3f(0.0, FPV_TILT_DEG, 0.0))
-        fpv_path = f"{BODY_PATH}/fpv_mount/fpv_cam"
-        fpv = _zedcam(fpv_path); fct, fcr = _ops(fpv)
-        fct.Set(Gf.Vec3d(0.0, 0.0, 0.0)); fcr.Set(Gf.Vec3f(0.0, 0.0, CAM_ROLL_DEG))
+    dgim = UsdGeom.Xform.Define(stage, "/World/down_mount")
+    _dxf = UsdGeom.Xformable(dgim); _dxf.ClearXformOpOrder()
+    dgt = _dxf.AddTranslateOp()
+    dgo = _dxf.AddOrientOp()                                   # quaternion (Gf.Quatf)
+    dgt.Set(Gf.Vec3d(0.0, 0.0, 0.0))
+    _seed_q = Rotation.from_euler("XYZ", [0.0, 0.0, DOWN_IMG_ROLL_DEG], degrees=True).as_quat()
+    dgo.Set(Gf.Quatf(float(_seed_q[3]), float(_seed_q[0]), float(_seed_q[1]), float(_seed_q[2])))
+    dwn_path = "/World/down_mount/down_cam"
+    dwn = _zedcam(dwn_path); ddt, ddr = _ops(dwn)
+    ddt.Set(Gf.Vec3d(0.0, 0.0, 0.0)); ddr.Set(Gf.Vec3f(0.0, 0.0, 0.0))  # camera looks local -Z = mount down
 
     # movable detect camera: pan gimbal (Z) -> tilt node (Y) -> camera (fixed roll Z).
     # Putting tilt on a parent node and the roll on the camera keeps the roll about
@@ -194,14 +210,10 @@ def setup_cameras():
 
     ok_d = stage.GetPrimAtPath(dwn_path).IsValid()
     ok_t = stage.GetPrimAtPath(det_path).IsValid()
-    ok_f = bool(fpv_path) and stage.GetPrimAtPath(fpv_path).IsValid()
-    print(f"down_cam created: {ok_d}   detect_cam created: {ok_t}   "
-          f"fpv_cam created: {ok_f if ADD_FPV else 'skipped'}")
+    print(f"down_cam created: {ok_d}   detect_cam created: {ok_t}")
     if not (ok_d and ok_t):
         print("*** Camera creation FAILED. ***")
         return
-    if ADD_FPV and not ok_f:
-        print("*** WARN: fpv_cam creation failed — recorder will fall back to cam0 only. ***")
 
     # keyboard pan/tilt for detect_cam
     def _on_key(e):
@@ -229,27 +241,25 @@ def setup_cameras():
     globals()["_CAM_ON_KEY"]  = _on_key
 
     from omni.kit.viewport.utility import create_viewport_window
-    create_viewport_window("DownCam (cam0, ZED Wide)", camera_path=Sdf.Path(dwn_path),
+    create_viewport_window("DownCam (ZED X One GS, hard-mount)", camera_path=Sdf.Path(dwn_path),
                            width=512, height=320, position_x=40, position_y=40)
     create_viewport_window("DetectCam (movable, ZED Wide)", camera_path=Sdf.Path(det_path),
                            width=512, height=320, position_x=560, position_y=40)
-    if ok_f:
-        create_viewport_window("FpvCam (cam1, forward, ZED Wide)", camera_path=Sdf.Path(fpv_path),
-                               width=512, height=320, position_x=40, position_y=380)
     print("Cameras ready. Click inside DetectCam, then: I/K=tilt, J/L=pan, U=down, O=default.")
 
-    # nadir stabilization: each app update, move the top-level down_gimbal to the
-    # drone body's LIVE world position (orientation stays locked looking straight
-    # down — top-level gimbal never inherits the drone's attitude, so we only need
-    # the body POSITION, not its rotation).
-    if DOWN_STABILIZE and dgt is not None and body_prim and body_prim.IsValid():
+    # anti-vibration body-follow: each app update, copy the drone body's LIVE world
+    # POSE to the top-level down_mount — POSITION exactly, ORIENTATION through a
+    # first-order low-pass (the soft mount). DOWN_VIB_DAMP off → a perfectly rigid
+    # hard mount (mount attitude == body attitude, with the constant image roll).
+    if dgt is not None and body_prim and body_prim.IsValid():
+        import numpy as _np
+        # constant body->image correction (the -90° sensor-mount roll about optical Z)
+        _img_roll = Rotation.from_euler("XYZ", [0.0, 0.0, DOWN_IMG_ROLL_DEG], degrees=True)
+
         def _build_pose_getter():
-            # returns a fn -> (x, y, z, yaw_deg) of the drone body.
+            # returns a fn -> (pos[3], quat_xyzw[4]) of the drone body in world.
             # prefer the physics/fabric-aware core API (live during play); fall back
             # to a USD XformCache read (can be stale under the Fabric delegate).
-            import numpy as _np
-            def _yaw_from_fwd(fx, fy):
-                return math.degrees(math.atan2(fy, fx))
             for _mod in ("isaacsim.core.prims", "omni.isaac.core.prims"):
                 try:
                     XFormPrim = __import__(_mod, fromlist=["XFormPrim"]).XFormPrim
@@ -258,11 +268,10 @@ def setup_cameras():
                         p, q = vp.get_world_poses()
                         p = _np.asarray(p).reshape(-1)
                         q = _np.asarray(q).reshape(-1)              # quaternion w,x,y,z
-                        r = Rotation.from_quat([q[1], q[2], q[3], q[0]])
-                        f = r.apply([1.0, 0.0, 0.0])               # body forward (+X) in world
-                        return float(p[0]), float(p[1]), float(p[2]), _yaw_from_fwd(f[0], f[1])
+                        return (p[:3].astype(float),
+                                _np.array([q[1], q[2], q[3], q[0]], dtype=float))
                     _g()  # smoke test
-                    print(f">>> down_gimbal pose source: {_mod}.XFormPrim (live)")
+                    print(f">>> down_mount pose source: {_mod}.XFormPrim (live)")
                     return _g
                 except Exception:
                     continue
@@ -271,18 +280,35 @@ def setup_cameras():
                 xc.Clear()
                 m = xc.GetLocalToWorldTransform(body_prim)
                 t = m.ExtractTranslation()
-                f = m.TransformDir(Gf.Vec3d(1.0, 0.0, 0.0))        # body forward (+X) in world
-                return float(t[0]), float(t[1]), float(t[2]), _yaw_from_fwd(f[0], f[1])
-            print(">>> down_gimbal pose source: USD XformCache (fallback)")
+                q = m.ExtractRotationQuat()                        # Gf.Quatd
+                im = q.GetImaginary()
+                return (_np.array([t[0], t[1], t[2]], dtype=float),
+                        _np.array([im[0], im[1], im[2], q.GetReal()], dtype=float))
+            print(">>> down_mount pose source: USD XformCache (fallback)")
             return _g
 
         _get_pose = _build_pose_getter()
-        def _stabilize(e):
+        _filt = {"q": None}
+        def _track(e):
             try:
-                x, y, z, yaw = _get_pose()
-                dgt.Set(Gf.Vec3d(x, y, z + DOWN_Z_OFFSET))
-                if DOWN_FOLLOW_YAW:
-                    dgr.Set(Gf.Vec3f(0.0, 0.0, DOWN_YAW_SIGN * yaw + DOWN_IMG_ROLL_DEG))
+                pos, qb = _get_pose()
+                # rigid target = full body attitude * constant in-image roll
+                q_target = (Rotation.from_quat(qb) * _img_roll).as_quat()   # x,y,z,w
+                q_target = q_target / (_np.linalg.norm(q_target) or 1.0)
+                if DOWN_VIB_DAMP and _filt["q"] is not None:
+                    try: dt = float(e.payload["dt"])
+                    except Exception: dt = 1.0 / 60.0
+                    a = 1.0 - math.exp(-dt / max(DOWN_VIB_TAU_S, 1e-3))      # low-pass gain
+                    q_prev = _filt["q"]
+                    if float(_np.dot(q_prev, q_target)) < 0.0:              # shortest-arc nlerp
+                        q_target = -q_target
+                    q_new = (1.0 - a) * q_prev + a * q_target
+                    q_new = q_new / (_np.linalg.norm(q_new) or 1.0)
+                else:
+                    q_new = q_target
+                _filt["q"] = q_new
+                dgt.Set(Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2] + DOWN_Z_OFFSET)))
+                dgo.Set(Gf.Quatf(float(q_new[3]), float(q_new[0]), float(q_new[1]), float(q_new[2])))
             except Exception:
                 pass
         prev_stab = globals().get("_DOWN_GIMBAL_SUB")
@@ -290,15 +316,15 @@ def setup_cameras():
             try: prev_stab.unsubscribe()
             except Exception: pass
         globals()["_DOWN_GIMBAL_SUB"] = omni.kit.app.get_app().get_update_event_stream(
-            ).create_subscription_to_pop(_stabilize, name="down_gimbal_stab")
-        print(">>> down_cam NADIR gimbal: stays straight down (pitch/roll stabilized); "
-              f"heading {'follows drone yaw' if DOWN_FOLLOW_YAW else 'locked North-up'}.")
+            ).create_subscription_to_pop(_track, name="down_mount_vib")
+        _mode = (f"soft anti-vibration mount (tau={DOWN_VIB_TAU_S:.3f}s, isolates >~"
+                 f"{1.0/(2*math.pi*max(DOWN_VIB_TAU_S,1e-3)):.1f} Hz)"
+                 if DOWN_VIB_DAMP else "rigid hard mount")
+        print(f">>> down_cam ZED X One GS: hard-mounted (NO gimbal), {_mode}; "
+              "tilts with the drone (true nadir when level).")
 
     if STREAM_CAMERAS:
-        stream_cams = {"down": dwn_path, "detect": det_path}
-        if ok_f:
-            stream_cams["fpv"] = fpv_path
-        start_camera_streams(stream_cams)
+        start_camera_streams({"down": dwn_path, "detect": det_path})
 
 
 def start_camera_streams(cam_paths):
@@ -485,6 +511,151 @@ def start_camera_streams(cam_paths):
           f"recording of both cams -> {rec_dir}/ ({REC_W}x{REC_H} @ {REC_FPS}fps)")
 
 
+def fix_ground_plane():
+    """Find the ground plane on the stage and rotate it back to flat. A plane
+    created via Create > Physics > Ground Plane under a Cesium georeference gets
+    tipped up into a 'wall'; this applies a corrective rotation about X.
+    Idempotent: it SETS an absolute rotation (preserving the plane's translation),
+    so re-running the script never stacks extra 90s."""
+    from pxr import UsdGeom, Gf
+    stage = omni.usd.get_context().get_stage()
+
+    target = None
+    for prim in stage.Traverse():
+        name = prim.GetName().lower()
+        if ("groundplane" in name or "ground_plane" in name
+                or name == "defaultgroundplane"):
+            target = prim
+            break
+    if target is None:
+        print("*** fix_ground_plane: no ground plane found — skipping. "
+              "(Add one via Create > Physics > Ground Plane.) ***")
+        return
+
+    xf = UsdGeom.Xformable(target)
+    # preserve any existing translation, then set a single clean rotateXYZ
+    trans = None
+    for op in xf.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            trans = op.Get()
+    xf.ClearXformOpOrder()
+    t = xf.AddTranslateOp()
+    t.Set(trans if trans is not None else Gf.Vec3d(0.0, 0.0, 0.0))
+    r = xf.AddRotateXYZOp()
+    r.Set(Gf.Vec3f(GROUND_FLIP_DEG, 0.0, 0.0))
+    print(f">>> Ground plane {target.GetPath()} set to rotateX={GROUND_FLIP_DEG:.0f} "
+          f"(flat). If it's still a wall, set GROUND_FLIP_DEG = {-GROUND_FLIP_DEG:.0f} and re-run.")
+
+
+def setup_wind():
+    """Add REALISTIC gusty wind the lockstep-safe way: swap the vehicle's drag
+    model for a wind-aware one. Pegasus calls veh._drag.update(state, dt) and
+    applies the result inside Multirotor.update() in the SAME physics step (right
+    before the PX4 backend runs) — so this never disrupts lockstep or the QGC link.
+
+    Wind model (horizontal only; z force stays 0 so the drone never sinks):
+        wind_enu = mean + gust
+      - mean : a prevailing wind whose DIRECTION slowly wanders (±WIND_DIR_WANDER_DEG)
+               and whose SPEED gently swells, both via slow Ornstein–Uhlenbeck (OU)
+               drift. Base direction is WIND_FROM_DEG, or RANDOM each run if None.
+      - gust : a fast OU (first-order Gauss–Markov) turbulence vector, per-axis std
+               WIND_GUST_FRAC*WIND_SPEED_MS and correlation time WIND_GUST_TAU_S.
+    OU keeps the noise smooth, bounded and time-correlated (real gusts), not white
+    jitter. Set WIND_SEED for a reproducible wind track across dataset runs.
+
+    Force: F_body = -D*(v_body - v_wind_body), D = diag(k, k, 0). Engages only above
+    WIND_MIN_AGL_M so a grounded drone is left alone.
+
+    NOTE: PX4 cannot create wind in Pegasus (physics lives in Isaac). Wind is applied
+    here; the matching PX4 wind ESTIMATOR params are printed so PX4's EKF can be made
+    aware if you want (those only feed the estimator, not the dynamics)."""
+    import math, time as _time
+    import numpy as np
+    from scipy.spatial.transform import Rotation
+    from pegasus.simulator.logic.vehicle_manager import VehicleManager
+    from pegasus.simulator.logic.dynamics.linear_drag import LinearDrag
+
+    vm = VehicleManager.get_vehicle_manager()
+    vehicles = list(vm.vehicles.values()) if getattr(vm, "vehicles", None) else []
+    veh = vehicles[0] if vehicles else None
+    if veh is None:
+        print("*** setup_wind: no Pegasus vehicle found — wind disabled. ***")
+        return
+
+    rng = np.random.RandomState(WIND_SEED if WIND_SEED is not None else None)
+    base_dir = float(WIND_FROM_DEG) if WIND_FROM_DEG is not None else float(rng.uniform(0.0, 360.0))
+
+    def _enu_from(speed, from_deg):
+        # direction wind blows FROM -> ENU vector it pushes the drone TOWARD
+        return np.array([-math.sin(math.radians(from_deg)) * speed,
+                         -math.cos(math.radians(from_deg)) * speed, 0.0])
+
+    _COMPASS = ["N","NE","E","SE","S","SW","W","NW"]
+
+    class WindDrag(LinearDrag):
+        def __init__(self):
+            super().__init__([WIND_COEFF, WIND_COEFF, 0.0])   # z=0 → never vertical
+            self._ground_z = None
+            self._last_print = 0.0
+            self._dir_off = 0.0          # deg, slow OU around 0 → wanders base_dir
+            self._spd_off = 0.0          # m/s, slow OU around 0 → swells base speed
+            self._gust = np.zeros(3)     # m/s ENU, fast OU turbulence
+            self._wind_enu = _enu_from(WIND_SPEED_MS, base_dir)
+
+        @staticmethod
+        def _ou(x, tau, sigma, dt, n):
+            # first-order Gauss–Markov / OU step; mean-reverts to 0, stationary std = sigma
+            tau = max(tau, 1e-3)
+            return x - (x / tau) * dt + sigma * math.sqrt(2.0 / tau) * math.sqrt(max(dt, 0.0)) * n
+
+        def update(self, state, dt):
+            body_vel = state.linear_body_velocity            # FLU body-frame velocity
+            z = float(state.position[2])
+            if self._ground_z is None:
+                self._ground_z = z
+            agl = z - self._ground_z
+
+            # --- evolve the wind field EVERY step (so it's already natural at lift-off) ---
+            dt = float(dt) if dt and dt > 0 else 1.0 / 250.0
+            if WIND_DIR_WANDER_DEG > 0:
+                self._dir_off = self._ou(self._dir_off, 20.0, WIND_DIR_WANDER_DEG, dt, rng.randn())
+            self._spd_off = self._ou(self._spd_off, 15.0, 0.25 * WIND_SPEED_MS, dt, rng.randn())
+            mean_spd = max(0.0, WIND_SPEED_MS + self._spd_off)
+            mean_enu = _enu_from(mean_spd, base_dir + self._dir_off)
+            sig = WIND_GUST_FRAC * WIND_SPEED_MS
+            self._gust[0] = self._ou(self._gust[0], WIND_GUST_TAU_S, sig, dt, rng.randn())
+            self._gust[1] = self._ou(self._gust[1], WIND_GUST_TAU_S, sig, dt, rng.randn())
+            self._wind_enu = mean_enu + self._gust
+
+            wind_body = np.zeros(3)
+            if agl >= WIND_MIN_AGL_M:
+                wind_body = Rotation.from_quat(state.attitude).inv().apply(self._wind_enu)
+            self._drag_force = -np.dot(self._drag_coefficients, body_vel - wind_body)
+
+            now = _time.time()
+            if now - self._last_print >= 1.0:
+                self._last_print = now
+                w = self._wind_enu
+                spd = float(np.hypot(w[0], w[1]))
+                frm = math.degrees(math.atan2(-w[0], -w[1])) % 360.0   # current wind's FROM direction
+                comp = _COMPASS[round(frm / 45) % 8]
+                f = self._drag_force
+                tag = "ACTIVE" if agl >= WIND_MIN_AGL_M else f"below {WIND_MIN_AGL_M:.1f} m — inactive"
+                print(f"[WIND] {spd:4.1f} m/s FROM {frm:5.0f}° ({comp:>2})  "
+                      f"force=({f[0]:+.1f},{f[1]:+.1f},{f[2]:+.1f}) N  agl={agl:.1f} m  ({tag})")
+            return self._drag_force
+
+    veh._drag = WindDrag()
+    comp0 = _COMPASS[round(base_dir / 45) % 8]
+    seed_s = WIND_SEED if WIND_SEED is not None else "random"
+    print(f">>> Wind (REALISTIC/gusty): mean {WIND_SPEED_MS:.1f} m/s FROM {base_dir:.0f}° ({comp0}), "
+          f"gusts ±{WIND_GUST_FRAC*100:.0f}% (tau={WIND_GUST_TAU_S:.1f}s), dir wander ±{WIND_DIR_WANDER_DEG:.0f}°, "
+          f"coeff={WIND_COEFF}, seed={seed_s} (Isaac-side, lockstep-safe; engages at +{WIND_MIN_AGL_M:.1f} m).")
+    print(f"    Optional PX4 estimator awareness (paste in QGC MAVLink console): "
+          f"param set SIM_WIND_SPD {WIND_SPEED_MS:.1f} ; param set SIM_WIND_DIR {base_dir:.0f}")
+    print(f"    Disable wind: veh._drag = LinearDrag([0.5,0.3,0.0])")
+
+
 pg = PegasusInterface()
 
 # 1) Match the GPS origin to the Cesium map -----------------------------------
@@ -497,10 +668,6 @@ else:
     lat, lon, alt = geo
 pg.set_global_coordinates(latitude=lat, longitude=lon, altitude=alt)
 print(f">>> Pegasus GPS origin set to: {lat}, {lon}, {alt}")
-# Stash for the VIO recorder so geo.csv/georef.json use the EXACT same ENU origin
-# as the PX4 GPS (the local world origin (0,0,0) maps to this lat/lon/height).
-globals()["_CESIUM_GEOREF"] = {"lat": lat, "lon": lon, "alt": alt,
-                               "is_fallback": geo is None}
 
 # 2) Compass heading -> Isaac ENU yaw (yaw=0 -> East; yaw = 90 - heading)
 isaac_yaw_deg = 90.0 - HEADING_DEG + HEADING_OFFSET_DEG
@@ -535,6 +702,13 @@ async def _spawn_px4_keep_stage():
     # 3) attach cameras now (sim is stopped) ---------------------------------
     if ADD_CAMERAS:
         setup_cameras()
+
+    # 4) un-flip the ground plane, then add wind -----------------------------
+    if FIX_GROUND_FLIP:
+        fix_ground_plane()
+
+    if ADD_WIND:
+        setup_wind()
 
     print(">>> Done. Press Play, then connect QGC.")
     print("    If QGC heading is rotated vs the map, nudge HEADING_OFFSET_DEG "

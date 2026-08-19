@@ -11,3 +11,4 @@ NvStreamer-*.etli
 
 # Flight logs: sim/save-ulog.sh output and joystick-server.py's run CSVs.
 logs/
+.worktrees/

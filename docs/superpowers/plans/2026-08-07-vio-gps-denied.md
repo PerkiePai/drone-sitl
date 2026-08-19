@@ -1215,14 +1215,24 @@ defaults, never adapted for a noisier vision source — the only untested lever
 left, and the only one a live flight can screen quickly (design doc, "Why
 this exists").
 
-> **Status 2026-08-19:** not started.
+> **Status 2026-08-19:** Steps 10.1–10.5 done (offline, in a worktree at
+> `.worktrees/task-10-mpc-gain-sweep`, branch `task-10-mpc-gain-sweep` off
+> `feat/vio-gps-denied`): `MPC_XY_DEFAULTS`/`revert_mpc_gains`, `sim_s`
+> telemetry, the `set_param` command, D4's revert wiring,
+> `sim/mpc_gain_sweep.py`, `sim/analyze_gain_sweep.py`. Full offline suite
+> (`streaming/tests/` + `sim/tests/`): 261 passed, 3 known failures (2
+> environmental -- a live recorder was running against the box during this
+> run; 1 a worktree-depth artifact in `test_sites.py`'s `../metashape/`
+> relative path, present regardless of this task's changes and absent when
+> run from the top-level checkout). **10.6–10.7 (the live screening and
+> confirmation flights) not yet attempted.**
 
 ### Step 10.1 — `MPC_XY_DEFAULTS` and `revert_mpc_gains`
 
 Pure data plus one function, offline-testable exactly like
 `EKF2_GNSS_RESTORE_PARAMS` / `apply_ekf2_gnss_restore_params` already are.
 
-- [ ] **10.1a Failing test.** Append to
+- [x] **10.1a Failing test.** Append to
       `streaming/tests/test_vision_bridge.py`, after the `# --- EKF2 params
       ---` section (before `# --- SET_GPS_GLOBAL_ORIGIN ---`):
 
@@ -1256,7 +1266,7 @@ conda run -n drone pytest streaming/tests/test_vision_bridge.py -q
 ```
 Expect: `AttributeError: module 'vision_bridge' has no attribute 'MPC_XY_DEFAULTS'`.
 
-- [ ] **10.1b Implement.** In `streaming/vision_bridge.py`, insert after
+- [x] **10.1b Implement.** In `streaming/vision_bridge.py`, insert after
       `HGT_REF_NEEDS_REBOOT`'s docstring (line 165), before `DEFAULT_MAX_AGE_S`:
 
 ```python
@@ -1289,14 +1299,14 @@ def revert_mpc_gains(link):
     _apply(link, MPC_XY_DEFAULTS)
 ```
 
-- [ ] **10.1c Run tests, verify pass.**
+- [x] **10.1c Run tests, verify pass.**
 
 ```bash
 conda run -n drone pytest streaming/tests/test_vision_bridge.py -q
 ```
 Expect: PASS.
 
-- [ ] **10.1d Commit.**
+- [x] **10.1d Commit.**
 
 ```bash
 git add streaming/vision_bridge.py streaming/tests/test_vision_bridge.py
@@ -1313,7 +1323,7 @@ the pushed telemetry never has, so a websocket client has no sim clock to time
 against. Fixing that here is what lets Step 10.4's driver avoid becoming bug
 number four.
 
-- [ ] **10.2a Failing test.** Append to `streaming/tests/test_offboard_loop.py`
+- [x] **10.2a Failing test.** Append to `streaming/tests/test_offboard_loop.py`
       (end of file, after `test_restore_without_vision_does_not_touch_ekf2`):
 
 ```python
@@ -1365,7 +1375,7 @@ since the key does not exist yet); the second fails with `AttributeError:
 because `_run_command` does not accept a tuple (`AttributeError` on
 `getattr(self.link, name)` where `name` is a tuple, or similar).
 
-- [ ] **10.2b Implement `sim_s` telemetry.** In `joystick-server.py`, add to
+- [x] **10.2b Implement `sim_s` telemetry.** In `joystick-server.py`, add to
       the `_telem` init dict (near `"streaming_s": 0.0,`):
 
 ```python
@@ -1385,7 +1395,7 @@ because `_run_command` does not accept a tuple (`AttributeError` on
                     self._telem["sim_s"] = self._px4_sim_s
 ```
 
-- [ ] **10.2c Implement `set_param` dispatch.** In `joystick-server.py`,
+- [x] **10.2c Implement `set_param` dispatch.** In `joystick-server.py`,
       add a new method next to `submit` (line 376):
 
 ```python
@@ -1437,14 +1447,14 @@ because `_run_command` does not accept a tuple (`AttributeError` on
                         loop_thread.submit(msg["name"])
 ```
 
-- [ ] **10.2d Run tests, verify pass.**
+- [x] **10.2d Run tests, verify pass.**
 
 ```bash
 conda run -n drone pytest streaming/tests/test_offboard_loop.py -q
 ```
 Expect: PASS.
 
-- [ ] **10.2e Websocket round-trip.** Extend
+- [x] **10.2e Websocket round-trip.** Extend
       `streaming/tests/test_web_ui.py`'s
       `test_websocket_accepts_control_messages_and_pushes_telemetry` — add
       after the existing `await ws.send(json.dumps({"type": "cmd", "name":
@@ -1466,7 +1476,7 @@ conda run -n drone pytest streaming/tests/test_web_ui.py -q
 ```
 Expect: PASS.
 
-- [ ] **10.2f Commit.**
+- [x] **10.2f Commit.**
 
 ```bash
 git add joystick-server.py streaming/tests/test_offboard_loop.py \
@@ -1476,7 +1486,7 @@ git commit -m "feat(vio): add sim_s telemetry and the set_param command"
 
 ### Step 10.3 — D4: `RESTORE GNSS` reverts `MPC_XY_*` too
 
-- [ ] **10.3a Failing test.** Append to `streaming/tests/test_offboard_loop.py`,
+- [x] **10.3a Failing test.** Append to `streaming/tests/test_offboard_loop.py`,
       in the `# --- restoring GNSS ---` section, after
       `test_restoring_gnss_leaves_vision_fusing`:
 
@@ -1501,7 +1511,7 @@ conda run -n drone pytest streaming/tests/test_offboard_loop.py -q
 ```
 Expect: FAIL — `KeyError: 'MPC_XY_P'` (not sent yet).
 
-- [ ] **10.3b Implement.** In `joystick-server.py`'s `_restore_gnss` (line
+- [x] **10.3b Implement.** In `joystick-server.py`'s `_restore_gnss` (line
       601), add the call right after the existing EKF2 revert:
 
 ```python
@@ -1509,14 +1519,14 @@ Expect: FAIL — `KeyError: 'MPC_XY_P'` (not sent yet).
         vision_bridge.revert_mpc_gains(self.link)
 ```
 
-- [ ] **10.3c Run tests, verify pass.**
+- [x] **10.3c Run tests, verify pass.**
 
 ```bash
 conda run -n drone pytest streaming/tests/test_offboard_loop.py -q
 ```
 Expect: PASS.
 
-- [ ] **10.3d Commit.**
+- [x] **10.3d Commit.**
 
 ```bash
 git add joystick-server.py streaming/tests/test_offboard_loop.py
@@ -1531,7 +1541,7 @@ exercised live in Steps 10.6–10.7. `should_abort` (D5) is pure and gets a real
 failing-test/implement pair; everything else is Implement-only, structured so
 10.6/10.7 are "run this command" rather than "write this code live".
 
-- [ ] **10.4a Failing test.** Create `sim/tests/test_mpc_gain_sweep.py`:
+- [x] **10.4a Failing test.** Create `sim/tests/test_mpc_gain_sweep.py`:
 
 ```python
 """D5's screening-abort check. No PX4, no Isaac Sim, no socket."""
@@ -1569,7 +1579,7 @@ conda run -n drone pytest sim/tests/test_mpc_gain_sweep.py -q
 ```
 Expect: `ModuleNotFoundError: No module named 'mpc_gain_sweep'`.
 
-- [ ] **10.4b Implement `should_abort` and the module scaffold.** Create
+- [x] **10.4b Implement `should_abort` and the module scaffold.** Create
       `sim/mpc_gain_sweep.py`:
 
 ```python
@@ -1656,14 +1666,14 @@ conda run -n drone pytest sim/tests/test_mpc_gain_sweep.py -q
 ```
 Expect: PASS.
 
-- [ ] **10.4c Commit the tested piece.**
+- [x] **10.4c Commit the tested piece.**
 
 ```bash
 git add sim/mpc_gain_sweep.py sim/tests/test_mpc_gain_sweep.py
 git commit -m "feat(vio): should_abort, the D5 gain-sweep screening check"
 ```
 
-- [ ] **10.4d Implement the driver.** Append to `sim/mpc_gain_sweep.py`:
+- [x] **10.4d Implement the driver.** Append to `sim/mpc_gain_sweep.py`:
 
 ```python
 class Campaign:
@@ -1824,7 +1834,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **10.4e Commit.**
+- [x] **10.4e Commit.**
 
 ```bash
 git add sim/mpc_gain_sweep.py
@@ -1835,7 +1845,7 @@ git commit -m "feat(vio): mpc_gain_sweep.py campaign driver"
 
 Pure file-reading and arithmetic, no socket — full TDD, no live-only carve-out.
 
-- [ ] **10.5a Failing test.** Create `sim/tests/test_analyze_gain_sweep.py`:
+- [x] **10.5a Failing test.** Create `sim/tests/test_analyze_gain_sweep.py`:
 
 ```python
 """sim/analyze_gain_sweep.py's segment-slicing and trend-slope math, against
@@ -1916,7 +1926,7 @@ conda run -n drone pytest sim/tests/test_analyze_gain_sweep.py -q
 ```
 Expect: `ModuleNotFoundError: No module named 'analyze_gain_sweep'`.
 
-- [ ] **10.5b Implement.** Create `sim/analyze_gain_sweep.py`:
+- [x] **10.5b Implement.** Create `sim/analyze_gain_sweep.py`:
 
 ```python
 #!/usr/bin/env python3
@@ -2023,14 +2033,14 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **10.5c Run tests, verify pass.**
+- [x] **10.5c Run tests, verify pass.**
 
 ```bash
 conda run -n drone pytest sim/tests/test_analyze_gain_sweep.py -q
 ```
 Expect: PASS.
 
-- [ ] **10.5d Full offline suite, verify nothing regressed.**
+- [x] **10.5d Full offline suite, verify nothing regressed.**
 
 ```bash
 conda run -n drone pytest streaming/tests/ sim/tests/ -q
@@ -2038,7 +2048,7 @@ conda run -n drone pytest streaming/tests/ sim/tests/ -q
 Expect: PASS (same 247/249 baseline as Task 9 — the 2 known environmental
 failures only, per SESSION.md).
 
-- [ ] **10.5e Commit.**
+- [x] **10.5e Commit.**
 
 ```bash
 git add sim/analyze_gain_sweep.py sim/tests/test_analyze_gain_sweep.py

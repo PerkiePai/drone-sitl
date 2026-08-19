@@ -315,3 +315,357 @@ restart to pick up measurement-only code is exactly the kind of unrequested
 disruption this instruction set warns against. **9.4 — the classification
 flight — has not been attempted with this instrumentation** and is the next
 step once the operator is ready to cycle the stack.
+
+## Run 6 (2026-08-13) — 9.4a flown with the new instrumentation; worse than run 5, but a landing, not a crash
+
+The operator approved cycling the stack. Full restart —
+`DRONE_SETUP_DOWN_VIB_DAMP=False VIO=1 ./sim/launch-sitl.sh`, then
+`joystick-server.py --takeoff-alt 50 --speed-up 3.0 --run-name 20260813-231224`
+— so phase 0's reboot picked up `SDLOG_MODE=2`/`SDLOG_PROFILE=131` for the
+first time. Flew the unchanged 9.4a profile (arm, takeoff, offboard, wait for
+fusing, settle 20 s, cut, hold **180 s** with no parameter changes, restore,
+land) driven over the websocket exactly as the page would send it.
+
+**The cut was clean** — 0.72 m drift, 20.5 m altitude, same signature as every
+prior run. **The hold was not.** Aircraft excursion (ground truth against the
+hold point, Task 9's new number) grew almost continuously from the start:
+47 m by t+30 s, peaking at **247 m at t+58 s**, while altitude fell the whole
+time (20.5 m → ~7 m at the peak). `px4_yaw` held within ~2° the entire
+180 s — this is **not** the orbit/spiral ADR-0002 named as the heading-fault
+signature. It is closer to a one-directional runaway: `n_inliers` stayed
+401–600 throughout, `dropped_stale` was 0, `fresh` was `True` on every one of
+3604 phase-2 samples — vision tracking was never the problem. `sim_rate` dipped
+to 0.172 briefly at t+34 s, after excursion had already reached ~50 m and
+climbing, so it reads as a symptom of the sim struggling under the runaway
+rather than a trigger for it.
+
+After the peak, excursion partially recovered (247 m → ~186 m by t+68 s) while
+still descending, then both altitude and excursion went nearly flat for the
+rest of the hold — the scripted flight then restored GNSS and commanded land
+exactly per profile.
+
+**First read of the CSV misread this as a crash** — `alt_m` ended at −6.18,
+and every previous run's altitude sign convention was internalised as
+"negative is bad." It is not: `ground_z = −25.0` (`sim/sites.py`) is a single
+flat physics plane across the whole site (not terrain-following,
+`sim/stage_builder.py:74-80`), so −6.18 is ~19 m of clearance, not a strike.
+Confirmed live after the flight: querying the running server showed
+`alt_m: −24.89`, disarmed, `gs`/`vz` ≈ 0 — i.e. sitting cleanly on
+`ground_z`, not embedded in it — and the down camera showed the same flat
+black this project has always seen near the ground (mean-intensity, zero-std
+signature documented earlier in this file). **The aircraft landed itself
+safely, ~225 m from the pad, once commanded to.** It was flyable and
+controllable throughout; it just held station far worse than run 5's bounded
+±5→±60 m oscillation.
+
+Ulog and CSV saved to `logs/20260813-231224/` (`16_14_19.ulg`, 38 MB;
+`run.csv`, 7020 rows, 3604 in phase 2) — 9.1d's log-capture path is now
+confirmed working against a `SDLOG_PROFILE=131` boot, though
+`estimator_aid_src_ev_pos` presence in the ulog itself has not yet been
+checked (still open).
+
+**Not yet done:** 9.4b's fuller classification (this write-up is a first read,
+not the systematic one), 9.4c (EV delay vs `sim_rate` from the ulog), 9.4d
+(magnetometer heading vs Mahony yaw vs GT yaw), 9.4e (offline replay sweep).
+Also open: whether this run's severity (247 m peak) is typical of the same
+underlying instability as run 5, or an outlier — nothing in Task 9's changes
+touches flight dynamics, so the two runs should be sampling the same failure
+mode, but only one more flight would confirm that. Isaac/PX4/server were left
+running after this analysis, aircraft parked ~225 m off pad, disarmed.
+
+## Task 9.4d (2026-08-14) — heading ruled out
+
+`run.csv`'s 20 Hz stream never carried `gt_yaw` or a magnetometer heading —
+only `gt_x`/`gt_y` (position) were forwarded, and the estimator's
+magnetometer read (`vio-streamer.py`) is consumed internally by
+`MahonyState` and never sent onward. 9.4d as scoped is not answerable from
+the CSV. It is answerable from the ulog: `pyulog` (installed into the
+`drone` conda env for this) exposes `vehicle_attitude` (EKF2's fused yaw),
+`sensor_mag` (raw magnetometer, tilt-compensated here against
+`vehicle_attitude` into an independent heading — the actual substitute for
+the missing GT yaw), `vehicle_visual_odometry` (the vision yaw PX4 received,
+post-`FrameAlignment`), and `estimator_aid_src_ev_yaw` (EKF2's own internal
+innovation between its belief and the vision measurement).
+
+Also found while doing this: **`run.csv` for `20260813-231224` is
+contaminated.** The orphaned `joystick-server.py`/`pipeline-streaming.py`
+pair left running after run 6 (see the "run website" session note above; PIDs
+2682059/2682088) kept appending to that same CSV for roughly eleven more
+hours — it now has 798,178 rows against the 7,020 run 6 actually produced.
+The `.ulg` is unaffected (PX4 stops logging when the flight recorder is
+stopped, independent of the CSV writer) and is what all analysis below used.
+**Any future read of `run.csv` under this run name needs the real window
+sliced out by timestamp first; don't trust row count or tail as the end of
+the flight.**
+
+The real cut/restore window, from `EKF2_GPS_CTRL`'s param-change log in the
+ulog rather than assumed from the script: fusion started (`EKF2_EV_CTRL=9`)
+at t=18.96 s, GNSS was cut at t=50.68 s, restored at t=156.63 s. **The hold
+was 106 s, not the scripted 180 s** — `RESTORE GNSS` fired well before the
+profile's intended duration, for a reason not yet investigated. Position
+excursion computed straight from the ulog (`vehicle_local_position`) peaked
+at 267.7 m at t+60.1 s after the cut — consistent with the CSV-and-ground-
+truth-based 247 m at t+58 s reported for run 6 above, confirming both are
+the same event and that the ulog's timeline lines up with the earlier read.
+
+**Every yaw signal agreed with every other one throughout the entire
+106 s hold:**
+
+| Signal | Mean | Std | Max deviation |
+|---|---|---|---|
+| EKF2 fused yaw vs raw mag heading | −1.55° | 1.41° | 5.4° |
+| EV-yaw innovation (EKF2 belief − vision) | −0.53° | 0.54° | 2.0° |
+| EV-yaw `test_ratio` (>1 would mean EKF2 doubts vision) | ~0.000 | — | 0.001 |
+
+A 267 m runaway cannot come from a heading error under 2°. **ADR-0002's
+heading/orbit hypothesis is ruled out**, with real margin, by an
+independent raw-compass cross-check PX4's own self-referential yaw estimate
+could not provide on its own — not just "`px4_yaw` looked steady," which was
+the limit of run 6's first read. One weak, inconclusive signal: the EV-yaw
+innovation's autocorrelation shows a peak near 86 s lag, but the innovation
+never exceeds 2° through the whole hold, too small relative to noise to call
+that a real oscillator.
+
+This shifts weight decisively onto ADR-0002's other branch — **lag or loop
+gain in the position-hold loop**, not heading — as the live hypothesis for
+the excursion/oscillation.
+
+## Task 9.4c (2026-08-14) — EV delay does not track sim_rate
+
+ADR-0006 held `EKF2_EV_DELAY` at its default (`0`, PX4's own default —
+`ekf2_params.c:151`) until the applied delay could be measured, on the
+worry that much of the pipeline's latency is wall-clock CPU work that maps
+into sim time scaled by `sim_rate` (observed wandering 0.41–0.65 across this
+project's runs) — in which case tuning the param against one snapshot of
+system load would be measuring the wrong thing.
+
+`estimator_aid_src_ev_pos`'s `timestamp` (when EKF2 fused the sample) minus
+`timestamp_sample` (the sample's own stamp, as this codebase sent it) gives
+the actual applied delay, in the same sim clock as everything else PX4
+does. Extracted over all 4645 logged samples in run 6's ulog and matched
+against `run.csv`'s `sim_rate` column (only the first 5000 rows — see the
+9.4d note above on why the rest of that file is contaminated and unusable):
+
+**The delay is flat at 83.4 ms ± 1.4 ms (range 80.0–84.0 ms) across the
+entire flight**, phase 1b and the GPS-denied hold alike — while `sim_rate`
+itself ranged 0.17 to 0.65 in the same window. Binning delay by `sim_rate`
+decile shows no trend at all (every bin: 83.3–83.5 ms mean). Correlation
+between delay and `sim_rate`: **+0.018**. Correlation between delay and
+`1/sim_rate` (what ADR-0006's hypothesis predicts should be positive):
+**−0.013** — indistinguishable from zero, and the wrong sign besides.
+
+**`EKF2_EV_DELAY` is not a sim-rate artifact in this data.** Whatever holds
+the delay this steady — most likely PX4's own fixed fusion-horizon
+buffering rather than the variable wall-clock cost of JPEG-encode/ZMQ/LK-
+solve that motivated the worry — dominates over the rendering-load-driven
+component enough that it doesn't show up even across a 4x swing in
+`sim_rate` within one flight. Stabilising `sim_rate` would not change this
+number.
+
+This does leave a real, small, measured gap: EKF2 is told the delay is 0 ms
+while it is actually ~83 ms, so `EKF2_EV_DELAY≈83` is now a legitimately
+measured value rather than a guess, if it's worth setting (`@reboot_required`
+— goes in phase 0, not the fusion params). But per ADR-0002's own reasoning,
+an ~83 ms delay is far too fast to produce a 40–60 s-period oscillation on
+its own — it would perturb the position loop at its own (much faster)
+bandwidth. So 9.4c neither confirms nor rules out the lag/loop-gain branch;
+it just clears `EKF2_EV_DELAY` specifically as a sim-artifact red herring
+and leaves a small, real, fixable number on the table for later.
+
+9.4e (offline replay sweep) is still open.
+
+## Task 9.4b (2026-08-14) — straight line, not a spiral: lag/loop-gain confirmed
+
+ADR-0002's test: an orbit or spiral against the hold point indicts heading; a
+straight-line back-and-forth indicts lag or loop gain. Classified run 6's
+ground-truth track (`gt_x`/`gt_y`) and, separately, PX4's own estimate
+(`px4_n`/`px4_e`), both against the hold point taken at the cut, over the
+full 106 s hold — bearing angle (unwrapped, relative to the hold point),
+radius, and a PCA eigenvalue ratio on the (x, y) cloud (near 1.0 = circular
+spread, near 0.0 = a line).
+
+**Binned bearing locks onto a single direction, −173° ± 0.5°, from t+25s
+to the end of the hold at t+110s, and never leaves it.** The first 25 s
+looks unstable in the raw bearing number (−2° to −306° across a few 5 s
+bins) purely because radius was under 16 m there — `atan2` on a
+near-origin point swings wildly for centimetre-scale noise, not because
+anything was actually rotating; radius in that window only reached 15.9 m.
+Once the excursion is large enough for bearing to mean anything, it is
+flat. PCA eigenvalue ratio (minor/major axis) is **0.000** on both the
+ground-truth and PX4-estimate clouds — as linear a spread as this metric
+can report. Excluding the noisy first 25 s and reclassifying from there:
+total absolute bearing travel over the remaining 81 s is 186°, half a
+turn, against a peak-to-peak radius swing of order 100 m — the opposite of
+an orbit, which would rack up many full turns while barely covering
+ground radially.
+
+**Radius over time is a damped step response to a false equilibrium, not
+a sustained growing oscillation:** 0 → 246.6 m (peak, t+58s) → 191–207 m
+(undershoot, t+65-70s) → ~230 m (second, smaller overshoot, t+75-80s) →
+settles into a tight 222–228 m band from t+80s onward, holding there for
+the rest of the 106 s hold. Two damped cycles, then station-kept — at the
+wrong spot, ~225 m from the intended hold point, along one fixed bearing.
+This is a materially different shape than the "±5 m growing to ±60 m"
+language used for run 5 above; whether that's a difference in the
+underlying fault or just a different point in the same fault's transient
+is still open (nothing in Task 9 touches flight dynamics, so the working
+assumption is still one fault, but this is the first run with the
+resolution to say the *shape* isn't identical either).
+
+**Conclusion: heading is not just ruled out by the yaw data (9.4d) — the
+track itself doesn't have the shape a heading fault would produce.**
+`EKF2_EV_DELAY` is real but too fast to explain a 100+-second transient
+(9.4c). What's left, per ADR-0002, is **lag or loop gain in the
+position-hold loop**: a roughly constant-direction bias appearing at the
+cut, met with an underdamped response that overshoots twice before
+settling onto the wrong position rather than the right one.
+
+## Task 9.4e (2026-08-14) — replay sweep: every EV_* candidate killed
+
+PX4's offline replay module (`src/modules/replay`) had never been built in
+this checkout. Building it (`replay=<ulog> make px4_sitl_default`, which
+configures a separate `build/px4_sitl_default_replay` with
+`ORB_USE_PUBLISHER_RULES` and lockstep disabled) surfaced two pre-existing
+upstream bugs, neither related to this project's code, both fixed directly
+since they blocked the build outright:
+
+- `platforms/posix/src/px4/common/px4_daemon/pxh.cpp` used `uint8_t`
+  without including `<cstdint>` — silently relying on a transitive include
+  the normal SITL build happens to pull in first, which the replay build's
+  different translation-unit ordering doesn't. Added the include.
+- `src/lib/matrix/matrix/Matrix.hpp:96` — GCC's `-Werror=array-bounds`
+  false-positives on the generic `operator()` accessor for a 1×1 matrix
+  instantiation, a known category of GCC false positive on heavily-templated
+  fixed-size containers, guarded by an `assert` the compiler can't see at
+  `-Werror` optimisation levels. Wrapped the one line in a
+  `#pragma GCC diagnostic ignored "-Warray-bounds"` push/pop.
+
+**Mechanics worth recording for next time:** `rc.replay` auto-generates
+`replay_params.txt` from the log's initial params via `ulog_params` — a
+`pyulog` console script that isn't on PATH inside PX4's minimal replay
+shell, so it silently produces an *empty* override file rather than erroring
+loud. To override a specific param, pre-create `replay_params.txt` yourself
+in `build/px4_sitl_default_replay/rootfs/<instance>/` before starting —
+`rc.replay` only generates one if the file doesn't already exist, and any
+param named in it is frozen for the whole replay (`Replay::_overridden_params`
+skips that param's historical change events from the log entirely, so a
+frozen override survives the original flight's own phase transitions
+untouched — GPS_CTRL and EV_CTRL's real cut/restore timeline replays
+normally as long as you don't put those specific names in the file
+yourself). `PX4_SIM_SPEED_FACTOR` had no measurable effect (1 vs 8 gave
+identical ~15.6 s wall time for a 217 s log) — this box is CPU-bound well
+above real-time regardless, not wall-clock-throttled. One trap: a replayed
+ulog's own `changed_parameters` timestamps are wall-clock-at-apply, which
+during a compressed CPU-bound replay do **not** preserve original spacing —
+the GPS-denied window that took 106 s in the original flight showed as
+0.43 s in one replayed ulog's raw parameter-change log. **The individual
+topics' own embedded timestamps (`vehicle_local_position.timestamp`,
+`sensor_combined.timestamp`, etc.) are unaffected** — confirmed by
+`sensor_combined`'s replayed median dt sitting at 4.52 ms, matching the
+original IMU rate — so EKF2 itself still integrated over correctly-paced
+data. Window boundaries were located from `vehicle_local_position`'s own
+span, not from `changed_parameters`.
+
+**Validation:** replayed run 6's own ulog with no overrides and compared
+against the original. Peak excursion 266.0 m at t+59.5s, settling to
+225.3 m — against the original's 267.7 m at t+60.1s, settling to 225.0 m.
+Within 2 m and 0.6 s. The replay reproduces the original EKF2 estimate
+closely enough to trust the sweep.
+
+**The sweep**, one factor at a time from the as-flown baseline
+(`EKF2_EV_DELAY=0`, `EKF2_EVP_NOISE=3.0`, `EKF2_EV_CTRL=9`):
+
+| Candidate | Peak (m) | Peak @ t+s | Settled (m) | Settled bearing std (deg) |
+|---|---|---|---|---|
+| baseline, as flown | 266.0 | 59.5 | 225.3 | 0.31 |
+| `EKF2_EV_DELAY=83` (9.4c's measured value) | 267.5 | 59.6 | 225.2 | 0.31 |
+| `EKF2_EVP_NOISE=0.5` (the pre-2026-08-13 value) | 266.3 | 59.3 | 224.1 | 0.37 |
+| `EKF2_EVP_NOISE=6.0` (looser than baseline) | 266.9 | 59.6 | 224.7 | 0.33 |
+| `EKF2_EV_CTRL=1` (bit3/yaw fusion off) | 257.7 | 57.3 | 225.9 | 0.32 |
+
+**Every candidate was killed.** All five runs — including the one that
+removes yaw fusion entirely — land within about 4% of each other on peak
+excursion, within 2.3 s on timing, within 2 m on where they settle, and
+within 0.06° on how tightly the bearing locks. Nothing tested moves the
+needle.
+
+**Why, and what it means:** replay is open-loop — EKF2 is re-fed the exact
+same recorded `vehicle_visual_odometry` stream the real, closed-loop flight
+produced, regardless of what `EKF2_EV_*` params are set to. That the result
+barely changes says EKF2's output here is dominated by directly tracking
+the vision measurement's own trajectory, not by how it weighs, delays, or
+rotates that measurement. **The three params 9.4e was scoped to test are
+not the lever.** The instability is either upstream of EKF2 entirely — a
+property of the closed loop between real aircraft motion and the vision
+estimator's own output that no open-loop replay can reproduce (the real
+aircraft moving in response to a bad estimate is what feeds the camera the
+next bad frame) — or downstream of EKF2, in the position controller's own
+gains (`MPC_XY_*`), which this sweep never touched. Both point away from
+EKF2 tuning and toward either a closed-loop flight test with controller
+gains changed, or accepting that replay has reached the limit of what it
+can diagnose here.
+
+**Task 9.4 is complete.** Heading is ruled out (9.4d), the track is a
+straight-line damped overshoot rather than an orbit (9.4b), the applied EV
+delay is real but too fast and not a sim-rate artifact (9.4c), and the
+three EKF2 vision-fusion parameters it was reasonable to suspect are all
+individually ruled out (9.4e). **No single parameter change is justified
+by this data.** Task 8.6 remains unattempted at its current bar (180 s,
+non-growing excursion) — per the plan, it was only to be retried "with
+whatever single change 9.4 justified," and 9.4 justified none. The next
+step this points to is outside Task 9's scope: either an `MPC_XY_*`
+gain sweep (same replay limitation applies — position-controller output
+isn't in the loop during EKF2-only replay, so this would need a live
+flight, not a replay) or accepting the open-loop ceiling and designing a
+way to probe the closed-loop interaction directly.
+
+## Pre-flight check for the MPC_XY_* gain sweep (2026-08-14) — the estimator was not significantly wrong
+
+Before committing flight time to `docs/superpowers/specs/2026-08-14-mpc-xy-gain-sweep-design.md`'s
+gain sweep, one question needed a cheap answer first: is the ~225 m
+excursion downstream of a genuinely bad vision *position claim* (in which
+case no controller gain fixes it — MPC is correctly flying to cancel a
+wrong number), or is it a real, physical flight the aircraft actually took
+(in which case controller dynamics are a legitimate thing to test)?
+
+`drift_m` — the raw estimator's own position solve vs. ground truth, in its
+own frame, already logged every tick — answers this directly, pulled from
+run 6's `run.csv` (rows 0-5000, well before the contaminated tail noted in
+9.4c/d):
+
+| Window | `drift_m` | `excursion_m` (real aircraft displacement) |
+|---|---|---|
+| at the cut | 0.43 m | ~0 |
+| mid-overshoot (t+50-60s, near the 224 m peak) | 13.5 m (max 25.1 m) | 224.2 m |
+| settled tail (t+80-105s) | **7.1 m** (6.2-9.3 m) | **224.4 m** |
+
+**The estimator was never significantly wrong.** Even while the real
+aircraft sat 224 m from the intended hold point, its own position solve
+stayed within ~7-9 m of ground truth. A sensor that accurate cannot be the
+source of a 224 m error being faithfully "corrected" — **the aircraft
+genuinely, physically flew there**, and vision tracked that real flight
+accurately the whole way. This rules out the hypothesis (raised and
+initially favored in conversation before this check) that the vision
+estimate itself carries a large, fixed position bias that MPC is merely
+executing.
+
+**One structural detail survives and matters:** `drift_m` was
+measurably worse during the fast overshoot itself (13-25 m) than once the
+aircraft stopped moving (7-9 m) — the same altitude/motion-dependent
+degradation in flow-odometry documented earlier in this file (climb drift
+23-37 m vs. hover drift 0.36-0.61 m, pre-`FrameAlignment`). This is
+consistent with a **closed loop, not a one-shot cause**: something at the
+cut provokes an initial controller response, the resulting fast motion
+degrades vision's momentary accuracy, the noisier estimate likely provokes
+more controller response, and the cycle only breaks once the aircraft's own
+motion slows enough for vision to recover to its normal ~7 m accuracy — at
+whatever new, wrong position it has by then reached.
+
+**This is evidence *for* the MPC_XY_* gain sweep, not against it.** A less
+aggressive controller response to the initial disturbance means less
+initial motion, which keeps vision in its well-conditioned (accurate)
+regime instead of triggering the degrade-then-amplify cycle. The gain
+sweep's premise — that the position controller, flying today on
+GPS-tuned defaults it has never had reason to question, is a legitimate
+and untested part of this failure — is now backed by a measurement, not
+just by 9.4e's process of elimination.

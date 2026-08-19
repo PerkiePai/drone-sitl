@@ -1158,21 +1158,32 @@ Ships as one batch, then one flight.
 
 ### Step 9.4 — The classification flight
 
-- [ ] **9.4a** Fly the standard profile to the cut, then hold **180 s**. Change
-      no parameter. Save the ulog before shutting Isaac down.
-- [ ] **9.4b** Classify the mode from the CSV: an orbit or spiral indicts
+- [x] **9.4a** Fly the standard profile to the cut, then hold **180 s**. Change
+      no parameter. Save the ulog before shutting Isaac down. Flown as run 6
+      (`20260813-231224`) — actual hold was 106 s, not 180 s (see 9.4d note).
+- [x] **9.4b** Classify the mode from the CSV: an orbit or spiral indicts
       heading; a straight-line back-and-forth indicts lag or loop gain.
-- [ ] **9.4c** From the ulog, plot applied EV delay (`estimator_aid_src_ev_pos`
+      **Straight line, one fixed bearing, damped overshoot to a false
+      steady-state — not a spiral.** See SESSION.md, Task 9.4b.
+- [x] **9.4c** From the ulog, plot applied EV delay (`estimator_aid_src_ev_pos`
       fusion timestamp vs sample timestamp) against `sim_rate`. If it tracks the
       rate, `EKF2_EV_DELAY` is a sim artifact and the answer is to stabilise the
-      rate, not to tune the param (ADR-0006).
-- [ ] **9.4d** Plot recorded magnetometer heading against the Mahony yaw and
+      rate, not to tune the param (ADR-0006). **It does not track the rate** —
+      see SESSION.md, Task 9.4c.
+- [x] **9.4d** Plot recorded magnetometer heading against the Mahony yaw and
       against GT yaw. This is what says whether the compass would have held it.
-- [ ] **9.4e** Offline replay sweep (`src/modules/replay`) over `EKF2_EV_DELAY`,
+      GT yaw was never recorded (only `gt_x`/`gt_y`); substituted an
+      independent raw-magnetometer heading computed from the ulog's
+      `sensor_mag` + `vehicle_attitude`. **Heading is ruled out** — see
+      SESSION.md, Task 9.4d.
+- [x] **9.4e** Offline replay sweep (`src/modules/replay`) over `EKF2_EV_DELAY`,
       `EKF2_EVP_NOISE` and `EKF2_EV_CTRL` with and without bit 3. **Open-loop**:
       it ranks candidates and kills bad ones; it cannot tell you the aircraft
-      would have stopped oscillating.
-- [ ] **9.4f** Record in `SESSION.md`, in the same run-by-run style.
+      would have stopped oscillating. **All four candidates killed** — none
+      changed the excursion shape by more than replay-to-replay noise. See
+      SESSION.md, Task 9.4e.
+- [x] **9.4f** Record in `SESSION.md`, in the same run-by-run style. Done
+      incrementally as each of 9.4b-e completed, plus a closing summary.
 
 Only then does 8.6 get attempted again, with whatever single change 9.4 justified.
 

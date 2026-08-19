@@ -669,3 +669,83 @@ sweep's premise — that the position controller, flying today on
 GPS-tuned defaults it has never had reason to question, is a legitimate
 and untested part of this failure — is now backed by a measurement, not
 just by 9.4e's process of elimination.
+
+## Task 10, Step 10.6 (2026-08-19) — the screening campaign's first live runs, three driver bugs found and fixed
+
+`sim/mpc_gain_sweep.py` had never been flown before this session. It took
+four live attempts to get real data, each exposing a real bug the offline
+test suite couldn't have caught (none of it is Isaac/PX4-testable offline —
+see the plan's Step 10.4 note on why). In order:
+
+**Run 1 — missing `offboard` command.** `fly_candidate()` called `arm` and
+`takeoff` but never `offboard`. `RUN-WEBSITE.md` documents these as three
+distinct commands; `takeoff()` only sets `AUTO.TAKEOFF` (`offboard.py:265`),
+a separate `offboard()` method is the actual `PX4_MAIN_MODE_OFFBOARD`
+switch. Every candidate's OFFBOARD wait was doomed to time out, and since a
+timed-out candidate never landed or disarmed, each next candidate's
+arm+takeoff stacked onto an aircraft still airborne from the last —
+confirmed live: altitude ran away to **-221 m NED**, a genuine and safely
+recoverable ~220 m stable hover (not a crash; landed and disarmed cleanly
+via a manual `land` command, ~6 minutes of real descent).
+
+**Run 2 (after the fix) — frozen vision channel, unrelated to the driver.**
+With `offboard` added, all 5 candidates "flew" — but `vio_x`/`vio_y` showed
+**exactly 1 distinct value across all 12,148 phase-2 rows**, while
+`vio_yaw` and PX4's own `px4_n`/`px4_e` moved normally. Ground truth
+(`gt_x`/`gt_y`) was frozen too. Read as `vio-streamer.py` (inside Kit's own
+Python interpreter) having stopped publishing genuinely new camera/GT data
+at the source, most likely a casualty of run 1's runaway climb — the
+estimator kept "sending" (fresh=True, dropped_stale=0) but the payload
+never changed. A full Isaac Sim restart was needed; not a driver bug.
+
+**Run 3 (fresh Isaac) — arm/takeoff race.** `arm`, `takeoff`, `offboard`
+were sent back-to-back with no wait. `arm` takes about a second to actually
+register; sending `takeoff` before it lands means PX4 refuses the
+`AUTO.TAKEOFF` switch (can't take off disarmed) while `offboard`'s mode
+switch succeeds regardless (switching modes doesn't require arming) — so
+the aircraft sat on the ground in `OFFBOARD` mode the whole "flight"
+(confirmed: `px4_d` moved from spawn to ground level in ~15 sim-s and then
+never changed again for 200+ sim-s). Fixed: wait for `armed=True` before
+`takeoff`, and for `AUTO.LOITER` (climb genuinely complete) before
+`offboard`.
+
+**Run 4 (after the race fix) — climb timeout too tight.** 2 of 5 candidates
+climbed to `AUTO.LOITER` inside the shared 30 sim-s `OFFBOARD_TIMEOUT_S`;
+3 of 5 didn't, in the same campaign — a real climb apparently sits close
+enough to that budget that clearing it is closer to a coin flip than a
+real pass/fail signal. Split into its own `CLIMB_TIMEOUT_S = 90.0`.
+
+**Run 5 (after all four fixes) — real data.** 4 of 5 candidates produced
+real phase-2 segments (`low_integral` still hit `failed_to_climb` once,
+most likely stray GPU contention rather than a remaining bug — every other
+candidate that reached this step climbed fine). Every failure branch now
+prints its status; before this session they were silent, which is
+precisely why bug #1 took an unbounded climb to even notice.
+`analyze_gain_sweep.py`'s `rank_candidates()` also only counted
+`status=="flown"`, silently dropping every `aborted` candidate — exactly
+the ones D5's abort logic exists to preserve data from. Fixed to include
+both.
+
+**Ranked result** (`logs/20260819-screen-v3/run.csv` +
+`logs/20260819-screen-v5/campaign_20260819-screen-v5.json`):
+
+| candidate | status | peak excursion (m) | trend slope (m/s) | trend |
+|---|---|---|---|---|
+| `gentler_p` | aborted | 112.9 | 4.075 | growing |
+| `baseline` | flown (full 70 s) | 158.6 | 4.538 | growing |
+| `gentle_combo` | aborted | 400.5 | 13.640 | growing |
+| `more_damping` | aborted | 400.7 | 11.109 | growing |
+| `low_integral` | no data (`failed_to_climb`) | — | — | — |
+
+Every candidate that produced data shows a **growing** trend, including
+`baseline` — none settled, consistent with the instability Task 9 already
+characterized. `gentler_p` (`MPC_XY_P=0.5`, `MPC_XY_VEL_P_ACC=1.2`, gains
+otherwise at default) is the clear standout: lowest peak by a wide margin
+and the shallowest growth. `more_damping` and `gentle_combo` both ran
+straight into the 400 m abort ceiling — more D and less I, respectively,
+both made things markedly worse, not better. `low_integral`'s own effect
+in isolation (same P/D as baseline, only I lowered) is still unknown.
+
+Not yet done: filling in `low_integral`'s missing data, and Step 10.7's
+confirmation flight (180 s, ADR-0001's actual bar) for whichever candidate
+is chosen — `gentler_p` on the data so far.

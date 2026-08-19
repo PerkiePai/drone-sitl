@@ -1226,6 +1226,19 @@ this exists").
 > relative path, present regardless of this task's changes and absent when
 > run from the top-level checkout). **10.6–10.7 (the live screening and
 > confirmation flights) not yet attempted.**
+>
+> **Status 2026-08-19, later — 10.6 done.** `sim/mpc_gain_sweep.py` had
+> never flown before this session and took four live attempts to get real
+> data, each exposing a genuine bug (missing `offboard` command; a frozen
+> vision channel traced to run 1's runaway climb, needing an Isaac restart;
+> an arm/takeoff race; too-tight a climb timeout) plus one analyzer bug
+> (`rank_candidates` silently dropped every `aborted` candidate). All fixed
+> and committed. Full write-up in `SESSION.md`, Task 10 Step 10.6. Ranked
+> result: `gentler_p` is the clear standout (112.9 m peak vs. `baseline`'s
+> 158.6 m; `more_damping`/`gentle_combo` both ran into the 400 m abort
+> ceiling); `low_integral` still has no data (`failed_to_climb`, most
+> likely stray GPU contention). **10.7 (confirmation flight) not yet
+> attempted.**
 
 ### Step 10.1 — `MPC_XY_DEFAULTS` and `revert_mpc_gains`
 
@@ -2057,14 +2070,14 @@ git commit -m "feat(vio): analyze_gain_sweep.py ranking script"
 
 ### Step 10.6 — The screening campaign (manual, live)
 
-- [ ] **10.6a** Bring the stack up:
+- [x] **10.6a** Bring the stack up:
 
 ```bash
 DRONE_SETUP_DOWN_VIB_DAMP=False VIO=1 ./sim/launch-sitl.sh
 python joystick-server.py --takeoff-alt 50 --run-name 20260815-screen
 ```
 
-- [ ] **10.6b** Run the screen:
+- [x] **10.6b** Run the screen:
 
 ```bash
 conda run -n drone python sim/mpc_gain_sweep.py \
@@ -2076,10 +2089,10 @@ conda run -n drone python sim/mpc_gain_sweep.py \
       wrong with the harness, not the candidate, since `baseline` is what
       every prior run already flew successfully.
 
-- [ ] **10.6c** `sim/save-ulog.sh 20260815-screen` before shutting Isaac down
+- [x] **10.6c** `sim/save-ulog.sh 20260815-screen` before shutting Isaac down
       (ADR-0003 — the ulog dies with the process otherwise).
 
-- [ ] **10.6d** Rank the results:
+- [x] **10.6d** Rank the results:
 
 ```bash
 conda run -n drone python sim/analyze_gain_sweep.py \
@@ -2087,7 +2100,7 @@ conda run -n drone python sim/analyze_gain_sweep.py \
     logs/20260815-screen/campaign_20260815-screen.json
 ```
 
-- [ ] **10.6e** Record the ranked table in `SESSION.md`, in the same
+- [x] **10.6e** Record the ranked table in `SESSION.md`, in the same
       run-by-run style as Task 9.
 
 ### Step 10.7 — The confirmation flight (manual, live)

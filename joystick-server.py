@@ -647,6 +647,7 @@ class SetpointLoop(threading.Thread):
                   "GNSS was never cut. ***")
             return
         vision_bridge.apply_ekf2_gnss_restore_params(self.link)
+        vision_bridge.revert_mpc_gains(self.link)
         was_denied = self._gps_denied
         self._gps_denied = False
         with self._telem_lock:

@@ -1347,6 +1347,21 @@ def test_restoring_gnss_leaves_vision_fusing():
     assert sent.get("EKF2_EV_CTRL") != 0, "the restore must not unfuse vision"
 
 
+def test_restoring_gnss_reverts_mpc_gains_to_defaults():
+    """D4: whatever gain set was active during a GPS-denied hold must not
+    silently carry into a route or manual flight afterward -- symmetric with
+    the EKF2_GPS_CTRL revert this same command already performs."""
+    js = _load_server()
+    loop = _denied_loop(js, 59)
+    sent = {}
+    loop.link.set_param = lambda name, value, ptype: sent.__setitem__(name, value)
+
+    loop._run_command("gps_restore")
+
+    for name, value, _ in vision_bridge.MPC_XY_DEFAULTS:
+        assert sent[name] == value
+
+
 def test_restoring_gnss_is_never_refused():
     """Every refusal on the cut exists because cutting onto a bad source can
     put the aircraft in the ground. Restoring has no such failure mode, and a

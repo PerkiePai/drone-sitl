@@ -51,6 +51,13 @@ SCREEN_HOLD_S = 70.0
 CONFIRM_HOLD_S = 180.0
 SETTLE_S = 20.0
 OFFBOARD_TIMEOUT_S = 30.0
+CLIMB_TIMEOUT_S = 90.0
+"""AUTO.TAKEOFF -> AUTO.LOITER, separate from OFFBOARD_TIMEOUT_S: confirmed
+live that a real climb to MIS_TAKEOFF_ALT sits close enough to 30 sim-s that
+whether it lands just under or just over is closer to a coin flip than a
+real failure -- 2 of 5 candidates climbed fine inside 30s, 3 of 5 didn't, in
+the same campaign. Generous margin here costs nothing but wall-clock time on
+a candidate that would have climbed fine anyway."""
 
 ABORT_EXCURSION_M = 400.0
 """D5: well past the worst peak seen so far, ~268 m (SESSION.md, run 6)."""
@@ -125,6 +132,22 @@ class Campaign:
             if elapsed >= timeout_s:
                 return telem
 
+    async def _recover(self):
+        """Best-effort return to a clean disarmed state after a candidate
+        fails early. Without this, the next candidate's arm/takeoff/offboard
+        stacks onto an aircraft still airborne from the failed one -- exactly
+        what turned five failed OFFBOARD attempts into an unbounded climb the
+        first time this driver ran live. gps_restore is deliberately
+        ungated/idempotent (harmless even if GNSS was never cut), matching
+        the same land-then-disarm shape as a normal candidate's own ending.
+        """
+        print(">>> recovering: land and disarm before the next candidate")
+        await self._cmd("gps_restore")
+        await self._cmd("land")
+        await self._wait_for(lambda t: t.get("mode") == "AUTO.LAND", 10.0,
+                             sim_time=False)
+        await self._cmd("disarm")
+
     async def fly_candidate(self, name, hold_s):
         gains = CANDIDATES[name]
         record = {"name": name, "gains": dict(zip(GAIN_PARAMS, gains)),
@@ -136,15 +159,47 @@ class Campaign:
             await self._set_gain(param_name, value)
 
         await self._cmd("arm")
+        telem = await self._wait_for(lambda t: t.get("armed") is True, 10.0,
+                                     sim_time=False)
+        if not telem.get("armed"):
+            # Never armed -- nothing airborne to land, so no _recover() call.
+            record["status"] = "failed_to_arm"
+            print(f">>> candidate {name}: {record['status']}")
+            return record
+
         await self._cmd("takeoff")
+        # Wait for the climb to actually finish (PX4 auto-transitions
+        # AUTO.TAKEOFF -> AUTO.LOITER on reaching MIS_TAKEOFF_ALT) before
+        # switching to OFFBOARD. Sending "offboard" immediately after
+        # "takeoff" races AUTO.TAKEOFF's own climb: OFFBOARD's zero-velocity
+        # setpoint (nothing commands forward/up motion) wins the race and
+        # the aircraft never leaves the ground -- confirmed live: mode
+        # reached OFFBOARD while px4_d stayed pinned at ground level for the
+        # entire remaining hold.
+        telem = await self._wait_for(lambda t: t.get("mode") == "AUTO.LOITER",
+                                     CLIMB_TIMEOUT_S)
+        if telem.get("mode") != "AUTO.LOITER":
+            record["status"] = "failed_to_climb"
+            print(f">>> candidate {name}: {record['status']}")
+            await self._recover()
+            return record
+
+        await self._cmd("offboard")
         telem = await self._wait_for(lambda t: t.get("mode") == "OFFBOARD",
                                      OFFBOARD_TIMEOUT_S)
         if telem.get("mode") != "OFFBOARD":
             record["status"] = "failed_to_offboard"
+            print(f">>> candidate {name}: {record['status']}")
+            await self._recover()
             return record
 
-        await self._wait_for(lambda t: t.get("vision_fusing"),
-                             OFFBOARD_TIMEOUT_S)
+        telem = await self._wait_for(lambda t: t.get("vision_fusing"),
+                                     OFFBOARD_TIMEOUT_S)
+        if not telem.get("vision_fusing"):
+            record["status"] = "failed_to_fuse"
+            print(f">>> candidate {name}: {record['status']}")
+            await self._recover()
+            return record
         await self._wait_for(lambda t: False, SETTLE_S)   # just settle
 
         await self._cmd("gps_denied")
@@ -157,6 +212,8 @@ class Campaign:
                                          sim_time=False)
             if not telem.get("gps_denied"):
                 record["status"] = "failed_to_cut"
+                print(f">>> candidate {name}: {record['status']}")
+                await self._recover()
                 return record
 
         alt_at_cut = telem.get("alt_m")

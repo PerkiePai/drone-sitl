@@ -69,3 +69,26 @@ def test_rank_candidates_orders_by_peak_excursion(tmp_path):
 
     results = ags.rank_candidates(str(csv_path), str(sidecar_path))
     assert [r["name"] for r in results] == ["B", "A"]   # 5 m ranks before 20 m
+
+
+def test_rank_candidates_includes_aborted_not_just_flown(tmp_path):
+    """D5's whole point is that a bad candidate still teaches the sweep
+    something -- an aborted candidate's real phase-2 data must not be
+    silently dropped just because it did not finish its full hold."""
+    csv_path = tmp_path / "run.csv"
+    with open(csv_path, "w") as f:
+        f.write("sim_s,phase,excursion_m\n")
+        for t in range(0, 10):
+            f.write(f"{t},2,50.0\n")
+
+    sidecar_path = tmp_path / "campaign.json"
+    sidecar = {"campaign": "test", "candidates": [
+        {"name": "A", "gains": {}, "hold_s": 70, "status": "aborted"},
+        {"name": "B", "gains": {}, "hold_s": 70, "status": "failed_to_climb"},
+    ]}
+    with open(sidecar_path, "w") as f:
+        json.dump(sidecar, f)
+
+    results = ags.rank_candidates(str(csv_path), str(sidecar_path))
+    assert [r["name"] for r in results] == ["A"]
+    assert results[0]["status"] == "aborted"

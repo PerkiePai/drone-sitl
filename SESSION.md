@@ -746,6 +746,47 @@ straight into the 400 m abort ceiling — more D and less I, respectively,
 both made things markedly worse, not better. `low_integral`'s own effect
 in isolation (same P/D as baseline, only I lowered) is still unknown.
 
-Not yet done: filling in `low_integral`'s missing data, and Step 10.7's
-confirmation flight (180 s, ADR-0001's actual bar) for whichever candidate
-is chosen — `gentler_p` on the data so far.
+## Task 10, Step 10.7 attempt (2026-08-19) — `low_integral` retried at confirm duration, closest yet but still no pass
+
+`low_integral` (`MPC_XY_VEL_I_ACC=0.05`, otherwise baseline) had no data
+after Step 10.6 (`failed_to_climb` once, most likely stray GPU contention —
+every other candidate that reached that step climbed fine). Re-run directly
+at `confirm:` duration (180 s) rather than the 70 s screen, so it doubles as
+its own screening fill-in and — had it passed — the actual Step 10.7
+confirmation flight.
+
+It climbed and cut cleanly this time, ruling out a real driver bug for the
+earlier failure. **It is the new best candidate by both metrics** — peak
+excursion 78.1 m (vs. `gentler_p`'s 112.9 m) and trend slope 2.04 m/s, the
+shallowest growth of any candidate flown. But it did not hold the full
+180 s: D5's altitude-drop abort fired at t+~73 s of the hold — altitude at
+the cut was 24.6 m, at the abort 4.5 m, a genuine 20.1 m descent (well
+above ground_z the whole way, not the flat-plane sign-convention trap).
+Excursion at that point was 78 m, nowhere near the 400 m ceiling — this was
+purely an altitude-instability abort, not a horizontal runaway.
+
+**Full ranked result, all 5 candidates:**
+
+| candidate | status | peak excursion (m) | trend slope (m/s) | trend |
+|---|---|---|---|---|
+| `low_integral` | aborted (alt-drop, 180 s attempt) | 78.1 | 2.042 | growing |
+| `gentler_p` | aborted (70 s screen) | 112.9 | 4.075 | growing |
+| `baseline` | flown (full 70 s) | 158.6 | 4.538 | growing |
+| `gentle_combo` | aborted (70 s screen) | 400.5 | 13.640 | growing |
+| `more_damping` | aborted (70 s screen) | 400.7 | 11.109 | growing |
+
+**Every candidate shows a growing trend — none settled, and no candidate
+has yet achieved ADR-0001's actual bar (180 s, non-growing excursion
+envelope). 8.6 remains open.** `low_integral` is the most promising point
+found so far by a clear margin, but its own confirmation-duration attempt
+failed on altitude, not excursion — a different failure signature than the
+horizontal-runaway pattern `more_damping`/`gentle_combo` show, and worth
+noting for whatever comes next: lower integral gain looks like it helps the
+horizontal hold but may be trading into a vertical-hold weakness the 70 s
+screen bar wouldn't have caught (D5's alt-drop check exists for exactly
+this — SESSION.md's own reasoning for including it as a second, independent
+abort condition alongside excursion).
+
+Ulogs for every run archived under `logs/20260819-screen-v5/` (the 4-of-5
+screening candidates) and `logs/20260819-lowint/` (`low_integral`'s
+confirm-duration attempt).

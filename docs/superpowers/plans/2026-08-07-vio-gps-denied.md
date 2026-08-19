@@ -1038,6 +1038,13 @@ Order matters: each step isolates one failure class.
 > estimator drift (ADR-0004), the estimator has no heading reference at all while
 > EKF2 does (ADR-0005), and `EKF2_EV_DELAY` is measured on a clock whose rate
 > wanders (ADR-0006).
+>
+> **Status 2026-08-19 (Task 10):** 8.6 retried with the best `MPC_XY_*`
+> candidate the gain sweep found (`low_integral`), at the full 180 s bar.
+> **Still fails** — an altitude-drop abort at t+~73 s (24.6 m → 4.5 m), not
+> a horizontal runaway. Best result yet (78 m peak excursion, vs. 220-270 m
+> in every pre-Task-10 attempt) but not a pass. See `SESSION.md`, Task 10
+> Step 10.7 attempt, and Task 10's own status blockquote.
 
 - [x] **8.1** `DRONE_SETUP_DOWN_VIB_DAMP=False ./sim/launch-sitl.sh` → drone
       spawned, Play pressed, MJPEG on 8080. **Done 2026-08-11.**
@@ -1239,6 +1246,16 @@ this exists").
 > ceiling); `low_integral` still has no data (`failed_to_climb`, most
 > likely stray GPU contention). **10.7 (confirmation flight) not yet
 > attempted.**
+>
+> **Status 2026-08-19, later still.** `low_integral` re-run at confirm
+> duration (180 s) to fill its gap: climbed and cut cleanly (the earlier
+> failure was not a real bug), and is now the best candidate found —
+> 78.1 m peak, 2.04 m/s slope, both better than `gentler_p`. But it did not
+> hold the full 180 s either: D5's altitude-drop abort fired at t+~73 s
+> (24.6 m → 4.5 m, a genuine descent, not a horizontal runaway — excursion
+> was only 78 m at that point, nowhere near the 400 m ceiling). **8.6 is
+> still open** — no candidate in this sweep has yet passed ADR-0001's bar.
+> Full ranked table and detail in `SESSION.md`, Task 10 Step 10.7 attempt.
 
 ### Step 10.1 — `MPC_XY_DEFAULTS` and `revert_mpc_gains`
 
@@ -2105,7 +2122,7 @@ conda run -n drone python sim/analyze_gain_sweep.py \
 
 ### Step 10.7 — The confirmation flight (manual, live)
 
-- [ ] **10.7a** Whichever candidate ranked best on both peak excursion and
+- [x] **10.7a** Whichever candidate ranked best on both peak excursion and
       trend (D3) gets one full 180 s flight, unless `baseline` won — a
       baseline win means the sweep found nothing, which is Task 10's own
       valid negative result (design doc, "Goal"), and 8.6 is not retried.
@@ -2117,12 +2134,12 @@ conda run -n drone python sim/mpc_gain_sweep.py \
 sim/save-ulog.sh 20260815-confirm
 ```
 
-- [ ] **10.7b** Judge the confirmation flight against ADR-0001's actual bar —
+- [x] **10.7b** Judge the confirmation flight against ADR-0001's actual bar —
       non-growing excursion envelope over three or more oscillation periods,
       not the 70 s screening bar. If it passes, **8.6 passes**; check it off
       in Task 8 and record the winning gain set in `SESSION.md`.
 
-- [ ] **10.7c** Record the outcome — pass or fail — in `SESSION.md` and in
+- [x] **10.7c** Record the outcome — pass or fail — in `SESSION.md` and in
       Task 8's status blockquote either way. A failing confirmation is a
       real result too: it means the position-controller gains were not the
       lever either, and per the design doc's "Why this exists", suspicion

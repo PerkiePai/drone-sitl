@@ -1,3 +1,52 @@
+# autopilot_poc.py -- how to run it
+
+**Date:** 2026-08-19
+**What it is:** a scripted flight that drives `joystick-server.py`'s existing
+`/ws` protocol from Python instead of a browser -- same axis/cmd/ping messages
+`web/js/controls.js` sends, replayed by a client. No server or protocol
+changes. Proves an external script can fly the drone through the unmodified
+web interface. See `autopilot_poc.py`'s module docstring for the full
+ARM -> TAKEOFF -> OFFBOARD -> fly -> LAND sequence it replays.
+
+**Status:** implemented, validated against a throwaway mock of the `/ws`
+protocol (state machine, message ordering, timeouts all correct). **Not yet
+flown against real Isaac Sim + PX4 SITL.**
+
+## Run it
+
+Three things, same order as flying by hand -- the script only replaces the
+browser for the last step.
+
+```bash
+git branch --show-current      # feat/joystick-autopilot-poc
+
+# 1. Isaac Sim
+./sim/launch-sitl.sh
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/detect   # want 200
+
+# 2. joystick-server.py (separate terminal, not redirected)
+conda run -n drone python joystick-server.py
+# wait for its 4th startup line, ">>> params: ...", before continuing --
+# that's PX4 actually answering.
+
+# 3. the autopilot script (another terminal)
+conda run -n drone python autopilot_poc.py
+# --host <box-ip> if run from another machine; --port if joystick-server.py
+# was started on a non-default port.
+```
+
+Expected output is one line per confirmed step: `ARM confirmed`, `TAKEOFF
+complete, alt=5.0 m`, `OFFBOARD -- the joystick is live`, the forward/turn/
+climb holds, then `landed and disarmed`. Open `http://<box-ip>:8090/` in a
+browser at the same time to watch it fly -- the script and a browser are just
+two clients of the same `/ws`.
+
+If it hangs on `connected to joystick-server.py` never printing, or on `ARM
+confirmed`, the MAVLink link between `joystick-server.py` and PX4 is broken --
+same failure mode as the heartbeat issue below.
+
+---
+
 # Session notes: PX4 SITL never sent a heartbeat after the config-driven stage landed
 
 **Date:** 2026-08-07

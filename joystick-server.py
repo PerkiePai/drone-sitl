@@ -283,6 +283,11 @@ class SetpointLoop(threading.Thread):
             "sim_rate": 0.0,
             "ready_for_offboard": False,
             "streaming_s": 0.0,
+            # PX4's own clock (time_boot_ms / 1000), which under lockstep IS
+            # sim time. None until the first LOCAL_POSITION_NED. A websocket
+            # client (Task 10's gain-sweep driver) times its holds against
+            # this, never against wall time -- see that file's _wait_for.
+            "sim_s": None,
             # None when the server was started without --vision, so the page
             # can hide the row entirely rather than render a dead one.
             "vio": None,
@@ -380,7 +385,24 @@ class SetpointLoop(threading.Thread):
                 or name in self.MISSION_COMMANDS):
             self.commands.put(name)
 
-    def _run_command(self, name):
+    def submit_set_param(self, name, value, param_type):
+        """Called from the web thread. Queue only -- never touches `conn`.
+
+        A separate method rather than routing through `submit(name)`: that
+        one is a bare-string allowlist gate and every existing caller (the
+        page, the mission verbs) relies on it staying that shape. set_param
+        carries a payload, so it gets its own front door and its own tuple
+        shape on the queue instead of overloading `submit`'s contract.
+        """
+        self.commands.put(("set_param", name, value, param_type))
+
+    def _run_command(self, item):
+        if isinstance(item, tuple):
+            _, name, value, param_type = item
+            self.link.set_param(name, value, param_type)
+            print(f">>> set_param: {name}={value}")
+            return
+        name = item
         if name == "gps_denied":
             self._go_gps_denied()
             return
@@ -883,6 +905,8 @@ class SetpointLoop(threading.Thread):
                 self._px4_ned = (msg.x, msg.y, msg.z)
                 self._px4_vel = (msg.vx, msg.vy, msg.vz)
                 self._px4_sim_s = msg.time_boot_ms / 1000.0
+                with self._telem_lock:
+                    self._telem["sim_s"] = self._px4_sim_s
                 # Sim clock vs wall clock, measured over a rolling 3 s window.
                 wall = time.monotonic()
                 if self._sim_ref is None:
@@ -1218,7 +1242,11 @@ def build_app(loop_thread, state, video_port, mission_speed, recorder):
                     if msg.get("pressed"):
                         loop_thread.submit("mission_pause")
                 elif kind == "cmd":
-                    loop_thread.submit(msg["name"])
+                    if msg["name"] == "set_param":
+                        loop_thread.submit_set_param(
+                            msg["param"], msg["value"], msg["param_type"])
+                    else:
+                        loop_thread.submit(msg["name"])
                 elif kind == "mission":
                     action = msg.get("action")
                     if action == "fly":

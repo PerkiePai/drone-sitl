@@ -1405,3 +1405,42 @@ def test_restore_without_vision_does_not_touch_ekf2():
     loop._run_command("gps_restore")
 
     assert sent == [], sent
+
+
+# --- sim_s telemetry and set_param (Task 10) --------------------------------
+
+def test_local_position_ned_updates_alt_and_sim_s_telemetry():
+    """sim_s is PX4's own clock, which under lockstep IS sim time -- Task 10's
+    gain-sweep driver waits on it rather than wall time (SESSION.md's
+    wall-vs-sim-clock lesson, already hit three times in this project)."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 100}")
+    loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0), rate_hz=20.0)
+    msgs = iter([_local_pos(time_boot_ms=42_000, z=-24.9)])
+    loop.conn.recv_match = lambda **kw: next(msgs, None)
+
+    loop._drain_mavlink()
+
+    assert loop.telemetry()["alt_m"] == pytest.approx(24.9)
+    assert loop.telemetry()["sim_s"] == pytest.approx(42.0)
+
+
+def test_set_param_is_accepted_from_the_page():
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 101, _pose(), received_at=time.monotonic())
+    loop.submit_set_param("MPC_XY_P", 0.5, offboard.MAV_PARAM_TYPE_REAL32)
+    assert loop.commands.get_nowait() == (
+        "set_param", "MPC_XY_P", 0.5, offboard.MAV_PARAM_TYPE_REAL32)
+
+
+def test_run_command_applies_a_set_param_tuple():
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 102, _pose(), received_at=time.monotonic())
+    sent = {}
+    loop.link.set_param = (
+        lambda name, value, ptype: sent.__setitem__(name, (value, ptype)))
+
+    loop._run_command(("set_param", "MPC_XY_P", 0.5,
+                       offboard.MAV_PARAM_TYPE_REAL32))
+
+    assert sent["MPC_XY_P"] == (0.5, offboard.MAV_PARAM_TYPE_REAL32)

@@ -91,6 +91,9 @@ def test_websocket_accepts_control_messages_and_pushes_telemetry(server):
                                       "pressed": True}))
             await ws.send(json.dumps({"type": "ping"}))
             await ws.send(json.dumps({"type": "cmd", "name": "arm"}))
+            await ws.send(json.dumps({
+                "type": "cmd", "name": "set_param", "param": "MPC_XY_P",
+                "value": 0.5, "param_type": 9}))   # MAV_PARAM_TYPE_REAL32
 
             later = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
             assert later["streaming_s"] > 0     # loop still running

@@ -1,4 +1,4 @@
-# Joystick flight control — operator handbook
+# RUN-WEBSITE — operator handbook
 
 Fly the Isaac Sim / Pegasus drone from a web page — by hand with six commands
 (forward, backward, turn left, turn right, ascend, descend), or autonomously by
@@ -8,15 +8,27 @@ control, not by moving the drone model directly.
 Manual and autonomous share **one** OFFBOARD setpoint stream, so touching the
 pad mid-route takes over in about two-thirds of a second with no mode switch.
 
+The same page and server also carry the **GPS-denied / VIO** work on
+`feat/vio-gps-denied`: a vision estimator can fuse alongside GPS and then take
+over from it entirely. That part is experimental — see the `vio` telemetry row
+in section 5.5 and `SESSION.md` for the current flight-test status before
+trusting it for anything beyond the pad and waypoint flying below.
+
 - **Design:** `docs/superpowers/specs/2026-07-30-joystick-offboard-design.md`
   and `docs/superpowers/specs/2026-07-31-map-waypoints-design.md`
-- **Build plan:** `docs/superpowers/plans/2026-07-30-joystick-offboard.md`
-  and `docs/superpowers/plans/2026-07-31-map-waypoints.md`
+- **Build plan:** `docs/superpowers/plans/2026-07-30-joystick-offboard.md`,
+  `docs/superpowers/plans/2026-07-31-map-waypoints.md`, and
+  `docs/superpowers/plans/2026-08-07-vio-gps-denied.md` (VIO/GPS-denied)
+- **Run history / current flight status:** `SESSION.md` — read this before a
+  GPS-denied flight; it is not yet reliable (see 5.5)
 
-> **Status:** flown and confirmed working on 2026-07-31 — ARM, TAKEOFF,
-> OFFBOARD, all six flight commands, and full waypoint missions (fly, take
-> over, resume, complete, re-fly, clear) verified against PX4 in Isaac Sim.
-> 94 automated tests pass. Section 9 covers what to do when something breaks.
+> **Status (2026-08-14):** ARM, TAKEOFF, OFFBOARD, all six flight commands,
+> and full waypoint missions (fly, take over, resume, complete, re-fly, clear)
+> are solid — unchanged since 2026-07-31. GPS-denied flight is real and
+> repeatable but does not yet hold station; `SESSION.md` has the run-by-run
+> detail. 247/249 automated tests pass offline (2 pre-existing environmental
+> failures, not caused by anything on this branch). Section 9 covers what to
+> do when something breaks.
 
 ---
 
@@ -27,18 +39,35 @@ pad mid-route takes over in about two-thirds of a second with no mode switch.
                                  │
                                  ▼
 Browser  ──WebSocket──►  joystick-server.py  ──UDP 14540──►  PX4 SITL
-(phone or laptop)          (port 8090)                          │
-    ▲                                                           │ TCP 4560
-    └────────── MJPEG, port 8080 ────────  Isaac Sim + Pegasus ──┘
+(phone or laptop)          (port 8090)          ▲   │              │
+    ▲                                           │   │ ZMQ 5557     │ TCP 4560
+    └────────── MJPEG, port 8080 ──┐            │   ▼              │
+                                    │      pipeline-streaming.py    │
+                          Isaac Sim + Pegasus ◄──┘   ▲              │
+                                    │  ZMQ 5556 ──────┘              │
+                                    └── vio-streamer.py (VIO=1 only) ┘
 ```
 
-Three ports matter:
+`vio-streamer.py` runs inside Isaac's physics callback and is separate from
+everything else — it only exists when the sim is launched with `VIO=1`.
+`pipeline-streaming.py` (the estimator) is spawned and supervised by
+`joystick-server.py` itself under `--vision` (the default); it consumes
+`vio-streamer`'s ZMQ feed on 5556 and publishes pose estimates on 5557, which
+`joystick-server.py` subscribes to and can fuse into EKF2 via MAVLink params.
+
+Ports that matter:
 
 | Port | Serves | Started by |
 |---|---|---|
 | 8080 | Camera video (MJPEG) | Isaac Sim script |
 | 8090 | The web page, `/vendor` assets, and `/ws` | `joystick-server.py` |
+| 8091 | VIO recorder control (`/record/start`, `/record/stop`) | Isaac Sim script |
 | 14540 | MAVLink to PX4 | PX4 SITL (auto-launched by Pegasus) |
+| 5556 | Sensor feed (IMU/baro/camera) for the estimator | `vio-streamer.py`, `VIO=1` only |
+| 5557 | Vision pose estimate (`VISION_POSITION_ESTIMATE` source) | `pipeline-streaming.py`, under `--vision` only |
+
+5556/5557 only exist for GPS-denied work. An ordinary GPS flight
+(`--no-vision`, or `VIO=0` at sim launch) never opens them.
 
 The satellite map needs **internet from the browser** (Esri World Imagery
 tiles). Leaflet itself is vendored into `web/vendor/` and served from port
@@ -158,6 +187,18 @@ SITE=bangkok-survey-040 ./sim/launch-sitl.sh           # which site (this is the
 SPAWN_XYZ='[12.0, -4.0, -26.5]' ./sim/launch-sitl.sh   # takeoff point (x=E, y=N, z=Up)
 HEADING_DEG=90 ./sim/launch-sitl.sh                    # compass heading
 AUTOPLAY=0 ./sim/launch-sitl.sh                        # spawn, but leave it stopped
+VIO=1 ./sim/launch-sitl.sh                             # also start vio-streamer.py, for GPS-denied flight
+```
+
+`VIO=1` publishes IMU/baro/camera over ZMQ:5556 for GPS-denied flight (section
+5.5). It is off by default because it runs from inside the physics callback
+PX4 SITL is lockstepped to, which is not a cost worth putting on an ordinary
+GPS flight. Pair it with `DRONE_SETUP_DOWN_VIB_DAMP=False` — the soft camera
+mount otherwise low-passes the body attitude, making the camera↔IMU extrinsic
+time-varying and the rig invalid for VIO:
+
+```bash
+DRONE_SETUP_DOWN_VIB_DAMP=False VIO=1 ./sim/launch-sitl.sh
 ```
 
 `SPAWN_XYZ`'s z is **absolute**, so an override has to account for the ground
@@ -217,10 +258,25 @@ In a terminal (not redirected to a file — you want to see the messages live):
 
 ```bash
 cd ~/pai/drone-sitl
-conda run -n drone python joystick-server.py
+conda run -n drone python joystick-server.py --takeoff-alt 50 --speed-up 3.0
 ```
 
-Expected output:
+(`--takeoff-alt`/`--speed-up` above are the values used for GPS-denied work —
+this site's down camera is blind below altitude, see 5.5. For plain pad/route
+flying the plain `joystick-server.py` with no flags, defaulting to a 5 m
+takeoff, is fine.)
+
+**`--vision` defaults ON** — the server always tries to fuse a vision estimate
+and, the first time, reboots PX4 once for `EKF2_HGT_REF` (see 5.5). This
+happens even on an ordinary GPS flight; it is the cost of a one-command
+default. Pass `--no-vision` for a plain GPS flight that touches no EKF2
+params and does not reboot PX4:
+
+```bash
+conda run -n drone python joystick-server.py --no-vision
+```
+
+Expected output, `--no-vision`:
 
 ```
 >>> MAVLink offboard link: udpin:0.0.0.0:14540
@@ -232,6 +288,11 @@ Expected output:
 **The fourth line is the one that matters.** It only appears once PX4 has
 actually answered. If the first three print but the fourth never does, the link
 to PX4 is broken — stop and go to 9.1. Nothing downstream will work.
+
+With `--vision` (the default), the same four lines print but interleaved with
+estimator startup (`>>> vision: HOLDING phase 0 until the airframe is at rest
+…`, `>>> vision SUB tcp://127.0.0.1:5557`, then a reboot). Give it a few extra
+seconds before judging the server dead.
 
 Find your box IP with `hostname -I | awk '{print $1}'`.
 
@@ -266,6 +327,46 @@ The telemetry row:
 `mode` shows what PX4 is really doing, not what you asked for. If PX4 drops out
 of OFFBOARD on its own, you see it here immediately and the joystick stops
 having any effect — by design, so a dead stick is never silent.
+
+### 5.5 The `vio` row, and GPS-denied flight (experimental)
+
+Under `--vision` (the default) a second telemetry row appears once the
+estimator has sent its first message:
+
+| Field | Meaning |
+|---|---|
+| `vio` | `fresh` (green) or `STALE` (red) — whether the last estimate is recent enough to trust |
+| `drift` | The estimator's own error vs ground truth, metres. Meaningless right after an estimator restart — it compares against the ORIGINAL spawn point. |
+| `exc` | **Aircraft excursion** — ground truth vs the hold point taken at the GNSS cut. `--` before a cut. This, not `drift`, is what says whether the aircraft is actually staying put. |
+| `pts` | Tracked feature inliers this frame |
+| `fix` | Estimator frame rate, Hz |
+| `align` | How far the last frame realignment (at fusion start, or at the cut) had to close |
+
+**The flow, in order:**
+
+1. **Climb.** The down camera is blind near the ground at `bangkok-survey-040`
+   (0 features below a few metres AGL) — GPS-denied flight is not possible
+   from the pad here. Climb on GPS first.
+2. **Vision starts fusing automatically** once the estimate clears
+   `VISION_MIN_INLIERS`, shown as `>>> vision: FUSING alongside GNSS (N
+   inliers)` in the server console and the **GO GPS-DENIED** button
+   un-greying on the page. GNSS is still on at this point — vision is only
+   riding alongside it.
+3. **Press GO GPS-DENIED** to cut GNSS. This is gated: refused if vision
+   isn't fusing, if the last estimate isn't fresh/healthy enough, or if there
+   is no PX4 pose to realign the vision frame onto first. A refusal prints
+   why in the server console.
+4. **Press RESTORE GNSS** any time to go back — this button is deliberately
+   **ungated**, unlike the cut. Recovering onto GPS has no failure mode the
+   cut needs to guard against.
+
+**Current status: the cut itself is solid, the hold is not.** Repeated flights
+hold station for tens of seconds to a couple of minutes and then oscillate or
+drift, sometimes to hundreds of metres, before self-correcting or landing
+safely once commanded. It has never crashed the aircraft, but do not treat
+`gps_denied` as production-ready — see `SESSION.md` for the full run-by-run
+history and `docs/adr/` for the open questions. Section 9.9 below covers the
+failure modes seen so far.
 
 ---
 
@@ -605,12 +706,40 @@ A quick way to tell how much is blocked, from the remote machine:
 
 ### 9.8 `Address already in use`
 
-An old server is still running:
+An old server is still running — check both the web port and, under
+`--vision`, the estimator's port, since killing `joystick-server.py` does
+**not** always take its `pipeline-streaming.py` child down with it (seen
+live: the child outlived the parent and squatted 5557, crash-looping the new
+server's estimator 3 times before it gave up retrying):
 
 ```bash
-ps -eo pid,cmd | grep "[j]oystick-server.py"
-kill <pid>
+ss -tlnp | grep -E ':8090|:5557'
+ps -eo pid,cmd | grep -E "[j]oystick-server.py|[p]ipeline-streaming.py"
+kill <pid>            # both, if two turn up
 ```
+
+If the estimator gives up after `*** estimator: exited 3 times in under 20s
+… NOT restarting again. ***`, clearing the port and restarting
+`joystick-server.py` is the only way back — there is no in-place retry
+trigger from the page.
+
+### 9.9 GPS-denied: oscillation or drift after the cut
+
+Known failure mode, not yet fixed (`SESSION.md`, run 5 onward). Symptoms seen
+so far:
+
+- A slow (tens-of-seconds-period) growing oscillation, `exc` swinging wider
+  each cycle.
+- A one-directional excursion that peaks (seen up to ~250 m) then partially
+  recovers and flattens out.
+
+In both cases `pts`/inliers stayed healthy and `fix` didn't collapse — this
+is a control/estimation instability downstream of a working vision track, not
+a tracking failure. Press **RESTORE GNSS**; it is ungated and always works.
+`alt` reading strongly negative near the ground is *not* necessarily a
+crash — `ground_z = -25.0` is a flat physics plane, not terrain, so e.g.
+`alt_m: -24.89` on the pad is correct, not a strike. Confirm with `armed` and
+`speed` before concluding anything.
 
 ---
 
@@ -626,10 +755,14 @@ conda run -n drone python joystick-server.py \
   --takeoff-alt 10.0 \     # higher takeoff (default 5.0 m)
   --mission-speed 5.0 \    # faster waypoint cruise (default 3.0 m/s)
   --arrival-radius 4.0 \   # waypoint counts as reached inside this (default 2.0 m)
-  --port 9000              # different web port (default 8090)
+  --port 9000 \            # different web port (default 8090)
+  --no-vision \            # plain GPS flight, no EKF2 params touched, no reboot
+  --no-estimator \         # keep vision fusion, but run pipeline-streaming.py yourself
+  --site bangkok-survey-040 \  # sim/sites.py key, supplies the GPS origin under --vision
+  --run-name my-flight-01  # names ./logs/<run-name>/run.csv under --vision
 ```
 
-`--help` lists all twelve flags.
+`--help` lists every flag (twenty-plus now that GPS-denied's are in).
 
 **Start slow.** 2 m/s is deliberately gentle so mistakes are recoverable and
 easy to see. Turn it up once you trust the setup.
@@ -680,14 +813,23 @@ can fly the drone. Fine on a trusted LAN, not fine on an open network.
 
 ```bash
 # one-time: cp sim/secrets.env.example sim/secrets.env && paste your ion token
+
+# plain GPS flight (pad + waypoints only):
 ./sim/launch-sitl.sh                                                    # stage + drone + Play
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/detect   # 200
-conda run -n drone python joystick-server.py                            # wait for line 4
+conda run -n drone python joystick-server.py --no-vision                # wait for line 4
 hostname -I | awk '{print $1}'                                          # your IP
+
+# GPS-denied / VIO stack (two commands, per SESSION.md):
+DRONE_SETUP_DOWN_VIB_DAMP=False VIO=1 ./sim/launch-sitl.sh
+conda run -n drone python joystick-server.py --takeoff-alt 50 --speed-up 3.0
+
 # browse to http://<ip>:8090/
 #   by hand : ARM -> TAKEOFF -> OFFBOARD -> fly -> LAND
 #   by route: ARM -> TAKEOFF -> OFFBOARD -> click map -> FLY
 #             pad to take over · RESUME to continue · CLEAR to abandon
+#   GPS-denied (--vision only): climb until GO GPS-DENIED un-greys -> press it
+#             -> RESTORE GNSS any time to abort (ungated)
 ```
 
 | | |
@@ -696,7 +838,8 @@ hostname -I | awk '{print $1}'                                          # your I
 | Video | `http://<box-ip>:8080/detect` |
 | Controls | pad: ▲ fwd ▼ back ↺↻ turn (WASD/arrows) · column: ascend/descend (Q/E) |
 | Speeds | 2 m/s horizontal, 1 m/s vertical, 45°/s turn, **3 m/s on a route** |
-| Takeoff | 5 m |
+| Takeoff | 5 m default (`--takeoff-alt`); GPS-denied runs use 50 m — this site's down camera is blind near the ground |
 | Route | click map to add · click marker to delete · one `alt` for the whole route · starts at waypoint 1 |
 | Takeover | any pad press pauses · RESUME continues · never leaves OFFBOARD |
-| Tests | `conda run -n drone pytest streaming/tests/ -q` (88 pass) |
+| GPS-denied | `--vision` (default) fuses vision alongside GPS; GO GPS-DENIED cuts GNSS (gated); RESTORE GNSS reverts (ungated). **Cut is solid, hold is not** — see 5.5 |
+| Tests | `~/miniconda3/envs/drone/bin/python -m pytest -q` (247/249 pass; 2 pre-existing environmental failures — use the `drone` conda env's interpreter directly, not `conda run`, or `websockets`/`msgpack` go missing) |

@@ -6,7 +6,7 @@ cmd, ping -- so this is a proof that an external script can fly the drone
 through the same unmodified interface a human's browser uses. No server or
 protocol changes.
 
-Run joystick-server.py and Isaac Sim first (see docs/joystick-guide.md
+Run joystick-server.py and Isaac Sim first (see RUN-WEBSITE.md
 section 6 for the ARM -> TAKEOFF -> OFFBOARD -> fly -> LAND sequence this
 script replays), then:
 
@@ -25,7 +25,7 @@ PING_INTERVAL_S = 0.15
 
 CONFIRM_SIM_S = 3.0
 """Default confirmation deadline, in SIM seconds -- matches the wait the web
-UI itself uses for ARM/TAKEOFF/OFFBOARD (docs/joystick-guide.md section 6).
+UI itself uses for ARM/TAKEOFF/OFFBOARD (RUN-WEBSITE.md section 6).
 Converted to a wall-clock budget via the measured sim_rate in _wait_for,
 never used as a wall-clock number directly: PX4 SITL runs in lockstep with
 Isaac, so a fixed wall deadline would misjudge a slow-rendering sim as a
@@ -96,7 +96,7 @@ class Autopilot:
         await self._cmd("takeoff")
         await self._wait_for(lambda t: t.get("mode") == "AUTO.TAKEOFF",
                              "TAKEOFF mode")
-        # "wait for it to stop climbing" (docs/joystick-guide.md section 6.2):
+        # "wait for it to stop climbing" (RUN-WEBSITE.md section 6.2):
         # vz settles near zero once the target altitude is reached.
         await self._wait_for(
             lambda t: t.get("alt_m", 0.0) > 1.0 and abs(t.get("vz", 99.0)) < 0.1,

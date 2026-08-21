@@ -1223,13 +1223,46 @@ is worse than not having it.
     59 m  ->  2.7 m first-in-session, 4.0 m second
     98 m  ->  25 m and 50 m   (two holds, both diverging)
 
-Between 60 m and 100 m the hold stops being a hold. `h`-multiplied rate error
-predicts a linear rise and the first two rows are consistent with that; the
-third is not, so something else takes over up there — ground resolution
-halving with height is the obvious candidate and is untested. **The
-established operating envelope is up to ~60 m**, and the larger bias estimate
-at 98 m now reads as a symptom of an aircraft being thrown around, not a
-cause.
+Between 60 m and 100 m the hold stops being a hold.
+
+### The estimator is not what fails at altitude
+
+The obvious reading — ground resolution halves with height, so the estimator
+must be worse up there — was tested and is **wrong**.
+
+`logs/20260822-altsweep/`: climb in steps and hold each one with **GNSS on the
+whole flight**, so PX4 flies on GPS and the vision estimate is a passenger.
+`drift_m` then measures the estimator against ground truth with no control
+feedback at all — the one measurement every GPS-denied hold confounds, because
+there the aircraft is chasing its own error.
+
+| AGL | drift mean | drift max | d(drift)/dt | inliers |
+|---|---|---|---|---|
+| 49.3 m | 1.18 m | 1.58 m | +0.0086 m/s | 593 |
+| 74.5 m | 1.75 m | 2.00 m | +0.0061 m/s | 594 |
+| 99.5 m | 1.91 m | 2.47 m | -0.0261 m/s | 588 |
+| 124.0 m | 1.67 m | 1.97 m | +0.0001 m/s | 584 |
+
+**Flat.** 1.2-1.9 m at every altitude to 125 m, bounded and non-growing at all
+four, inliers 584-594 throughout. The estimator is good to at least 125 m and
+degrades no faster there than at the height 8.6 passes at.
+
+**So the collapse above 60 m is the closed loop, not the sensor.** Which is
+what the mechanism predicts: the plant gain from an attitude-rate error to a
+fabricated ground velocity is `h`, so doubling the height doubles the loop
+gain around [MPC position error -> aircraft motion -> camera rate error ->
+fabricated velocity -> apparent position error]. A loop stable at 49 m is the
+same loop with twice the gain at 98 m, and it crosses into instability
+somewhere between.
+
+That is a falsifiable prediction with an obvious test: **the position gain
+should have to scale as 1/h.** `MPC_XY_P` is now genuinely in the loop (it was
+not before ADR-0008), so halving it at 98 m should buy back what the height
+spent. Untested as of this writing.
+
+**The established operating envelope is up to ~60 m at default gains**, and
+the larger bias estimate at 98 m reads as a symptom of an aircraft being
+thrown around, not a cause.
 
 ### Manual flight still works, and holds better than it did
 

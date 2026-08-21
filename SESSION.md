@@ -790,3 +790,104 @@ abort condition alongside excursion).
 Ulogs for every run archived under `logs/20260819-screen-v5/` (the 4-of-5
 screening candidates) and `logs/20260819-lowint/` (`low_integral`'s
 confirm-duration attempt).
+
+## Task 10, Step 10.8 (2026-08-22) — the handover was never clean: EKF2 resets its own position at every cut
+
+No new flights. This came out of re-reading the Step 10.6/10.7 ulogs, and it
+invalidates a claim that has stood since run 5.
+
+**Every cut on record makes EKF2 jump its own horizontal position**, within
+~36 ms of `EKF2_GPS_CTRL=0`, by an amount that matches
+`estimator_ev_pos_bias` at that instant:
+
+| cut | reset \|delta\| | \|ev_pos_bias\| | diff | covariance after |
+|---|---|---|---|---|
+| 1786.44 (10.7 `low_integral`) | 39.94 m | 39.84 m | 0.10 | 9.000 |
+| 761.43 (`baseline`) | 69.75 m | 69.70 m | 0.04 | 9.000 |
+| 879.47 (`more_damping`) | 9.21 m | 9.12 m | 0.09 | 9.000 |
+| 1018.51 (`gentler_p`) | 14.15 m | 14.18 m | 0.03 | 9.000 |
+| 1196.59 (`gentle_combo`) | 28.38 m | 28.35 m | 0.03 | 9.000 |
+
+A post-reset covariance of exactly 9.000 is `EKF2_EVP_NOISE`^2 — the
+signature of `resetHorizontalPositionTo(measurement, measurement_var)`.
+
+### Why nobody saw it: the innovation was never measuring drift
+
+`ev_hpos` innovation into every cut is a beautiful 0.15 m median, ratio ~0,
+100% fused, zero rejections. **That number cannot see drift.** PX4 1.14 runs
+an offset estimator on the EV lane and on no other lane —
+`_ev_pos_b_est` — and computes the innovation against `measurement - bias`
+(`ev_pos_control.cpp:158`). While GNSS is on, the bias silently absorbs
+whatever the vision has drifted. The raw stream PX4 received
+(`vehicle_visual_odometry`) sat 39.9 m from EKF2's state for the whole
+pre-cut window of 10.7.
+
+So run 5's "climb drift 23-37 m -> 0.29-0.60 m, handover SOLVED" was read
+off a bias-corrected number. Read `estimator_ev_pos_bias`, not `ev_hpos`.
+
+### Root cause: `_go_gps_denied` races PX4's own handover
+
+PX4 performs the GNSS->vision handover **itself**. When `flags.gps` drops,
+`bias_estimator_change` goes true, so `reset` goes true, so
+`updateEvPosFusion` runs `resetHorizontalPositionTo(measurement)`
+(`ev_pos_control.cpp:182-233`). Nothing in this repo asked for that.
+
+But EKF2 fuses at a **delayed horizon** set by the largest sensor delay —
+`EKF2_GPS_DELAY` = 110 ms (`EKF2_EV_DELAY` = 0). `_go_gps_denied` realigned
+the stream and wrote the param in the same tick, so the realigned sample had
+not reached the horizon and **PX4 reset onto the pre-realignment sample**.
+
+The ~1.04 s bounce-back seen at two cuts is the same code hitting
+`no_aid_timeout_max` — 1 s, a COMPILE-TIME constant (`common.h:449`) — after
+rejecting the vision, and resetting again at `ev_pos_control.cpp:276-278`.
+
+Deleting the realignment is NOT the fix: PX4 would then reset onto the
+drifted vision and reproduce the 2026-08-12 divergence.
+
+### What changed
+
+`joystick-server.py` — `gps_denied` now **arms** the cut instead of taking
+it. `_go_gps_denied` realigns and stamps `_cut_pending_since` on the sim
+clock; `_maybe_complete_gps_denied` lands it `GPS_DENIED_SETTLE_S = 1.5` sim
+seconds later from the run loop, re-checking the health gates first. 1.5 s
+is floored by PX4's 1 s `no_aid_timeout_max` (at which point PX4 re-snaps the
+bias onto the realigned stream while GNSS is still on,
+`ev_pos_control.cpp:265-267`) plus the 110 ms horizon. Sim seconds, not wall.
+
+Two holes the tests caught, both now closed:
+
+- `_restore_gnss` cleared `_gps_denied` but not an armed cut, so the abort
+  printed `GNSS RESTORED` and the cut fired anyway a tick later.
+- a repeat `gps_denied` while one is armed re-realigned and restarted the
+  window, so a caller retrying could never converge.
+
+`sim/mpc_gain_sweep.py` — the cut wait was `sim_time=False`, 5.0 **wall**
+seconds, because the cut used to be instantaneous. At sim_rate 0.11 a 1.5
+sim-s window is 13.6 wall seconds, so the driver would have timed out,
+re-issued `gps_denied`, and given up with `failed_to_cut`. Now 15.0 on the
+sim clock, retry removed.
+
+`sim/check_handover.py` (new) — the verdict, in one command:
+
+    conda run -n drone python sim/check_handover.py logs/<run>/<file>.ulg
+
+Finds every cut itself and PASS/FAILs each on the reset magnitude. Exit 0
+clean, 1 failed, 2 no cut taken. Validated against the five known-bad cuts,
+which it reports FAIL.
+
+### Status
+
+280 tests pass. **The fix has never flown.** Run the checker on the next
+GPS-denied ulog; that is the only thing that settles it.
+
+This does **not** address 8.6. The handover transient is over by +2 s
+(excursion 0.1 m), while the hold failure grows late — 4.8 m at +20 s, 52 m
+at +40 s, 90 m at +72 s. It does mean every excursion figure recorded so far
+was measured from a poisoned starting point, so the numbers should at least
+become cleanly comparable.
+
+Also visible and still untouched: `cs_gps_hgt` is ON before the cut and drops
+with it, so the cut removes a **height** aid too and leaves baro alone —
+worth weighing against the altitude-drop abort (24.6 -> 4.5 m) that ended
+10.7. And `cs_ev_yaw` only switches ON at the cut, so fused vision yaw is
+untested right up to the moment it becomes load-bearing.

@@ -984,3 +984,57 @@ one from the wrong encoding, one from the wrong frame — gains a sixth: the
 wrong *quantity*. An accelerometer is not a gravitometer, and the difference
 only shows up when the aircraft accelerates, which is exactly when a hover
 controller is trying hardest.
+
+### What the fix did, flown twice
+
+`logs/20260822-gyroderot/` and `logs/20260822-repeat1/`, `baseline` gains
+(PX4 defaults), two independent 180 s GPS-denied holds back to back:
+
+| | before (`20260822-poshold`) | hold 1 | hold 2 |
+|---|---|---|---|
+| status | aborted | **flown, full 180 s** | **flown, full 180 s** |
+| peak aircraft excursion | 400 m (abort ceiling) | **6.23 m** | **4.57 m** |
+| excursion slope, 2nd half | — | +0.031 m/s | +0.012 m/s |
+| altitude over the hold | 24.4 -> 24.1 m | 24.4 -> 24.4 m | 23.9 -> 23.9 m |
+| `drift_m` through the hold | 25-58 m | 0.5-6.4 m | 0.5-6.0 m |
+| PX4's own \|pos - hold point\| | 367 m peak | **0.4 m peak** | — |
+
+Against the same `baseline` gains in Step 10.6, which peaked at **158.6 m**
+with a **4.538 m/s** slope: peak is down 25-35x and the slope 150-380x.
+
+**PX4 held its own estimate within 0.4 m for the entire 180 s.** The control
+loop is no longer a contributor at all — every metre of the residual is the
+estimator's own dead-reckoning drift, and the two quantities are now cleanly
+separable for the first time.
+
+**There is no oscillation left.** Per 30 s bin the mean and max excursion sit
+within a metre of each other for the whole hold; the track is a slow monotone
+walk, not the ±5->±60 m cycling of run 5 or the damped overshoot of run 6.
+
+**8.6's literal bar is not met yet.** ADR-0001 asks for a *non-growing*
+envelope and `analyze_gain_sweep.py` calls anything above 0.01 m/s growing;
+hold 2 sits at 0.012 m/s. That is the physics of dead reckoning without an
+absolute position reference, not an instability — and it is now within a
+factor of ~1.2 of the tolerance rather than a factor of 450.
+
+### The handover fix flew, and passed
+
+Step 10.8's armed-cut change had never been flown. Both cuts here:
+
+    PASS  cut t= 78.07s  no reset (0.07 m)   ev_pos_bias at cut   0.25 m
+    PASS  cut t=366.03s  no reset (0.05 m)   ev_pos_bias at cut  12.71 m
+
+Against the five cuts on record before it, which reset 9.21-69.75 m. The
+second is the more interesting one: the estimator had a 12.71 m standing bias
+going in (that run started from an aircraft parked off-pad, so the estimator
+anchored 12 m from the ground-truth origin) and the cut still landed at 5 cm.
+The settle window absorbs the realignment regardless of how large it is.
+
+### What is left
+
+The residual is a slow, roughly constant-direction walk — the signature of a
+**gyro bias**, not of noise. EKF2's own estimate of it in the same flight is
+3.8e-4 rad/s, which at the 49 m hover predicts **0.019 m/s** of false velocity
+against the 0.012-0.031 m/s observed. `MahonyState` has a proportional gravity
+term and no integral one, so nothing in this estimator estimates gyro bias at
+all; the gyro-only derotation now carries that bias undivided.

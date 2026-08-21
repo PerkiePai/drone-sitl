@@ -70,12 +70,32 @@ class Estimator:
         # costs nothing when the flag is left at the default.
         self.state = MahonyState.from_heading(float(meta.get("heading_deg", 0.0)),
                                               mag_gain=mag_gain)
+        # A SECOND attitude integration, gyro only (Kp=0 makes update() ignore
+        # the accelerometer term entirely). It exists for one job: the
+        # inter-frame rotation the flow solve derotates by.
+        #
+        # An accelerometer measures specific force, so while the aircraft
+        # accelerates horizontally its reading is tilted atan(a/g) from true
+        # down and `self.state`'s gravity term pulls the attitude toward it. In
+        # the ABSOLUTE attitude that error only mis-scales real motion. In the
+        # RELATIVE rotation it is far worse: an attitude error moving at w
+        # rad/s subtracts a rotation that never happened, and at height h the
+        # leftover flow reads as h*w m/s of translation -- fabricated from a
+        # still hover, then flown for real by a controller cancelling it.
+        # Measured on run 20260822-poshold: h*d(atan(a/g))/dt predicted 5.75
+        # m/s of false velocity against 6.69 m/s observed.
+        #
+        # Only CONSECUTIVE differences of this one are ever read, so its own
+        # unbounded yaw drift cancels and never reaches the estimate.
+        self.gyro_state = MahonyState.from_heading(
+            float(meta.get("heading_deg", 0.0)), Kp=0.0, mag_gain=0.0)
         self.mag_calibrated = False
         self.pos = np.zeros(3)      # ENU, anchored at the first frame
         self.baro_alt = None
         self.baro0 = None
         self.prev_gray = None
         self.prev_R_wc = None
+        self.prev_R_wc_gyro = None
         self.n_inliers = 0
         self.n_frames = 0
         self.n_solved = 0
@@ -93,6 +113,7 @@ class Estimator:
             self.state.calibrate_mag(mag)
             self.mag_calibrated = True
         self.state.update(msg["w"], msg["a"], dt, mag=mag)
+        self.gyro_state.update(msg["w"], msg["a"], dt)
 
     def on_baro(self, msg):
         self.baro_alt = float(msg["alt_m"])
@@ -115,6 +136,11 @@ class Estimator:
                               interpolation=cv2.INTER_AREA)
 
         R_wc = self.state.R_flu() @ self.R_CtoI     # camera -> ENU, this frame
+        # The same transform off the gyro-only attitude. Used ONLY for the
+        # inter-frame rotation below; the absolute R_wc still carries the
+        # gravity-corrected attitude, which is what the ground-plane depth and
+        # the ENU rotation of the solved translation need.
+        R_wc_gyro = self.gyro_state.R_flu() @ self.R_CtoI
         h_above = 0.0 if self.baro0 is None else (self.baro_alt - self.baro0)
 
         if self.prev_gray is not None:
@@ -123,7 +149,7 @@ class Estimator:
             if p0 is not None and len(p0) >= self.min_track:
                 p0g, p1g = _track_lk(self.prev_gray, gray, p0)
                 if len(p0g) >= self.min_track:
-                    R_c1c0 = R_wc.T @ self.prev_R_wc
+                    R_c1c0 = R_wc_gyro.T @ self.prev_R_wc_gyro
                     h0 = max(h_above, MIN_H0_M)
                     t_cam, used = _solve_translation(
                         p0g, p1g, self.Kinv, self.prev_R_wc, R_c1c0,
@@ -138,6 +164,7 @@ class Estimator:
         self.pos[2] = h_above       # altitude from baro, never integrated
         self.prev_gray = gray
         self.prev_R_wc = R_wc
+        self.prev_R_wc_gyro = R_wc_gyro
         return self.payload(msg)
 
     # --- output ------------------------------------------------------------

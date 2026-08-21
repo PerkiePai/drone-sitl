@@ -1277,15 +1277,39 @@ loop gain."
 **A confound in the open-loop sweep, stated because it survives:** GNSS was on
 for it, so EKF2 had GPS-quality *velocity* the whole time. In a real phase-2
 hold EKF2 must derive velocity by differentiating the vision position, and at
-98 m the same angular noise is twice the metres — so twice the velocity noise
-into the term the controller reacts to hardest. That is the next hypothesis
-and it is **untested**; the sweep as flown cannot separate "closed loop" from
-"no GNSS velocity."
+98 m the same angular noise is twice the metres — so the obvious next
+hypothesis is twice the velocity noise into the term the controller reacts to
+hardest.
 
-Two hypotheses about the >60 m collapse have now been flown and refuted (the
-bias gate, and the 1/h gain scaling). It is not the estimator's position
-solve, and it is not controller aggressiveness. **Recorded as open rather than
-guessed at a third time.**
+**Checked against the logs already in hand, and it is weaker than it sounds.**
+`logs/20260822-twohold/`, both holds phase 2, EKF2's `vehicle_local_position`
+velocity against ground-truth velocity over each hold:
+
+| hold | AGL | EKF2 \|v\| | GT \|v\| | \|v error\| | error / speed |
+|---|---|---|---|---|---|
+| A | 49.3 m | 0.23 m/s | 0.31 m/s | 0.148 m/s | 0.48 |
+| B | 98.2 m | 1.87 m/s | 3.17 m/s | 1.883 m/s | 0.59 |
+
+The absolute velocity error is 12.7x worse at 98 m — but the aircraft is
+genuinely flying 10x faster there, and **relative to the speed it is actually
+doing, the error only goes 0.48 -> 0.59**. That is a 23% degradation, not the
+2x the "noise scales with height" story predicts.
+
+Which leaves this measurement unable to decide: in a hold that has already
+diverged, the aircraft is fast *because* the loop diverged, and the velocity
+error is large *because* it is fast. Chicken and egg.
+
+**The experiment that would separate them** is a 98 m phase-2 hold flown on
+VELOCITY setpoints — EKF2 on vision alone, but with the position loop open, as
+it was before ADR-0008. If it still diverges, the fault is upstream of the
+position loop; if it drifts slowly and linearly like every pre-ADR-0008 hold
+did, the position loop is what amplifies at altitude. Not flown.
+
+Two hypotheses about the >60 m collapse have been flown and refuted (the bias
+gate, and the 1/h gain scaling), and a third — velocity noise scaling with
+height — is weakened by the numbers above without being killed. It is not the
+estimator's position solve, and it is not controller aggressiveness.
+**Recorded as open, with the one experiment that would settle it named.**
 
 **The established operating envelope is up to ~60 m at default gains**, and
 the larger bias estimate at 98 m reads as a symptom of an aircraft being

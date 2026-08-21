@@ -1115,3 +1115,45 @@ error by fifty.
 Step 10.8's armed cut had never been flown. Three cuts across these flights,
 all clean — 0.07 m, 0.05 m, 0.08 m — against 9.21-69.75 m on every cut on
 record before it. `sim/check_handover.py` exits 0 on all three.
+
+### Repeat, and an honest caveat
+
+Flown twice back to back in one PX4 session (`logs/20260822-gyrobias/run.csv`
+carries both; the second campaign's ulog is `logs/20260822-gyrobias2/`):
+
+| | hold 1 | hold 2 |
+|---|---|---|
+| duration | 180 s, no abort | 180 s, no abort |
+| altitude AGL | 49.3 m | **59.3 m** |
+| peak excursion | 2.02 m | 4.04 m |
+| mean excursion | 0.78 m | 1.69 m |
+| slope over the hold | +0.0029 m/s | **+0.0109 m/s** |
+| 30 s envelope maxima | 1.5 1.1 1.2 1.9 1.7 2.0 | 2.2 2.0 2.4 3.3 4.0 3.9 |
+| trend | settling | **borderline** |
+
+**Hold 2 is marginal, not a clean pass** — 0.0109 m/s against a 0.01 m/s
+tolerance. Say that plainly: the bar is met once and missed by 9% once.
+
+The two are not quite like-for-like. Hold 2 flew **10 m higher** — the second
+`AUTO.TAKEOFF` in the same PX4 session levelled at 59.3 m AGL rather than
+49.3 m — and the dominant residual scales **linearly with height**, since it
+is a camera rate error times `h`. 20% more height is not the whole of a 2x
+worse peak, but it is not nothing either, and any future comparison of holds
+has to control for altitude. Its envelope also turns over in the last bin
+(4.04 -> 3.85), which a runaway does not do.
+
+Both cuts in that session pass `sim/check_handover.py` (0.08 m, 0.03 m).
+
+### Where this leaves 8.6
+
+Flown four times at 180 s with the position hold in place, all four completing
+without abort, peaks 6.23 / 4.57 / 2.02 / 4.04 m against 158.6 m for the same
+gains before. The oscillation and the runaway are both gone and neither
+returned. ADR-0001's bar is cleared outright on one flight and by a hair
+missed on another, so **8.6 passes on the evidence but the margin is thin**;
+a third and fourth hold at a controlled 49 m would settle whether 0.003 or
+0.011 m/s is the honest number.
+
+Nothing here needed a parameter change. Every candidate Task 9 and Task 10
+ruled out was correctly ruled out — the lever was never in EKF2's tuning or
+in `MPC_XY_*`.

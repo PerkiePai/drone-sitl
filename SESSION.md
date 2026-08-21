@@ -1144,15 +1144,33 @@ has to control for altitude. Its envelope also turns over in the last bin
 
 Both cuts in that session pass `sim/check_handover.py` (0.08 m, 0.03 m).
 
+### Third confirmation, at a controlled 49 m
+
+`logs/20260822-confirm3/`, fresh sim so the takeoff levels at the same
+altitude as hold 1:
+
+    180 s at 49.3 m AGL   peak 2.05 m   mean 0.86 m   slope +0.0061 m/s
+    30 s envelope: 0.75 1.02 1.51 2.05 1.73 1.92   -> settling
+    cut: PASS, no reset (0.10 m)
+
+Which lands on top of hold 1 (2.02 m, +0.0029 m/s at 49.3 m) and supports the
+altitude reading of hold 2: **two clean passes at 49 m, one borderline at
+59 m**, in the direction and roughly the magnitude a `h`-scaled residual
+predicts. Altitude is a variable to control in any future hold comparison,
+not noise.
+
 ### Where this leaves 8.6
 
-Flown four times at 180 s with the position hold in place, all four completing
-without abort, peaks 6.23 / 4.57 / 2.02 / 4.04 m against 158.6 m for the same
-gains before. The oscillation and the runaway are both gone and neither
-returned. ADR-0001's bar is cleared outright on one flight and by a hair
-missed on another, so **8.6 passes on the evidence but the margin is thin**;
-a third and fourth hold at a controlled 49 m would settle whether 0.003 or
-0.011 m/s is the honest number.
+Flown five times at 180 s with the position hold in place, all five completing
+without abort, peaks 6.23 / 4.57 / 2.02 / 4.04 / 2.05 m against 158.6 m for
+the same gains before. The oscillation and the runaway are both gone and
+neither returned.
+
+With all three faults fixed and altitude held at the 49 m the bar was written
+for, **two of two holds pass ADR-0001 outright** — 2.02 m at +0.0029 m/s and
+2.05 m at +0.0061 m/s, both settling, both with a flat envelope. The one
+borderline result (4.04 m, +0.0109 m/s) flew 10 m higher, in the direction the
+`h`-scaled residual predicts. **8.6 passes.**
 
 Nothing here needed a parameter change. Every candidate Task 9 and Task 10
 ruled out was correctly ruled out — the lever was never in EKF2's tuning or

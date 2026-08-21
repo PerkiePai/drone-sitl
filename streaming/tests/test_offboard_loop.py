@@ -762,6 +762,7 @@ def test_a_heartbeat_gap_keeps_gnss_cut_once_gps_denied():
     loop.link.reboot_autopilot = lambda: None
     loop._maybe_start_fusing_vision(time.monotonic())
     loop._run_command("gps_denied")
+    _complete_the_cut(js, loop)
     assert loop.telemetry()["gps_denied"] is True
 
     sent = {}
@@ -790,9 +791,197 @@ def test_gps_denied_cuts_gnss_once_vision_is_fusing():
     sent = []
     loop.link.set_param = lambda name, value, ptype: sent.append(name)
     loop._run_command("gps_denied")
+    _complete_the_cut(js, loop)
 
     assert "EKF2_GPS_CTRL" in sent, sent
     assert loop.telemetry()["gps_denied"] is True
+
+
+def _advance_sim(loop, vision, seconds):
+    """Move PX4's sim clock on and deliver a fresh pose, as a flight would.
+
+    Both halves matter. The settle window is measured in SIM seconds, so a test
+    that only moves wall time exercises nothing; and a pose whose timestamp
+    never changes goes stale the instant the clock moves, which would abandon
+    the pending cut for a reason the test did not intend.
+    """
+    loop._px4_sim_s += seconds
+    p = vision.pose
+    vision.pose = vision_bridge.VisionPose(
+        ts_ns=p.ts_ns + int(seconds * 1e9), x=p.x, y=p.y, z=p.z,
+        roll=p.roll, pitch=p.pitch, yaw=p.yaw)
+
+
+def _complete_the_cut(js, loop):
+    """Run the settle window out and land an armed cut, as the loop does.
+
+    Taking the cut is no longer a single call: `gps_denied` ARMS it, and it
+    lands a settle window later once EKF2 has absorbed the realignment --
+    see GPS_DENIED_SETTLE_S.
+    """
+    _advance_sim(loop, loop.vision, js.GPS_DENIED_SETTLE_S + 0.1)
+    loop._maybe_complete_gps_denied(time.monotonic())
+
+
+def test_the_cut_does_not_land_until_ekf2_has_absorbed_the_realignment():
+    """PX4 performs the GNSS->vision handover ITSELF: the moment `flags.gps`
+    drops it runs `resetHorizontalPositionTo(measurement)`
+    (ev_pos_control.cpp:230-233). But EKF2 fuses at a DELAYED horizon, so a
+    realignment issued in the same tick as EKF2_GPS_CTRL=0 has not reached that
+    horizon and PX4 resets onto the PRE-realignment sample instead.
+
+    Measured in the ulogs at all five cuts on record: the reset magnitude
+    equals `estimator_ev_pos_bias` to within 0.1 m -- 9.2, 14.1, 28.4, 39.9 and
+    69.7 m -- and the post-reset covariance is exactly EKF2_EVP_NOISE^2 every
+    time, which is the `resetHorizontalPositionTo` signature.
+    """
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 103, _pose(), received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+    loop._run_command("gps_denied")
+
+    assert "EKF2_GPS_CTRL" not in sent, "GNSS was cut before EKF2 could absorb"
+    assert loop.telemetry()["gps_denied"] is False
+
+
+def test_the_cut_lands_once_the_settle_window_has_passed():
+    js = _load_server()
+    _, loop, vision = _vision_loop(js, 104, _pose(),
+                                   received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+    loop._run_command("gps_denied")
+    _advance_sim(loop, vision, js.GPS_DENIED_SETTLE_S + 0.1)
+    loop._maybe_complete_gps_denied(time.monotonic())
+
+    assert "EKF2_GPS_CTRL" in sent, sent
+    assert loop.telemetry()["gps_denied"] is True
+
+
+def test_the_settle_window_outlasts_px4s_own_aiding_timeout():
+    """`no_aid_timeout_max` is 1 s and a COMPILE-TIME constant (common.h:449) --
+    no parameter relaxes it, exactly like the PreFlightChecker limit phase 0
+    already works around.
+
+    It is the number that matters. After the realignment EKF2 rejects the
+    vision, because the innovation is the whole retained `_ev_pos_b_est` bias;
+    at that 1 s mark PX4 re-snaps the bias onto the realigned stream while GNSS
+    is still on (ev_pos_control.cpp:265-267) and resumes fusing. Cutting before
+    that leaves the stale bias in place, which is the entire bug. The realigned
+    sample must also clear the delayed fusion horizon first, set by the largest
+    sensor delay -- EKF2_GPS_DELAY, 110 ms.
+    """
+    js = _load_server()
+    assert js.GPS_DENIED_SETTLE_S > 1.0 + 0.11
+
+
+def test_the_settle_window_is_measured_in_sim_time_not_wall_time():
+    """The next wall-vs-sim-time trap in this path, and the reason the window
+    is not a `time.monotonic()` deadline. EKF2's 1 s timeout runs on PX4's
+    clock, which under lockstep is SIM time: at sim_rate 0.11 one simulated
+    second is nine wall seconds, so a window counted in wall time cuts GNSS
+    long before EKF2 has absorbed anything.
+    """
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 105, _pose(), received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+    loop._run_command("gps_denied")
+    # Wall time runs far past the window; the sim clock does not move at all.
+    loop._maybe_complete_gps_denied(time.monotonic()
+                                    + js.GPS_DENIED_SETTLE_S * 100)
+
+    assert "EKF2_GPS_CTRL" not in sent, "the window was counted in wall time"
+    assert loop.telemetry()["gps_denied"] is False
+
+
+def test_a_pending_cut_is_abandoned_when_vision_goes_bad_during_the_settle():
+    """The gates in `_go_gps_denied` were checked against an estimate that is
+    over a second of sim time old by the time the cut actually lands. Cutting
+    GNSS onto a source that has stopped tracking since is precisely the failure
+    those gates exist to prevent, so they are re-checked at the moment it
+    lands rather than trusted from when it was requested.
+    """
+    js = _load_server()
+    _, loop, vision = _vision_loop(js, 106, _pose(),
+                                   received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append(name)
+    loop._run_command("gps_denied")
+    _advance_sim(loop, vision, js.GPS_DENIED_SETTLE_S + 0.1)
+    vision._last_msg = {"n_inliers": 0, "drift_m": 0.4, "fps": 8.8}
+    loop._maybe_complete_gps_denied(time.monotonic())
+
+    assert "EKF2_GPS_CTRL" not in sent, "cut onto a blind estimator"
+    assert loop.telemetry()["gps_denied"] is False
+
+
+def test_asking_for_the_cut_again_while_one_is_armed_changes_nothing():
+    """Re-issuing `gps_denied` must not restart the sequence.
+
+    The second request would re-realign -- which is the double-correction the
+    settle window exists to avoid -- and push the landing another full window
+    out, so a caller that retries because it has not seen the flag yet can
+    never converge. Both the web UI (an operator pressing the button twice)
+    and mpc_gain_sweep.py's retry path can do exactly this.
+    """
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 108, _pose(), received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+    loop._run_command("gps_denied")
+    realigned = loop.vision_sender.realigned
+    pending = loop._cut_pending_since
+
+    loop._run_command("gps_denied")
+
+    assert loop.vision_sender.realigned == realigned, "re-realigned an armed cut"
+    assert loop._cut_pending_since == pending, "the settle window restarted"
+
+
+def test_restoring_gnss_cancels_a_cut_that_has_not_landed_yet():
+    """`gps_restore` is the abort, and an abort that leaves an armed cut to
+    fire a second later is not one.
+
+    The window between arming and landing is over a second of SIM time, which
+    at the sim rates this runs at is many wall seconds -- easily long enough
+    for an operator watching the estimate go bad to hit restore, and long
+    enough for the cut to then land on top of them.
+    """
+    js = _load_server()
+    _, loop, vision = _vision_loop(js, 107, _pose(),
+                                   received_at=time.monotonic())
+    loop._params_sent = True
+    loop.link.set_param = lambda name, value, ptype: None
+    loop._maybe_start_fusing_vision(time.monotonic())
+
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append((name, value))
+    loop._run_command("gps_denied")
+    loop._run_command("gps_restore")
+    _advance_sim(loop, vision, js.GPS_DENIED_SETTLE_S + 0.1)
+    loop._maybe_complete_gps_denied(time.monotonic())
+
+    assert ("EKF2_GPS_CTRL", 0) not in sent, "an aborted cut still landed"
+    assert loop.telemetry()["gps_denied"] is False
 
 
 def test_the_handover_realigns_the_vision_frame_onto_px4():
@@ -810,6 +999,7 @@ def test_the_handover_realigns_the_vision_frame_onto_px4():
 
     loop._maybe_start_fusing_vision(time.monotonic())
     loop._run_command("gps_denied")
+    _complete_the_cut(js, loop)
     assert loop.telemetry()["gps_denied"] is True
 
     n, e, _, _, _, yaw = loop.vision_sender.alignment.to_px4_ned(
@@ -847,6 +1037,7 @@ def test_the_frame_is_realigned_at_both_phase_transitions():
     loop._maybe_start_fusing_vision(time.monotonic())
     assert loop.vision_sender.realigned == 1
     loop._run_command("gps_denied")
+    _complete_the_cut(js, loop)
     assert loop.vision_sender.realigned == 2
 
 
@@ -977,6 +1168,7 @@ def test_excursion_tracks_ground_truth_from_the_hold_point_taken_at_the_cut():
 
     vision._last_msg["gt_x"], vision._last_msg["gt_y"] = 100.0, 200.0
     loop._run_command("gps_denied")
+    _complete_the_cut(js, loop)
     assert loop.telemetry()["gps_denied"] is True
     assert loop._excursion_m() == pytest.approx(0.0)
 
@@ -995,6 +1187,7 @@ def test_excursion_is_none_when_the_cut_had_no_ground_truth():
 
     assert "gt_x" not in vision._last_msg
     loop._run_command("gps_denied")
+    _complete_the_cut(js, loop)
     assert loop.telemetry()["gps_denied"] is True
     assert loop._hold_point_gt is None
     assert loop._excursion_m() is None
@@ -1016,6 +1209,7 @@ def test_excursion_goes_back_to_none_once_gnss_is_restored():
     loop._maybe_start_fusing_vision(time.monotonic())
     vision._last_msg["gt_x"], vision._last_msg["gt_y"] = 0.0, 0.0
     loop._run_command("gps_denied")
+    _complete_the_cut(js, loop)
     vision._last_msg["gt_x"], vision._last_msg["gt_y"] = 30.0, 40.0
     assert loop._excursion_m() == pytest.approx(50.0)
 
@@ -1042,6 +1236,7 @@ def test_phase_follows_context_md_numbering():
     assert loop._phase() == "1b"
 
     loop._run_command("gps_denied")
+    _complete_the_cut(js, loop)
     assert loop._phase() == "2"
 
     loop._run_command("gps_restore")
@@ -1069,6 +1264,7 @@ def test_run_csv_row_matches_the_telemetry_it_was_written_alongside(tmp_path):
     loop._maybe_start_fusing_vision(time.monotonic())
     vision._last_msg["gt_x"], vision._last_msg["gt_y"] = 0.0, 0.0
     loop._run_command("gps_denied")
+    _complete_the_cut(js, loop)
     vision._last_msg["gt_x"], vision._last_msg["gt_y"] = 3.0, 4.0
 
     loop._csv = js.RunCSV(str(tmp_path / "run.csv"))
@@ -1310,6 +1506,7 @@ def _denied_loop(js, port_offset):
     loop.link.set_param = lambda name, value, ptype: None
     loop._maybe_start_fusing_vision(time.monotonic())
     loop._run_command("gps_denied")
+    _complete_the_cut(js, loop)
     assert loop.telemetry()["gps_denied"] is True, "setup failed: never cut"
     return loop
 

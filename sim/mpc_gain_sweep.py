@@ -28,6 +28,36 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "streaming"))
 from offboard import MAV_PARAM_TYPE_REAL32  # noqa: E402
 
+CLIMB_MIN_GAIN_M = 5.0
+"""Metres above the ARMING altitude that count as having actually left the pad.
+
+Small on purpose: it separates "flew" from "never moved", and must not depend
+on `MIS_TAKEOFF_ALT`, which this driver does not set and cannot assume.
+"""
+
+def climbed(telem, alt_at_arm, min_gain_m=CLIMB_MIN_GAIN_M):
+    """True once the aircraft has BOTH levelled off and actually gained height.
+
+    `mode == "AUTO.LOITER"` alone is not enough, which is the trap: the
+    aircraft sits in AUTO.LOITER on the pad, so that predicate is already true
+    before `takeoff` is sent. The wait then falls straight through, `offboard`
+    goes out 0.1 s into AUTO.TAKEOFF, and OFFBOARD's zero-velocity setpoint
+    wins the race against the climb. Confirmed live 2026-08-21 --
+    `vehicle_status.nav_state` 4 -> 17 -> 14 inside 0.1 s, then
+    `Disarmed by auto preflight disarming` 10 s later, never off the ground.
+
+    Altitude is what tells the two states apart, so a missing altitude is
+    treated as "not yet": waiting the timeout out and reporting
+    `failed_to_climb` beats flying a candidate that never left the pad.
+    """
+    if telem.get("mode") != "AUTO.LOITER":
+        return False
+    alt, base = telem.get("alt_m"), alt_at_arm
+    if alt is None or base is None:
+        return False
+    return (alt - base) >= min_gain_m
+
+
 GAIN_PARAMS = ("MPC_XY_P", "MPC_XY_VEL_P_ACC", "MPC_XY_VEL_I_ACC",
               "MPC_XY_VEL_D_ACC")
 
@@ -167,6 +197,7 @@ class Campaign:
             print(f">>> candidate {name}: {record['status']}")
             return record
 
+        alt_at_arm = telem.get("alt_m")
         await self._cmd("takeoff")
         # Wait for the climb to actually finish (PX4 auto-transitions
         # AUTO.TAKEOFF -> AUTO.LOITER on reaching MIS_TAKEOFF_ALT) before
@@ -176,9 +207,9 @@ class Campaign:
         # the aircraft never leaves the ground -- confirmed live: mode
         # reached OFFBOARD while px4_d stayed pinned at ground level for the
         # entire remaining hold.
-        telem = await self._wait_for(lambda t: t.get("mode") == "AUTO.LOITER",
+        telem = await self._wait_for(lambda t: climbed(t, alt_at_arm),
                                      CLIMB_TIMEOUT_S)
-        if telem.get("mode") != "AUTO.LOITER":
+        if not climbed(telem, alt_at_arm):
             record["status"] = "failed_to_climb"
             print(f">>> candidate {name}: {record['status']}")
             await self._recover()
@@ -203,18 +234,24 @@ class Campaign:
         await self._wait_for(lambda t: False, SETTLE_S)   # just settle
 
         await self._cmd("gps_denied")
-        telem = await self._wait_for(lambda t: t.get("gps_denied"), 5.0,
-                                     sim_time=False)
+        # SIM time, and generously above joystick-server's GPS_DENIED_SETTLE_S.
+        # The cut is no longer instantaneous: `gps_denied` ARMS it and it lands
+        # a settle window later, once EKF2 has absorbed the realignment. That
+        # window is a FLIGHT-time bar, so a wall-clock wait is wrong for the
+        # same reason every other wait in this driver is on the sim clock --
+        # at sim_rate 0.11 a 1.5 sim-s window is 13.6 wall seconds and the old
+        # 5.0 wall-second wait timed out before the cut could possibly land.
+        #
+        # No retry: re-issuing `gps_denied` while one is armed is ignored by
+        # the server on purpose, so a retry loop could only ever burn the
+        # timeout twice. If the flag has not appeared within this window the
+        # cut was refused, and the reason is on the server's stdout.
+        telem = await self._wait_for(lambda t: t.get("gps_denied"), 15.0)
         if not telem.get("gps_denied"):
-            await asyncio.sleep(5.0)
-            await self._cmd("gps_denied")
-            telem = await self._wait_for(lambda t: t.get("gps_denied"), 5.0,
-                                         sim_time=False)
-            if not telem.get("gps_denied"):
-                record["status"] = "failed_to_cut"
-                print(f">>> candidate {name}: {record['status']}")
-                await self._recover()
-                return record
+            record["status"] = "failed_to_cut"
+            print(f">>> candidate {name}: {record['status']}")
+            await self._recover()
+            return record
 
         alt_at_cut = telem.get("alt_m")
         aborted = False

@@ -86,6 +86,34 @@ The drone spawns at `spawn_z` and falls ~0.44 m onto `ground_z`
 against that.
 """
 
+GPS_DENIED_SETTLE_S = 1.5
+"""SIM seconds between realigning the vision frame and actually cutting GNSS.
+
+PX4 performs the handover itself. The moment `flags.gps` drops it runs
+`resetHorizontalPositionTo(measurement)` (ev_pos_control.cpp:230-233) -- but
+EKF2 fuses at a DELAYED horizon, so a realignment issued in the same tick as
+`EKF2_GPS_CTRL=0` has not reached that horizon yet and PX4 resets onto the
+PRE-realignment sample. That is the 2026-08-19 handover bug: at all five cuts
+on record EKF2 jumped its own position by exactly `estimator_ev_pos_bias`
+(9.2, 14.1, 28.4, 39.9, 69.7 m, matched to within 0.1 m) and landed on a
+covariance of exactly `EKF2_EVP_NOISE`^2 -- the reset signature.
+
+Two PX4 numbers set the floor, and neither is a parameter this code can tune:
+
+  1.0 s   `no_aid_timeout_max` (common.h:449), COMPILE-TIME. Between the
+          realignment and this mark EKF2 rejects the vision, because the
+          innovation is the whole retained `_ev_pos_b_est` bias. At the mark,
+          with GNSS still on, PX4 re-snaps that bias onto the realigned stream
+          (ev_pos_control.cpp:265-267) and resumes fusing. Cutting earlier
+          leaves the stale bias in place, which is the bug.
+  110 ms  `EKF2_GPS_DELAY`, the largest sensor delay, which is what sets the
+          delayed fusion horizon the realigned sample must clear.
+
+1.5 s clears both with margin. SIM seconds, not wall: EKF2's timeout runs on
+PX4's clock, which under lockstep is sim time, and at sim_rate 0.11 one
+simulated second is nine wall seconds.
+"""
+
 PX4_RESTART_GAP_S = 10.0
 """Heartbeat silence that means PX4 restarted rather than merely lagged.
 
@@ -312,6 +340,9 @@ class SetpointLoop(threading.Thread):
         # Mirrors telemetry["gps_denied"], but owned by the setpoint thread so
         # the re-send path can read the phase without taking the telemetry lock.
         self._gps_denied = False
+        # Sim-clock instant the realignment was taken, while a cut is pending;
+        # None whenever no cut is waiting to land.
+        self._cut_pending_since = None
         self._sim_ref = None          # (px4_boot_ms, wall_monotonic) baseline
         # PX4's own clock, which under lockstep IS sim time. Used to age vision
         # estimates in the same seconds the aircraft actually flies in.
@@ -517,6 +548,14 @@ class SetpointLoop(threading.Thread):
         if self.vision is None:
             print("*** gps_denied: server was not started with --vision. ***")
             return
+        if self._cut_pending_since is not None:
+            # Already armed. Starting over would re-realign -- the very
+            # double-correction the settle window exists to avoid -- and push
+            # the landing another full window out, so a caller retrying
+            # because it has not seen the flag yet could never converge.
+            print(">>> gps_denied: already armed, still settling. Ignoring "
+                  "the repeat request; `gps_restore` cancels it.")
+            return
         if not self._vision_fusing:
             print("*** gps_denied: REFUSED -- EKF2 is not fusing vision yet. "
                   "Climb until the camera can see ground. ***")
@@ -549,7 +588,50 @@ class SetpointLoop(threading.Thread):
         if self._hold_point_gt is None:
             print("*** gps_denied: no ground truth in the latest estimate -- "
                   "aircraft excursion will not be computable this flight. ***")
+        # The cut is ARMED here, not taken. EKF2 has to absorb the
+        # realignment above before GNSS goes, or PX4 resets onto the sample
+        # that preceded it -- see GPS_DENIED_SETTLE_S.
+        _, clock_now, _ = self._vision_clock(time.monotonic())
+        self._cut_pending_since = clock_now
+        print(f">>> gps_denied: ARMED -- realignment sent, cutting GNSS in "
+              f"{GPS_DENIED_SETTLE_S:.1f} sim s once EKF2 has absorbed it "
+              f"({health.get('n_inliers')} inliers, "
+              f"drift {health.get('drift_m')}).")
+
+    def _maybe_complete_gps_denied(self, now):
+        """Land a pending cut once EKF2 has absorbed the realignment.
+
+        Setpoint thread only. Called every tick, and a no-op unless
+        `_go_gps_denied` has armed a cut.
+
+        The wait is what separates this from the 2026-08-19 handover bug: PX4
+        resets its own position onto the vision the instant GNSS goes
+        (ev_pos_control.cpp:230-233), so the realigned stream has to have
+        reached EKF2's delayed fusion horizon AND survived the 1 s
+        `no_aid_timeout_max` that re-snaps the EV bias, both of which run on
+        PX4's clock. See GPS_DENIED_SETTLE_S.
+
+        The health gates are re-checked here rather than trusted from when the
+        cut was requested: by now that estimate is over a second of sim time
+        old, and cutting GNSS onto an estimator that has stopped tracking since
+        is the failure those gates exist to prevent.
+        """
+        if self._cut_pending_since is None:
+            return
+        _, clock_now, _ = self._vision_clock(now)
+        if clock_now is None:
+            return
+        if (clock_now - self._cut_pending_since) < GPS_DENIED_SETTLE_S:
+            return
+        health = self._healthy_vision(now)
+        if health is None:
+            self._cut_pending_since = None
+            print("*** gps_denied: ABANDONED -- vision stopped tracking during "
+                  "the settle window. GNSS is untouched; ask for the cut again "
+                  "once the estimate recovers. ***")
+            return
         vision_bridge.apply_ekf2_gps_denied_params(self.link)
+        self._cut_pending_since = None
         self._gps_denied = True
         with self._telem_lock:
             self._telem["gps_denied"] = True
@@ -649,13 +731,21 @@ class SetpointLoop(threading.Thread):
         vision_bridge.apply_ekf2_gnss_restore_params(self.link)
         vision_bridge.revert_mpc_gains(self.link)
         was_denied = self._gps_denied
+        # An ARMED but unlanded cut has to die here too. It is over a second of
+        # sim time from arming to landing -- which is exactly the window an
+        # operator watching the estimate go bad would abort in -- and a cut
+        # that fires anyway, after the abort, is worse than no abort at all.
+        was_pending = self._cut_pending_since is not None
+        self._cut_pending_since = None
         self._gps_denied = False
         with self._telem_lock:
             self._telem["gps_denied"] = False
         print(f">>> GNSS RESTORED: EKF2_GPS_CTRL="
               f"{vision_bridge.EKF2_GPS_CTRL_DEFAULT}, vision still fusing "
               f"alongside it"
-              + ("." if was_denied else " (it had not been cut).")
+              + ("." if was_denied
+                 else " (the armed cut was cancelled before it landed)."
+                 if was_pending else " (it had not been cut).")
               + " `gps_denied` is available again once you are happy with the "
                 "estimate.")
 
@@ -963,6 +1053,7 @@ class SetpointLoop(threading.Thread):
             try:
                 self._send_vision(now_mono)
                 self._maybe_start_fusing_vision(now_mono)
+                self._maybe_complete_gps_denied(now_mono)
             except Exception as exc:
                 print(f"*** vision send failed (setpoints continue): {exc!r} ***")
             self._check_px4_restart(now_mono)

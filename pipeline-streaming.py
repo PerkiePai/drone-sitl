@@ -204,6 +204,11 @@ class Estimator:
             "fix_ok": bool(self.n_inliers >= self.min_track),
             "drift_m": drift,          # None, never 0.0, when GT is absent
             "n_frames": int(self.n_frames),
+            # The Mahony integral term's gyro-bias estimate, rad/s. Exposed
+            # because it is now IN the derotation path -- a bias estimate
+            # polluted by a manoeuvre shows up as a constant-direction walk in
+            # the hold, and there was no way to see it from outside.
+            "gyro_bias": [float(b) for b in self.state.gyro_bias],
             "n_solved": int(self.n_solved),
             # SCORING ONLY (design D4, ADR-0004) -- forwarded so
             # joystick-server.py can compute aircraft excursion against PX4's

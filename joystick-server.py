@@ -221,6 +221,7 @@ class RunCSV:
               "gt_x", "gt_y", "gt_z",
               "vio_x", "vio_y", "vio_z", "vio_yaw",
               "hold_n", "hold_e", "hold_d",
+              "gyro_bias_x", "gyro_bias_y", "gyro_bias_z",
               "excursion_m", "drift_m", "align_m", "realigned",
               "n_inliers", "fresh", "dropped_stale", "sim_rate")
 
@@ -976,6 +977,9 @@ class SetpointLoop(threading.Thread):
         # live one. None on every row where a direction was being commanded.
         hn, he, hd = (self._hold_ned[:3] if self._hold_ned is not None
                       else (None, None, None))
+        # The estimator's own gyro-bias estimate, which is in the derotation
+        # path and therefore in the excursion. Absent on older estimators.
+        gb = last.get("gyro_bias") or (None, None, None)
         self._csv.write({
             "sim_s": self._px4_sim_s,
             "phase": self._phase(),
@@ -985,6 +989,7 @@ class SetpointLoop(threading.Thread):
             "vio_x": last.get("x"), "vio_y": last.get("y"), "vio_z": last.get("z"),
             "vio_yaw": last.get("yaw"),
             "hold_n": hn, "hold_e": he, "hold_d": hd,
+            "gyro_bias_x": gb[0], "gyro_bias_y": gb[1], "gyro_bias_z": gb[2],
             "excursion_m": (vio_status or {}).get("excursion_m"),
             "drift_m": last.get("drift_m"),
             "align_m": self.vision_sender.alignment.offset_m()

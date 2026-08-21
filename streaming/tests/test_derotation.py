@@ -176,3 +176,29 @@ def test_a_gyro_bias_is_estimated_out_of_the_derotation():
     assert est.n_solved == 150
     moved = float(np.hypot(est.pos[0], est.pos[1]))
     assert moved < 0.08, f"walked {moved:.3f} m in 17 s of still hover under bias"
+
+
+def test_the_bias_estimate_is_reported_so_it_can_be_read_back():
+    """It is in the derotation path, so it is in the excursion. A bias
+    estimate polluted by a manoeuvre shows up as a constant-direction walk
+    during the hold, and before this there was no way to see it from outside
+    the estimator."""
+    ps = _load_pipeline()
+    est = _hovering_estimator(ps)
+    _settle_level(est)
+
+    payload = est.payload({"ts_ns": 0, "frame": 0})
+
+    reported = payload["gyro_bias"]
+    assert len(reported) == 3
+    assert all(isinstance(b, float) for b in reported)
+    # The horizontal axes converge onto the bias they were fed, in the sign
+    # convention the estimator subtracts.
+    assert np.allclose(reported[:2], GYRO_BIAS[:2], atol=5e-5), (
+        f"reported {reported} against a fed bias of {GYRO_BIAS}")
+    # The vertical axis does NOT, and must not be expected to: only the
+    # gravity error feeds the integrator, and cross(v_meas, v_pred) for a
+    # near-level aircraft lies in the horizontal plane. Yaw-axis bias is
+    # unobservable without a heading reference (ADR-0005), so it stays at
+    # zero rather than converging onto something wrong.
+    assert reported[2] == 0.0

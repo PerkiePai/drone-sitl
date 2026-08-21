@@ -5,7 +5,7 @@ body { margin:0; background:#111; color:#ddd; font:14px system-ui,sans-serif;
        -webkit-user-select:none; }
 #panels { display:flex; gap:10px; flex-wrap:wrap; justify-content:center;
           width:100%; }
-#video { width:min(92vw,640px); aspect-ratio:16/10; background:#000;
+#video, #video-chase { width:min(92vw,640px); aspect-ratio:16/10; background:#000;
          border:1px solid #333; object-fit:cover; }
 #mapwrap { width:min(92vw,640px); display:flex; flex-direction:column;
            gap:6px; }

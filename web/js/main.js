@@ -12,6 +12,8 @@ import { resetHeld } from './controls.js';
 fetch('/config').then(r => r.json()).then(c => {
   document.getElementById('video').src =
     `http://${location.hostname}:${c.video_port}/detect`;
+  document.getElementById('video-chase').src =
+    `http://${location.hostname}:${c.video_port}/chase`;
   setMissionSpeed(c.mission_speed);
 });
 

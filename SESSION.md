@@ -1159,6 +1159,27 @@ altitude reading of hold 2: **two clean passes at 49 m, one borderline at
 predicts. Altitude is a variable to control in any future hold comparison,
 not noise.
 
+### Manual flight still works, and holds better than it did
+
+The position hold is on the setpoint path every flight takes, not just the
+GPS-denied ones, so it was a regression risk for the joystick. Checked live
+against a hovering aircraft (`logs/manual-check2.log`), driving the websocket
+exactly as the page does — including re-sending each held direction every
+0.2 s, since `CommandState` has a 0.5 s staleness watchdog and one press event
+decays to zero inside half a second:
+
+| | held | after release |
+|---|---|---|
+| `fwd` | 1.95 m/s (commanded 2.0) | 0.03 m/s after 8 s |
+| `up` | 3.06 m/s, +8.96 m | +0.18 m over the next 10 s |
+| `yaw_right` | turns | settles, 0.04 m/s |
+
+Releasing a direction is now a **position** hold rather than a zero-velocity
+one, which is why altitude moves 18 cm in ten seconds instead of wandering off
+on whatever vz error the estimator happens to carry. That is the same fault the
+GPS-denied hold had, and the joystick had it too — on every flight this project
+has ever made.
+
 ### Where this leaves 8.6
 
 Flown five times at 180 s with the position hold in place, all five completing

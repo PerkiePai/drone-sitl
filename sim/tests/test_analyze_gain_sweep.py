@@ -2,6 +2,7 @@
 a synthetic run.csv + sidecar with known phase-2 segments and a known slope.
 No PX4, no Isaac Sim."""
 import json
+import math
 import os
 import sys
 
@@ -92,3 +93,29 @@ def test_rank_candidates_includes_aborted_not_just_flown(tmp_path):
     results = ags.rank_candidates(str(csv_path), str(sidecar_path))
     assert [r["name"] for r in results] == ["A"]
     assert results[0]["status"] == "aborted"
+
+
+def test_a_bounded_wander_is_not_read_as_growth():
+    """The 20 s default was chosen against a 40-60 s oscillation, where it is
+    a fraction of a period. A hold that has actually settled does not sit
+    still -- it wanders inside a bounded envelope -- and on that signal a 20 s
+    window measures only which way the wander happened to be going when the
+    clock stopped.
+
+    Flown 2026-08-22 (`logs/20260822-gyrobias`): a 180 s hold whose envelope
+    is flat at 1.1-2.0 m and whose whole-hold slope is +0.0029 m/s scored
+    0.055 m/s, "growing", off its final 20 s alone.
+    """
+    period, amplitude = 25.0, 1.0
+    rows = [_row(t / 10.0, "2", 1.5 + amplitude * math.sin(2 * math.pi * (t / 10.0) / period))
+            for t in range(0, 1800)]
+
+    assert ags.classify(ags.trend_slope(rows)) == "settling"
+
+
+def test_a_real_ramp_is_still_read_as_growth():
+    """The control: widening the window must not blind it to the runaway it
+    exists to catch. `baseline` in Step 10.6 grew at 4.5 m/s."""
+    rows = [_row(t / 10.0, "2", 0.1 * (t / 10.0)) for t in range(0, 1800)]
+
+    assert ags.classify(ags.trend_slope(rows)) == "growing"

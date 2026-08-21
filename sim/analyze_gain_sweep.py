@@ -39,7 +39,24 @@ def peak_excursion(segment):
     return max(values) if values else None
 
 
-def trend_slope(segment, window_s=20.0):
+TREND_WINDOW_S = 120.0
+"""Sim seconds of hold the trend is fitted over, counting back from the end.
+
+Was 20 s, chosen against run 5's 40-60 s oscillation, where it is a fraction
+of a period. That is the wrong window for a hold that has actually settled: a
+settled hold does not sit still, it wanders inside a bounded envelope, and
+over 20 s of that the fit measures only which way the wander happened to be
+going when the clock stopped. `logs/20260822-gyrobias` -- 180 s, envelope flat
+at 1.1-2.0 m, whole-hold slope +0.0029 m/s -- scored 0.055 m/s and "growing"
+off its final 20 s alone.
+
+120 s is several periods of anything this project has seen wander, and still
+leaves a real ramp unmistakable: Step 10.6's `baseline` grew at 4.5 m/s, three
+orders of magnitude above SLOPE_TOLERANCE.
+"""
+
+
+def trend_slope(segment, window_s=TREND_WINDOW_S):
     """Least-squares slope of excursion_m over the final window_s sim
     seconds of the hold. Positive beyond SLOPE_TOLERANCE means growing (D3);
     this returns the number, classify() applies the label."""

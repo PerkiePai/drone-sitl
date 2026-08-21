@@ -891,3 +891,96 @@ with it, so the cut removes a **height** aid too and leaves baro alone —
 worth weighing against the altitude-drop abort (24.6 -> 4.5 m) that ended
 10.7. And `cs_ev_yaw` only switches ON at the cut, so fused vision yaw is
 untested right up to the moment it becomes load-bearing.
+
+## Task 10, Step 10.9 (2026-08-22) — a commanded hover was never a closed loop
+
+Two faults, found in order, each hidden behind the one before it. The first is
+in the control path and is settled; the second is in the estimator and is what
+the hold failure actually was.
+
+### Fault 1: nothing ever commanded a position
+
+Every station-keeping run this project has flown — run 6's 225 m, the whole
+Task 10 screening campaign, `low_integral`'s altitude abort — commanded the
+hold as `send_velocity(0, 0, 0)`. Read straight off the flight logs:
+
+    offboard_control_mode.position = 0        for 100% of every hold on record
+    trajectory_setpoint.position[*] = NaN     for 100%
+    trajectory_setpoint.velocity[*] = 0.0     for 100%
+
+That is an open integrator in position. PX4's position controller never
+computes a position error, `MPC_XY_P` is not in the loop at all, and whatever
+bias the estimator carries in its **velocity** walks the airframe away with
+nothing to pull it back. In `logs/20260821-fix/11_16_00.ulg` EKF2's own
+`vehicle_local_position` reports the aircraft 54 m from the cut point by the
+end of the hold — the estimate saw the whole excursion and there was no
+setpoint that could act on it. Under GNSS the velocity bias is small enough
+that the resulting drift reads as station keeping, which is why this survived
+every GPS baseline flight and was never suspected.
+
+Idle in OFFBOARD now sends a **position** setpoint in `MAV_FRAME_LOCAL_NED`,
+captured once when the last held direction is released (ADR-0008).
+
+**This voids Task 10's gain sweep as guidance.** It ranked candidates on a
+position-loop gain that was not in the loop, and its one apparent signal —
+`MPC_XY_VEL_I_ACC` low scoring best — is explained by the velocity integrator
+being the only term that could fight a velocity bias when nothing else was
+closed. Any re-tune starts from PX4 defaults.
+
+### What flying it showed
+
+`logs/20260822-poshold/`, `baseline` gains, 153 s of GPS-denied hold:
+
+| | run 6 (velocity hold) | 20260822-poshold (position hold) |
+|---|---|---|
+| `offboard_control_mode.position` | 0% | **100%** |
+| altitude over the hold | 24.6 -> 4.5 m (10.7 aborted on it) | **24.4 -> 23.9 m** |
+| horizontal excursion | 225 m | still runs away |
+
+**The vertical hold is fixed** — half a metre over 153 s, against the 20.1 m
+descent that ended Step 10.7. The horizontal is not, and the reason changed:
+`drift_m`, the raw estimator against ground truth, ran 25-58 m through the
+hold against run 6's 7-9 m. The controller was now doing its job; it was being
+fed a position that was wrong.
+
+### Fault 2: the flow was derotated by an accelerometer-corrupted attitude
+
+An accelerometer measures **specific force**. While the aircraft accelerates
+horizontally at `a`, its reading is tilted `atan(a/g)` from true down, and
+`MahonyState.update`'s gravity term — applied unconditionally, `Kp=1.0` —
+pulls the attitude estimate toward it.
+
+In the absolute attitude that error only mis-scales real motion. In the
+**inter-frame** rotation `on_frame` derotates by (`R_c1c0 = R_wc.T @
+prev_R_wc`, both off the Mahony) it is far worse: an attitude error moving at
+`w` rad/s subtracts a rotation that never happened, and at height `h` the flow
+solve reads the leftover as `h*w` m/s of translation. At the 49 m hover, the
+0.45 rad/s that `Kp*sin(27°)` can reach is metres per second **fabricated out
+of a still hover** — and then flown for real by a position controller trying
+to cancel it. Fault 1 had been masking this: a velocity-only loop responds to
+the fabricated motion far more weakly than a position loop does.
+
+Confirmed two ways, neither of them fitted:
+
+- **Prediction vs measurement.** Over the 1135 samples of the hold,
+  `h*d(atan(a/g))/dt` — computed from ground-truth acceleration alone —
+  predicts a mean false velocity of **5.75 m/s** against a mean observed
+  estimator error rate of **6.69 m/s**. `corr(|accel|, |d err/dt|)` is 0.388
+  at zero lag and decays monotonically with lag.
+- **Offline reproduction.** Two *identical* JPEG frames, gyro reporting no
+  rotation, a 5 m/s² specific force between them: the estimator solved
+  **3.1 m** of translation from a camera that had not moved
+  (`streaming/tests/test_derotation.py`).
+
+`Estimator` now carries a second, gyro-only attitude (`Kp=0`, so `update()`
+ignores the accelerometer term entirely) and takes the inter-frame rotation
+from consecutive values of *that*. Only consecutive differences are ever read,
+so its own unbounded yaw drift cancels and never reaches the estimate. The
+absolute attitude still comes from the gravity-corrected filter, which is what
+the ground-plane depth and the ENU rotation of the solved translation need.
+
+**The bug class, again.** SESSION.md's own list — three from the wrong clock,
+one from the wrong encoding, one from the wrong frame — gains a sixth: the
+wrong *quantity*. An accelerometer is not a gravitometer, and the difference
+only shows up when the aircraft accelerates, which is exactly when a hover
+controller is trying hardest.

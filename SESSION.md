@@ -1155,7 +1155,12 @@ altitude as hold 1:
 
 Which lands on top of hold 1 (2.02 m, +0.0029 m/s at 49.3 m).
 
-### The altitude explanation was tested, and it is only a third of the story
+### Altitude is the variable, and the envelope ends somewhere above 60 m
+
+Two more experiments, each testing a claim already written down above. Both
+came back against the claim, so both are recorded as they landed.
+
+**Test 1 — a controlled flight at the borderline hold's altitude.**
 
 The borderline hold was blamed above on flying 10 m higher. That claim rested
 on one data point, so it was flown directly: same profile, fresh sim, takeoff
@@ -1171,16 +1176,60 @@ factor 1.20 of height — close to the linear `h` the mechanism predicts. The
 borderline hold was **4.04 m at the same 59.3 m**, half as much again as a
 controlled flight at that height.
 
-So altitude accounts for roughly a third of that gap and something else
-accounts for the rest. The one remaining difference is that the 4.04 m hold
-was the **second hold in one PX4 session**, flown after a landing and a
-re-takeoff, where every other hold here was the first of a fresh sim. What a
-re-takeoff leaves behind — a Mahony bias estimate polluted by the landing
-transient is the obvious suspect, since `MAHONY_KI = 0.05` unwinds over ~20 s
-and the settle is 20 s — **is not established and is the open item.**
+So height alone did not close the gap, and the next suspect was that the
+4.04 m hold was the **second hold in one PX4 session**.
 
-Practical consequence until it is: **fly one hold per session**, and treat a
-second-in-session hold as a different experiment rather than a repeat.
+**Test 2 — two holds in one session, with the gyro-bias estimate now logged.**
+`logs/20260822-twohold/`. The second `AUTO.TAKEOFF` in a session climbs
+`MIS_TAKEOFF_ALT` above wherever the aircraft already is, so hold B levelled
+at 98 m rather than 49 m — which made this an altitude experiment as much as a
+session-order one:
+
+| | AGL | peak | mean | slope | \|bias\| | h*\|b\| |
+|---|---|---|---|---|---|---|
+| hold A | 49.3 m | 1.63 m | 0.67 m | +0.0026 m/s | 9.8e-04 | 0.048 m/s |
+| hold B | 98.2 m | 25.36 m | 8.06 m | +0.0883 m/s | 6.2e-03 | 0.605 m/s |
+
+The bias estimate came out **6.3x larger** on hold B, which read as the
+integral term absorbing the climb's specific force — an accelerometer is a
+gravity reference only when it reads 1 g, and `MAHONY_KI = 0.05` unwinds over
+~Kp/Ki = 20 s against a 20 s settle. That reproduced offline: 4 s of a lying
+accelerometer walked the estimate 2.07e-02 rad/s, 1.0 m/s of fabricated
+velocity at the hover.
+
+**So the integrator was gated on |a| within 5% of g, and the same two holds
+were re-flown. It did nothing** (`logs/20260822-gated/`):
+
+| | AGL | peak | slope | \|bias\| |
+|---|---|---|---|---|
+| ungated A | 49.3 m | 1.63 m | +0.0026 | 9.8e-04 |
+| **gated A** | 49.3 m | 1.62 m | +0.0026 | 1.2e-03 |
+| ungated B | 98.2 m | 25.36 m | +0.0883 | 6.2e-03 |
+| **gated B** | 98.2 m | 49.74 m | +0.1503 | 5.8e-03 |
+
+Identical at 49 m, and the 98 m holds differ by 2x in a direction the gate
+cannot explain — that is run-to-run spread in a regime that is not stable, not
+an effect. The bias estimate barely moved (6.2e-03 -> 5.8e-03), so whatever
+inflates it at 98 m is **not** reaching it through an accelerometer reading
+away from 1 g. **The gate was reverted.** The mechanism it blocks is real
+offline and does not dominate in flight; leaving speculative machinery in the
+estimator on the strength of a hypothesis the flight data declined to support
+is worse than not having it.
+
+**What the two tests together actually say:** the excursion is a function of
+**altitude**, not of session order, and it is badly non-linear:
+
+    49 m  ->  1.6 - 2.1 m     (four holds, all settling)
+    59 m  ->  2.7 m first-in-session, 4.0 m second
+    98 m  ->  25 m and 50 m   (two holds, both diverging)
+
+Between 60 m and 100 m the hold stops being a hold. `h`-multiplied rate error
+predicts a linear rise and the first two rows are consistent with that; the
+third is not, so something else takes over up there — ground resolution
+halving with height is the obvious candidate and is untested. **The
+established operating envelope is up to ~60 m**, and the larger bias estimate
+at 98 m now reads as a symptom of an aircraft being thrown around, not a
+cause.
 
 ### Manual flight still works, and holds better than it did
 

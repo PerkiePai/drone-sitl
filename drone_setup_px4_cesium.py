@@ -11,7 +11,8 @@
 #   2. Spawns the PX4 drone with a chosen compass HEADING.
 #   3. Adds the DOWN camera as a real ZED X One GS (global-shutter, 2.2mm Wide),
 #      HARD-MOUNTED with no gimbal + a soft anti-vibration mount, plus a movable
-#      detect_cam (keyboard pan/tilt) to the freshly spawned drone.
+#      detect_cam (keyboard pan/tilt), and a free-standing CHASE camera that
+#      trails/frames the drone from behind, to the freshly spawned drone.
 #   4. Un-flips the Cesium-tipped ground plane and adds lockstep-safe gusty wind.
 #
 #   PX4 only. Does NOT touch ArduPilot or configs.yaml.
@@ -68,7 +69,20 @@ DOWN_Z_OFFSET      = -0.05             # down_cam height offset below the drone 
 DOWN_VIB_DAMP      = True              # simulate the silicone anti-vibration mount the gimbal-less GS cam needs
 DOWN_VIB_TAU_S     = 0.05              # mount time constant (s): passes slow attitude (<~3 Hz),
                                        # soaks up high-freq airframe/gust vibration. 0 / False = rigid hard mount.
-STREAM_CAMERAS     = True              # serve both feeds over HTTP (MJPEG) to any browser on the LAN
+# --- CHASE camera: free-standing third-person cam that trails + frames the drone
+CHASE_CAM          = True              # add a chase camera (not body-mounted) that trails the drone
+CHASE_TRAIL_DIST   = 1.5               # meters behind the drone, along its horizontal heading
+CHASE_TRAIL_HEIGHT = 1               # meters above the drone
+CHASE_DAMP_TAU_S   = 0.15              # smoothing time constant (s) for the trailing motion —
+                                       # eases toward the target pose instead of snapping to it.
+                                       # Only the camera's POSITION is smoothed; the aim point
+                                       # always tracks the drone live so fast moves don't push
+                                       # it toward the frame edge.
+CHASE_MAX_DIST     = 2.0               # hard leash (m): the damped lag can let the camera fall
+                                       # further behind than CHASE_TRAIL_DIST while the drone
+                                       # accelerates -- clamped back to this distance every
+                                       # frame so it never drifts further than this from the drone.
+STREAM_CAMERAS     = True              # serve all feeds over HTTP (MJPEG) to any browser on the LAN
 STREAM_PORT        = 8080
 STREAM_W, STREAM_H = 640, 400          # streamed resolution (per camera)
 STREAM_FPS         = 20                # max encode/stream rate
@@ -357,8 +371,87 @@ def setup_cameras():
         print(f">>> down_cam ZED X One GS: hard-mounted (NO gimbal), {_mode}; "
               "tilts with the drone (true nadir when level).")
 
+    # ---- CHASE camera: free-standing third-person cam that trails the drone ---
+    # Unlike down_cam/detect_cam this is NOT parented to the body — it's its own
+    # /World prim, driven each frame from the drone's live world pose (reusing
+    # down_mount's pose getter). Target POSITION = offset behind (along the
+    # body's flattened horizontal forward axis) and above the drone; a
+    # first-order low-pass (CHASE_DAMP_TAU_S) eases the camera's position
+    # toward that target so quick maneuvers don't whip the view around. The
+    # AIM point is NOT lagged — it tracks the drone's live position every
+    # frame, so a fast drone stays centered even while the camera's own
+    # position is still catching up (lagging the aim too let the drone run
+    # off-frame during quick moves, since the camera kept pointing at a
+    # stale, aged position instead of where the drone actually is).
+    chase_path = "/World/chase_cam"
+    if CHASE_CAM and body_prim and body_prim.IsValid():
+        chs = _zedcam(chase_path)
+        cxf = UsdGeom.Xformable(chs); cxf.ClearXformOpOrder()
+        cht = cxf.AddTranslateOp()
+        cho = cxf.AddOrientOp()                                    # quaternion (Gf.Quatf)
+
+        _cfilt = {"pos": None}
+
+        def _chase_track(e):
+            try:
+                pos, qb = _get_pose()
+                fwd = Rotation.from_quat(qb).apply([1.0, 0.0, 0.0])
+                fwd[2] = 0.0
+                n = _np.linalg.norm(fwd)
+                fwd = fwd / n if n > 1e-6 else _np.array([1.0, 0.0, 0.0])
+                target_pos = pos - fwd * CHASE_TRAIL_DIST + _np.array([0.0, 0.0, CHASE_TRAIL_HEIGHT])
+
+                try: dt = float(e.payload["dt"])
+                except Exception: dt = 1.0 / 60.0
+                a = 1.0 - math.exp(-dt / max(CHASE_DAMP_TAU_S, 1e-3))
+                if _cfilt["pos"] is None:
+                    _cfilt["pos"] = target_pos
+                else:
+                    _cfilt["pos"] = (1.0 - a) * _cfilt["pos"] + a * target_pos
+
+                # hard leash: never let the lag put the camera further than
+                # CHASE_MAX_DIST from the drone, however fast it accelerates
+                offset = _cfilt["pos"] - pos
+                dist = _np.linalg.norm(offset)
+                if dist > CHASE_MAX_DIST:
+                    _cfilt["pos"] = pos + offset * (CHASE_MAX_DIST / dist)
+
+                cam_pos, look_at = _cfilt["pos"], pos                # aim: live drone position
+
+                # look-at basis (OpenGL/USD convention: camera looks down local -Z)
+                z_axis = cam_pos - look_at
+                zn = _np.linalg.norm(z_axis)
+                z_axis = z_axis / zn if zn > 1e-6 else _np.array([0.0, 1.0, 0.0])
+                world_up = _np.array([0.0, 0.0, 1.0])
+                x_axis = _np.cross(world_up, z_axis)
+                xn = _np.linalg.norm(x_axis)
+                x_axis = x_axis / xn if xn > 1e-6 else _np.array([1.0, 0.0, 0.0])
+                y_axis = _np.cross(z_axis, x_axis)
+                q = Rotation.from_matrix(_np.column_stack([x_axis, y_axis, z_axis])).as_quat()  # x,y,z,w
+
+                cht.Set(Gf.Vec3d(float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2])))
+                cho.Set(Gf.Quatf(float(q[3]), float(q[0]), float(q[1]), float(q[2])))
+            except Exception:
+                pass
+
+        prev_chase = globals().get("_CHASE_CAM_SUB")
+        if prev_chase is not None:
+            try: prev_chase.unsubscribe()
+            except Exception: pass
+        globals()["_CHASE_CAM_SUB"] = omni.kit.app.get_app().get_update_event_stream(
+            ).create_subscription_to_pop(_chase_track, name="chase_cam_follow")
+        print(f">>> chase_cam ready: trails {CHASE_TRAIL_DIST:.1f}m behind / "
+              f"{CHASE_TRAIL_HEIGHT:.1f}m above, damped (tau={CHASE_DAMP_TAU_S:.2f}s).")
+
+        create_viewport_window("ChaseCam (third-person, trailing)", camera_path=Sdf.Path(chase_path),
+                               width=512, height=320, position_x=1080, position_y=40)
+
+    cam_paths = {"down": dwn_path, "detect": det_path}
+    if CHASE_CAM and stage.GetPrimAtPath(chase_path).IsValid():
+        cam_paths["chase"] = chase_path
+
     if STREAM_CAMERAS:
-        start_camera_streams({"down": dwn_path, "detect": det_path})
+        start_camera_streams(cam_paths)
 
 
 def start_camera_streams(cam_paths):
@@ -540,9 +633,9 @@ def start_camera_streams(cam_paths):
                                 "kb": _kb, "iface": _iface, "stop_rec": _stop_recording}
     print(f">>> Camera MJPEG server on http://0.0.0.0:{STREAM_PORT}/  "
           f"(open from the Mac at http://<box-ip>:{STREAM_PORT}/ ; "
-          f"single feeds: /{cams[0]} , /{cams[1]})")
+          f"single feeds: {', '.join('/' + c for c in cams)})")
     print(f">>> RECORD: focus a viewport and press '{RECORD_KEY}' to start/stop MP4 "
-          f"recording of both cams -> {rec_dir}/ ({REC_W}x{REC_H} @ {REC_FPS}fps)")
+          f"recording of all cams -> {rec_dir}/ ({REC_W}x{REC_H} @ {REC_FPS}fps)")
 
 
 def fix_ground_plane():

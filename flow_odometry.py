@@ -128,9 +128,29 @@ class MahonyState:
     FLIP = np.diag([1.0, -1.0, -1.0])     # FLU<->FRD, self-inverse
     G_UP = np.array([0.0, 0.0, 9.81])     # specific force at rest points UP in ENU
 
-    def __init__(self, R0_frd, Kp=1.0, mag_gain=0.0, mag_noise_deg=0.0, rng=None):
+    def __init__(self, R0_frd, Kp=1.0, Ki=0.0, mag_gain=0.0, mag_noise_deg=0.0,
+                 rng=None):
         self.R = np.asarray(R0_frd, dtype=float).copy()
         self.Kp = Kp
+        # Mahony's integral term, and the bias estimate it maintains. Ki=0 --
+        # the default, so the batch pipeline and its pinned regression output
+        # are untouched -- leaves this a purely proportional filter, which is
+        # what it has always been.
+        #
+        # It exists because a constant gyro bias is indistinguishable from a
+        # real rotation over one frame interval, so the flow solve subtracts a
+        # turn that never happened and reads the leftover as translation:
+        # h*|bias| m/s, forever, in one fixed direction. At the 49 m hover the
+        # sim's own 3.8e-4 rad/s is 0.019 m/s, which is 3.4 m over a 180 s
+        # hold. The proportional term alone cannot remove it -- it cancels the
+        # bias inside its own attitude only, never in the RATE, which is what
+        # the derotation reads.
+        #
+        # Only the gravity error feeds it, so only the horizontal axes are
+        # observable. Yaw bias needs a heading reference and stays unestimated
+        # (ADR-0005); the sim's z bias is the smallest of the three anyway.
+        self.Ki = Ki
+        self.gyro_bias = np.zeros(3)
         self.mag_gain = mag_gain
         self.mag_noise_deg = mag_noise_deg
         self.rng = rng if rng is not None else np.random.default_rng(0)
@@ -176,7 +196,14 @@ class MahonyState:
             v_meas = a / an
             v_pred = self.R.T @ self.G_UP
             v_pred /= np.linalg.norm(v_pred)
-            w = w + self.Kp * np.cross(v_meas, v_pred)
+            e = np.cross(v_meas, v_pred)
+            # Integral first, so the rate below already carries this tick's
+            # estimate. The sign is Mahony's: the proportional term settles at
+            # Kp*e = -bias, so integrating -Ki*e walks gyro_bias toward the
+            # bias itself, and the error it is fed shrinks to zero as it gets
+            # there.
+            self.gyro_bias = self.gyro_bias - self.Ki * e * dt
+            w = w - self.gyro_bias + self.Kp * e
         if self.m_world is not None and mag is not None and self.mag_gain > 0.0:
             mn = np.linalg.norm(mag)
             if mn > 1e-6:

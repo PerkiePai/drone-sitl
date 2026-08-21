@@ -136,3 +136,43 @@ def test_a_real_rotation_is_still_derotated():
     assert est.n_solved == 1
     moved = float(np.hypot(est.pos[0], est.pos[1]))
     assert moved < 2.0, f"a pure yaw was read as {moved:.1f} m of translation"
+
+
+GYRO_BIAS = np.array([0.0004, -0.0002, 0.0001])
+"""A gyro bias of the size this sim actually has. EKF2's own estimate over the
+20260822-gyroderot hold was 3.8e-4 rad/s, which at the 49 m hover is 0.019 m/s
+of fabricated velocity -- most of the 0.012-0.031 m/s residual walk that hold
+was left with."""
+
+
+def _settle_level(est, ticks=40_000):
+    """Hover long enough for a bias estimator to converge. Honest
+    accelerometer throughout: a hovering aircraft is not accelerating."""
+    for _ in range(ticks):
+        est.on_imu({"w": GYRO_BIAS.tolist(), "a": LEVEL_FRD_ACCEL}, 0.005)
+
+
+def test_a_gyro_bias_is_estimated_out_of_the_derotation():
+    """A constant bias is indistinguishable from a real rotation over one
+    frame interval, so the solve subtracts a turn that never happened and
+    reads the leftover flow as translation. Per frame that is only ~2.6 mm at
+    this height -- the fault is that it never stops and never changes
+    direction: h*|bias| = 0.022 m/s, which is 4 m over a 180 s hold and most
+    of the residual walk the acceleration fix was left with.
+
+    So this accumulates: 150 frames, 17 s of hover, ~0.39 m uncorrected.
+    """
+    ps = _load_pipeline()
+    est = _hovering_estimator(ps)
+    _settle_level(est)
+    jpg = _texture()
+
+    est.on_frame({"jpg": jpg, "ts_ns": 0, "frame": 0})
+    for k in range(1, 151):
+        for _ in range(23):
+            est.on_imu({"w": GYRO_BIAS.tolist(), "a": LEVEL_FRD_ACCEL}, 0.005)
+        est.on_frame({"jpg": jpg, "ts_ns": k * 115_000_000, "frame": k})
+
+    assert est.n_solved == 150
+    moved = float(np.hypot(est.pos[0], est.pos[1]))
+    assert moved < 0.08, f"walked {moved:.3f} m in 17 s of still hover under bias"

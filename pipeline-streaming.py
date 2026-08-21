@@ -42,6 +42,18 @@ position by hundreds of metres.
 """
 
 
+MAHONY_KI = 0.05
+"""Mahony integral gain on the live filter, in 1/s^2.
+
+Sets how fast the gyro-bias estimate converges -- roughly Kp/Ki, so ~20 s here
+-- against how much of an accelerating airframe's lie it absorbs on the way.
+The proportional term is excluded from the derotation entirely, so this is the
+only path by which the accelerometer still reaches the flow solve, and 0.05
+keeps that path slow enough that a manoeuvre's contribution unwinds inside a
+hold rather than accumulating across it. The batch pipeline keeps Ki=0.
+"""
+
+
 class Estimator:
     """Flow-odometry carried one message at a time.
 
@@ -69,7 +81,7 @@ class Estimator:
         # its own mag_gain is 0, so calibrating and feeding it every tick below
         # costs nothing when the flag is left at the default.
         self.state = MahonyState.from_heading(float(meta.get("heading_deg", 0.0)),
-                                              mag_gain=mag_gain)
+                                              Ki=MAHONY_KI, mag_gain=mag_gain)
         # A SECOND attitude integration, gyro only (Kp=0 makes update() ignore
         # the accelerometer term entirely). It exists for one job: the
         # inter-frame rotation the flow solve derotates by.
@@ -113,7 +125,12 @@ class Estimator:
             self.state.calibrate_mag(mag)
             self.mag_calibrated = True
         self.state.update(msg["w"], msg["a"], dt, mag=mag)
-        self.gyro_state.update(msg["w"], msg["a"], dt)
+        # The gyro MINUS the bias the filter above just estimated, and nothing
+        # else: no proportional term, so an accelerating airframe cannot reach
+        # the derotation, and no standing bias either.
+        self.gyro_state.update(
+            np.asarray(msg["w"], dtype=float) - self.state.gyro_bias,
+            msg["a"], dt)
 
     def on_baro(self, msg):
         self.baro_alt = float(msg["alt_m"])

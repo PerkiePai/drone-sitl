@@ -1038,3 +1038,80 @@ The residual is a slow, roughly constant-direction walk — the signature of a
 against the 0.012-0.031 m/s observed. `MahonyState` has a proportional gravity
 term and no integral one, so nothing in this estimator estimates gyro bias at
 all; the gyro-only derotation now carries that bias undivided.
+
+## Task 10, Step 10.10 (2026-08-22) — 8.6 passes
+
+`logs/20260822-gyrobias/`, `baseline` gains (PX4 defaults), 180 s GPS-denied
+hold, no abort:
+
+| | Step 10.6 `baseline` | + position hold | + gyro-bias estimate |
+|---|---|---|---|
+| status | flown (70 s screen) | flown, 180 s | **flown, 180 s** |
+| peak aircraft excursion | 158.6 m | 6.23 / 4.57 m | **2.02 m** |
+| mean excursion | — | 3.08 / 2.90 m | **0.78 m** |
+| trend slope over the hold | +4.538 m/s | +0.033 / +0.020 | **+0.0029 m/s** |
+| trend | growing | growing | **settling** |
+| 30 s envelope maxima | — | 1.2 2.5 3.2 4.1 5.2 6.2 | **1.5 1.1 1.2 1.9 1.7 2.0** |
+| altitude over the hold | — | flat | **flat** |
+
+**ADR-0001's bar is met**: 180 s vision-only, a non-growing excursion
+envelope, and the peak recorded as a number rather than a verdict — 2.02 m.
+Peak is down 79x and slope 1560x against the same gains before any of this.
+**8.6 passes.** No gain was changed to get there; PX4's defaults were never
+the problem.
+
+The envelope is the thing to read, not the peak: 1.5, 1.1, 1.2, 1.9, 1.7, 2.0
+over six 30 s bins. It wanders and does not go anywhere. The previous
+configuration's 1.2, 2.5, 3.2, 4.1, 5.2, 6.2 is what a walk looks like.
+
+**The third fault, and the last one measured.** A constant gyro bias is
+indistinguishable from a real rotation over one frame interval, so the flow
+solve subtracts a turn that never happened and reads the leftover as
+translation: `h*|bias|` m/s, forever, in one fixed direction. `MahonyState`'s
+proportional gravity term cannot remove it — it cancels the bias inside its
+own *attitude*, never in the *rate*, and the rate is what the derotation
+reads. It now carries Mahony's integral term too, and the live estimator
+derotates with the gyro minus that estimate. Predicted from EKF2's own bias
+figure: 0.019 m/s. Observed reduction in the walk: 0.033 -> 0.003 m/s.
+
+### The scoring window was wrong for a settled hold
+
+`analyze_gain_sweep.py` first scored this flight **0.055 m/s, "growing"**. It
+fits the final 20 s, a window chosen against run 5's 40-60 s oscillation where
+it is a fraction of a period. A settled hold does not sit still — it wanders
+inside a bounded envelope — and over 20 s of that the fit measures only which
+way the wander was going when the clock stopped. At 120 s the same flight
+scores 0.003 m/s, "settling", while Step 10.6's 4.5 m/s runaway stays three
+orders of magnitude clear of the tolerance. Fixed, with both directions
+pinned by tests.
+
+Worth stating plainly: **the tool would have reported a passing flight as a
+failure**, and only re-deriving the number by hand caught it.
+
+### The three faults, in the order they had to be found
+
+Each was invisible until the one before it was fixed, and none of them is
+where nine flights of investigation had been looking.
+
+1. **The hover was never commanded.** `offboard_control_mode.position == 0`
+   for 100% of every hold on record; position was an open integrator, and
+   `MPC_XY_P` — the gain the entire Task 10 campaign was sweeping — was not
+   in the loop at all.
+2. **The flow was derotated by an accelerometer-corrupted attitude.** An
+   accelerometer measures specific force; under horizontal acceleration the
+   gravity term drags the attitude estimate, and that error's *rate* becomes
+   `h*w` m/s of fabricated translation. Fault 1 masked it: a velocity-only
+   loop responds to fabricated motion far more weakly than a position loop.
+3. **Nothing estimated the gyro bias**, so the gyro-only derotation from
+   fix 2 carried it undivided — `h*|bias|` m/s in a fixed direction.
+
+Faults 2 and 3 are both the same shape: **a rate error at the camera becomes
+a velocity error on the ground, multiplied by height.** At 49 m, one
+milliradian per second is 4.9 cm/s. Nothing else in this system amplifies an
+error by fifty.
+
+### And the handover fix flew
+
+Step 10.8's armed cut had never been flown. Three cuts across these flights,
+all clean — 0.07 m, 0.05 m, 0.08 m — against 9.21-69.75 m on every cut on
+record before it. `sim/check_handover.py` exits 0 on all three.

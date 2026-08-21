@@ -128,8 +128,8 @@ class MahonyState:
     FLIP = np.diag([1.0, -1.0, -1.0])     # FLU<->FRD, self-inverse
     G_UP = np.array([0.0, 0.0, 9.81])     # specific force at rest points UP in ENU
 
-    def __init__(self, R0_frd, Kp=1.0, Ki=0.0, mag_gain=0.0, mag_noise_deg=0.0,
-                 rng=None):
+    def __init__(self, R0_frd, Kp=1.0, Ki=0.0, accel_gate=0.05, mag_gain=0.0,
+                 mag_noise_deg=0.0, rng=None):
         self.R = np.asarray(R0_frd, dtype=float).copy()
         self.Kp = Kp
         # Mahony's integral term, and the bias estimate it maintains. Ki=0 --
@@ -151,6 +151,7 @@ class MahonyState:
         # (ADR-0005); the sim's z bias is the smallest of the three anyway.
         self.Ki = Ki
         self.gyro_bias = np.zeros(3)
+        self.accel_gate = accel_gate
         self.mag_gain = mag_gain
         self.mag_noise_deg = mag_noise_deg
         self.rng = rng if rng is not None else np.random.default_rng(0)
@@ -202,7 +203,21 @@ class MahonyState:
             # Kp*e = -bias, so integrating -Ki*e walks gyro_bias toward the
             # bias itself, and the error it is fed shrinks to zero as it gets
             # there.
-            self.gyro_bias = self.gyro_bias - self.Ki * e * dt
+            #
+            # But ONLY while the accelerometer is reading 1 g. It is a gravity
+            # reference and nothing else, and the bias estimate is the one
+            # number the flow derotation reads -- integrating a manoeuvre's
+            # specific force into it re-opens, slowly, the exact path the
+            # gyro-only derotation exists to close. Flown 2026-08-22: the
+            # second of two holds in one session climbed 49 m from altitude
+            # before settling and came out with a bias estimate 6.3x the
+            # first's and an excursion 15x worse. The PROPORTIONAL term below
+            # stays ungated -- it only moves the absolute attitude, which the
+            # derotation does not use, and gating it would stop the filter
+            # levelling itself.
+            if abs(an - float(np.linalg.norm(self.G_UP))) <= (
+                    self.accel_gate * float(np.linalg.norm(self.G_UP))):
+                self.gyro_bias = self.gyro_bias - self.Ki * e * dt
             w = w - self.gyro_bias + self.Kp * e
         if self.m_world is not None and mag is not None and self.mag_gain > 0.0:
             mn = np.linalg.norm(mag)

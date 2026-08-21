@@ -1153,11 +1153,34 @@ altitude as hold 1:
     30 s envelope: 0.75 1.02 1.51 2.05 1.73 1.92   -> settling
     cut: PASS, no reset (0.10 m)
 
-Which lands on top of hold 1 (2.02 m, +0.0029 m/s at 49.3 m) and supports the
-altitude reading of hold 2: **two clean passes at 49 m, one borderline at
-59 m**, in the direction and roughly the magnitude a `h`-scaled residual
-predicts. Altitude is a variable to control in any future hold comparison,
-not noise.
+Which lands on top of hold 1 (2.02 m, +0.0029 m/s at 49.3 m).
+
+### The altitude explanation was tested, and it is only a third of the story
+
+The borderline hold was blamed above on flying 10 m higher. That claim rested
+on one data point, so it was flown directly: same profile, fresh sim, takeoff
+to the *same* 59.3 m (`logs/20260822-alt60/`).
+
+    180 s at 59.3 m AGL   peak 2.65 m   mean 0.94 m   slope +0.0046 m/s
+    30 s envelope: 0.90 1.10 1.63 2.65 2.15 2.41   -> settling
+    cut: PASS, no reset (0.05 m)
+
+**Height scaling is real but mild, and it does not explain the outlier.**
+2.03 m mean-of-two at 49.3 m against 2.65 m at 59.3 m is a factor 1.30 on a
+factor 1.20 of height — close to the linear `h` the mechanism predicts. The
+borderline hold was **4.04 m at the same 59.3 m**, half as much again as a
+controlled flight at that height.
+
+So altitude accounts for roughly a third of that gap and something else
+accounts for the rest. The one remaining difference is that the 4.04 m hold
+was the **second hold in one PX4 session**, flown after a landing and a
+re-takeoff, where every other hold here was the first of a fresh sim. What a
+re-takeoff leaves behind — a Mahony bias estimate polluted by the landing
+transient is the obvious suspect, since `MAHONY_KI = 0.05` unwinds over ~20 s
+and the settle is 20 s — **is not established and is the open item.**
+
+Practical consequence until it is: **fly one hold per session**, and treat a
+second-in-session hold as a different experiment rather than a repeat.
 
 ### Manual flight still works, and holds better than it did
 
@@ -1182,16 +1205,18 @@ has ever made.
 
 ### Where this leaves 8.6
 
-Flown five times at 180 s with the position hold in place, all five completing
-without abort, peaks 6.23 / 4.57 / 2.02 / 4.04 / 2.05 m against 158.6 m for
-the same gains before. The oscillation and the runaway are both gone and
+Flown six times at 180 s with the position hold in place, all six completing
+without abort, peaks 6.23 / 4.57 / 2.02 / 4.04 / 2.05 / 2.65 m against 158.6 m
+for the same gains before. The oscillation and the runaway are both gone and
 neither returned.
 
-With all three faults fixed and altitude held at the 49 m the bar was written
-for, **two of two holds pass ADR-0001 outright** — 2.02 m at +0.0029 m/s and
-2.05 m at +0.0061 m/s, both settling, both with a flat envelope. The one
-borderline result (4.04 m, +0.0109 m/s) flew 10 m higher, in the direction the
-`h`-scaled residual predicts. **8.6 passes.**
+With all three faults fixed, **every hold flown first in a fresh session passes
+ADR-0001 outright** — 2.02 m (+0.0029 m/s) and 2.05 m (+0.0061) at 49.3 m,
+2.65 m (+0.0046) at 59.3 m, all settling, all with a flat envelope. The single
+borderline result (4.04 m, +0.0109) is the only second-in-session hold, and a
+controlled flight at its altitude shows height explains only about a third of
+the difference. **8.6 passes**, with that one anomaly named rather than
+explained away.
 
 Nothing here needed a parameter change. Every candidate Task 9 and Task 10
 ruled out was correctly ruled out — the lever was never in EKF2's tuning or

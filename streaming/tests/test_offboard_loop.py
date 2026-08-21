@@ -1656,3 +1656,165 @@ def test_run_command_applies_a_set_param_tuple():
                        offboard.MAV_PARAM_TYPE_REAL32))
 
     assert sent["MPC_XY_P"] == (0.5, offboard.MAV_PARAM_TYPE_REAL32)
+
+
+# --- position hold ---------------------------------------------------------
+#
+# Idle used to mean a zero VELOCITY setpoint, which is an open integrator in
+# position: nothing in the loop ever sees where the aircraft is, so any bias in
+# the estimator's velocity walks the airframe away and nothing pulls it back.
+# Under GNSS that bias is small enough to look like station keeping. Under
+# vision it is not -- run 6 flew 225 m off the pad on a commanded hover with
+# `offboard_control_mode.position == 0` for every sample of the flight.
+#
+# Idle now means a POSITION setpoint at the point the stick was released.
+
+def _hold_loop(js, port, ned=(10.0, 20.0, -30.0), yaw=0.5, mode="OFFBOARD"):
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{port}")
+    state = offboard.CommandState(2.0, 1.0, watchdog_s=10.0)
+    loop = js.SetpointLoop(conn, state, rate_hz=20.0)
+    loop._px4_ned = ned
+    loop._px4_yaw = yaw
+    loop._note_mode(mode)
+    return loop, state
+
+
+def test_idle_in_offboard_holds_a_position_not_zero_velocity():
+    js = _load_server()
+    port = FAKE_PX4_PORT + 110
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        loop, _ = _hold_loop(js, port)
+        loop.start()
+
+        seen = _collect(px4, 1.0)
+        assert len(seen) >= 10, f"idle loop went quiet: only {len(seen)} sent"
+        last = seen[-1]
+        assert last.coordinate_frame == offboard.MAV_FRAME_LOCAL_NED
+        assert last.type_mask == offboard.POS_YAW_TYPE_MASK
+        assert last.x == pytest.approx(10.0)
+        assert last.y == pytest.approx(20.0)
+        assert last.z == pytest.approx(-30.0)
+        assert last.yaw == pytest.approx(0.5)
+    finally:
+        px4.close()
+
+
+def test_the_held_position_does_not_follow_the_aircraft():
+    """The whole point. A hold point re-taken every tick from the aircraft's
+    own position is the open-loop behaviour this replaces -- the error it
+    feeds the controller would be zero by construction."""
+    js = _load_server()
+    port = FAKE_PX4_PORT + 111
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        loop, _ = _hold_loop(js, port)
+        loop.start()
+        assert len(_collect(px4, 0.5)) > 0
+
+        loop._px4_ned = (60.0, 20.0, -30.0)      # blown 50 m downwind
+
+        seen = _collect(px4, 0.7)
+        assert seen[-1].x == pytest.approx(10.0), (
+            "hold point followed the aircraft instead of holding")
+    finally:
+        px4.close()
+
+
+def test_a_joystick_command_releases_the_hold():
+    js = _load_server()
+    port = FAKE_PX4_PORT + 112
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        loop, state = _hold_loop(js, port)
+        loop.start()
+        assert len(_collect(px4, 0.5)) > 0
+
+        state.set("fwd", True)
+
+        seen = _collect(px4, 0.7)
+        last = seen[-1]
+        assert last.coordinate_frame == offboard.MAV_FRAME_BODY_NED
+        assert last.type_mask == offboard.VEL_YAWRATE_TYPE_MASK
+        assert last.vx == pytest.approx(2.0)
+    finally:
+        px4.close()
+
+
+def test_the_hold_re_arms_where_the_stick_was_released():
+    js = _load_server()
+    port = FAKE_PX4_PORT + 113
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        loop, state = _hold_loop(js, port)
+        state.set("fwd", True)
+        loop.start()
+        assert len(_collect(px4, 0.5)) > 0
+
+        loop._px4_ned = (60.0, 20.0, -30.0)      # flew 50 m north on the stick
+        state.set("fwd", False)
+
+        seen = _collect(px4, 0.7)
+        last = seen[-1]
+        assert last.coordinate_frame == offboard.MAV_FRAME_LOCAL_NED
+        assert last.x == pytest.approx(60.0)
+    finally:
+        px4.close()
+
+
+def test_outside_offboard_the_hold_point_tracks_the_aircraft():
+    """A hold point latched on the pad and still held after a 50 m
+    AUTO.TAKEOFF would command a dive back to the ground the instant OFFBOARD
+    engaged. Outside OFFBOARD the setpoint is discarded anyway
+    (mavlink_receiver.cpp:1163), so the point tracks the airframe and the
+    latch only starts when OFFBOARD does."""
+    js = _load_server()
+    port = FAKE_PX4_PORT + 114
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        loop, _ = _hold_loop(js, port, ned=(0.0, 0.0, -1.0), mode="AUTO.TAKEOFF")
+        loop.start()
+        assert len(_collect(px4, 0.5)) > 0
+
+        loop._px4_ned = (0.0, 0.0, -50.0)        # climbed
+        assert len(_collect(px4, 0.3)) > 0
+        loop._note_mode("OFFBOARD")
+
+        seen = _collect(px4, 0.7)
+        assert seen[-1].z == pytest.approx(-50.0), (
+            "OFFBOARD engaged onto a stale hold point")
+    finally:
+        px4.close()
+
+
+def test_without_a_local_pose_idle_still_streams_zero_velocity():
+    """No LOCAL_POSITION_NED yet means no point to hold. The stream must not
+    gap for it -- a gap drops OFFBOARD."""
+    js = _load_server()
+    port = FAKE_PX4_PORT + 115
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        loop, _ = _hold_loop(js, port, ned=None, yaw=None)
+        loop.start()
+
+        seen = _collect(px4, 1.0)
+        assert len(seen) >= 10, f"stream gapped: only {len(seen)} sent"
+        assert all(m.coordinate_frame == offboard.MAV_FRAME_BODY_NED
+                   for m in seen)
+        assert all(m.vx == 0.0 and m.vy == 0.0 and m.vz == 0.0 for m in seen)
+    finally:
+        px4.close()
+
+
+def test_the_cut_re_anchors_the_hold_point():
+    """EKF2 resets its own horizontal position when GNSS goes
+    (ev_pos_control.cpp:182-233). The airframe does not move for it -- the
+    frame does. A point held across that jump would command the reset
+    distance as a real flight."""
+    js = _load_server()
+    _, loop, _ = _vision_loop(js, 116, _pose(), received_at=time.monotonic())
+    loop._hold_ned = (10.0, 20.0, -30.0, 0.0)
+
+    loop._restore_gnss()
+
+    assert loop._hold_ned is None

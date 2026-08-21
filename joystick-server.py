@@ -220,6 +220,7 @@ class RunCSV:
               "px4_n", "px4_e", "px4_d", "px4_yaw",
               "gt_x", "gt_y", "gt_z",
               "vio_x", "vio_y", "vio_z", "vio_yaw",
+              "hold_n", "hold_e", "hold_d",
               "excursion_m", "drift_m", "align_m", "realigned",
               "n_inliers", "fresh", "dropped_stale", "sim_rate")
 
@@ -354,6 +355,16 @@ class SetpointLoop(threading.Thread):
         # ONTO at each phase transition (_realign_vision_frame). Position and
         # yaw arrive in different messages and neither is useful alone, so both
         # stay None until their message has been seen at least once.
+        # PX4's mode, as the setpoint thread sees it. telemetry["mode"] carries
+        # the same string for the page; this copy exists so the hold below can
+        # read it without taking _telem_lock on every tick.
+        self._mode = "--"
+        # The point being held, (north, east, down, yaw) in PX4's local frame,
+        # or None whenever the operator is commanding motion. Captured when the
+        # last held direction is released and then FROZEN -- re-taking it from
+        # the aircraft every tick would make the position error zero by
+        # construction, which is the open-loop behaviour it replaces.
+        self._hold_ned = None
         self._px4_ned = None           # (north, east, down), LOCAL_POSITION_NED
         self._px4_yaw = None           # radians, ATTITUDE
         self._px4_vel = None           # (vx, vy, vz) m/s, LOCAL_POSITION_NED
@@ -404,6 +415,7 @@ class SetpointLoop(threading.Thread):
         (mavlink_receiver.cpp:1163), so a mission left RUNNING after a mode
         change would report progress it is not making.
         """
+        self._mode = mode
         with self._telem_lock:
             self._telem["mode"] = mode
         if mode != "OFFBOARD":
@@ -632,6 +644,13 @@ class SetpointLoop(threading.Thread):
             return
         vision_bridge.apply_ekf2_gps_denied_params(self.link)
         self._cut_pending_since = None
+        # EKF2 resets its own horizontal position when GNSS goes
+        # (ev_pos_control.cpp:182-233). The airframe does not move for it, but
+        # the FRAME the hold point is expressed in does, so a point held across
+        # the cut would command the reset distance as a real flight. Dropping
+        # it re-captures "hold where you now are", which is the same physical
+        # spot either side of the jump.
+        self._hold_ned = None
         self._gps_denied = True
         with self._telem_lock:
             self._telem["gps_denied"] = True
@@ -737,6 +756,8 @@ class SetpointLoop(threading.Thread):
         # that fires anyway, after the abort, is worse than no abort at all.
         was_pending = self._cut_pending_since is not None
         self._cut_pending_since = None
+        # Same reset, other direction -- see _maybe_complete_gps_denied.
+        self._hold_ned = None
         self._gps_denied = False
         with self._telem_lock:
             self._telem["gps_denied"] = False
@@ -950,6 +971,11 @@ class SetpointLoop(threading.Thread):
         """
         last = getattr(self.vision, "_last_msg", None) or {}
         n, e, d = self._px4_ned if self._px4_ned is not None else (None, None, None)
+        # The commanded hold point, so a run can be read back for whether the
+        # aircraft was chasing a stale point or genuinely failing to hold a
+        # live one. None on every row where a direction was being commanded.
+        hn, he, hd = (self._hold_ned[:3] if self._hold_ned is not None
+                      else (None, None, None))
         self._csv.write({
             "sim_s": self._px4_sim_s,
             "phase": self._phase(),
@@ -958,6 +984,7 @@ class SetpointLoop(threading.Thread):
             "gt_z": last.get("gt_z"),
             "vio_x": last.get("x"), "vio_y": last.get("y"), "vio_z": last.get("z"),
             "vio_yaw": last.get("yaw"),
+            "hold_n": hn, "hold_e": he, "hold_d": hd,
             "excursion_m": (vio_status or {}).get("excursion_m"),
             "drift_m": last.get("drift_m"),
             "align_m": self.vision_sender.alignment.offset_m()
@@ -1023,6 +1050,48 @@ class SetpointLoop(threading.Thread):
                 with self._telem_lock:
                     self._telem["home_valid"] = True
 
+    def _send_manual_setpoint(self, vx, vy, vz, yaw_rate):
+        """Exactly one setpoint for the operator-controlled path.
+
+        A held direction is a VELOCITY setpoint. Nothing held is a POSITION
+        setpoint at the point of release -- not a zero velocity.
+
+        That distinction is the whole of ADR-0008. A zero-velocity setpoint
+        leaves PX4 with `offboard_control_mode.position == 0`, so the position
+        controller never computes a position error and `MPC_XY_P` is not in the
+        loop at all: the hover is an open integrator, and whatever bias the
+        estimator has in its VELOCITY walks the airframe away with nothing
+        pulling it back. Under GNSS that bias is small enough that the drift
+        reads as station keeping. Under vision it is not -- run 6 flew 225 m
+        off a commanded hover, with EKF2's own local position reporting the
+        excursion the whole way and no setpoint that could act on it.
+
+        Three rules, and each one is load-bearing:
+
+        - The point is captured ONCE, at release. Re-taking it from the
+          aircraft every tick would hold the error at zero by construction and
+          reproduce the open-loop behaviour with a position setpoint's shape.
+        - Outside OFFBOARD it tracks the airframe instead of latching. PX4
+          discards setpoints outside OFFBOARD (mavlink_receiver.cpp:1163), so
+          a point latched on the pad would survive a 50 m AUTO.TAKEOFF and
+          command a dive back to the ground the instant OFFBOARD engaged.
+        - No local pose means no point to hold, so it falls back to the zero
+          velocity. A gap in the stream drops OFFBOARD; there is no third
+          option where nothing is sent.
+        """
+        if (vx, vy, vz, yaw_rate) != (0.0, 0.0, 0.0, 0.0):
+            self._hold_ned = None
+            self.link.send_velocity(vx, vy, vz, yaw_rate)
+            return
+        if self._px4_ned is None or self._px4_yaw is None:
+            self._hold_ned = None
+            self.link.send_velocity(vx, vy, vz, yaw_rate)
+            return
+        if self._hold_ned is None or self._mode != "OFFBOARD":
+            north, east, down = self._px4_ned
+            self._hold_ned = (north, east, down, self._px4_yaw)
+        self.link.send_position_local(*self._hold_ned)
+
     def run(self):
         next_tick = time.monotonic()
         while True:
@@ -1041,10 +1110,14 @@ class SetpointLoop(threading.Thread):
             if target is not None:
                 wp_lat, wp_lon, wp_alt, wp_yaw = target
                 self.link.send_position_global(wp_lat, wp_lon, wp_alt, wp_yaw)
+                # A mission owns the aircraft, so any point held before it
+                # started is stale the moment it moves. Dropped here rather
+                # than on pause: pause is not the only way a mission ends.
+                self._hold_ned = None
                 vx, yaw_rate = 0.0, 0.0
             else:
                 vx, vy, vz, yaw_rate = self.state.command()
-                self.link.send_velocity(vx, vy, vz, yaw_rate)
+                self._send_manual_setpoint(vx, vy, vz, yaw_rate)
 
             # AFTER the setpoint, never before and never instead: the setpoint
             # stream is what holds OFFBOARD, so vision rides along with it and

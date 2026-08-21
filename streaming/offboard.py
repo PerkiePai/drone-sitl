@@ -19,6 +19,13 @@ import time
 # regardless of attitude.
 MAV_FRAME_BODY_NED = 8
 
+# Local-NED position setpoints, for station keeping. The estimator's own frame,
+# so a point captured from LOCAL_POSITION_NED can be handed straight back with
+# no projection in between -- unlike the global form, which round-trips through
+# lat/lon. PX4 takes position from this frame directly
+# (mavlink_receiver.cpp:957-968) and passes yaw through unrotated (:1024).
+MAV_FRAME_LOCAL_NED = 1
+
 # type_mask: ignore position (bits 0-2), ignore acceleration (bits 6-8),
 # ignore yaw (bit 10). USE velocity (bits 3-5) and yaw_rate (bit 11 clear).
 # yaw_rate = 0 holds the heading; non-zero turns. PX4 applies yawspeed outside
@@ -225,6 +232,25 @@ class OffboardLink:
             0.0, 0.0, 0.0,                      # afx, afy, afz -- masked off
             0.0,                                # yaw        -- masked off
             yaw_rate)                           # rad/s; 0 holds heading
+
+    def send_position_local(self, north, east, down, yaw_rad):
+        """Hold a point in PX4's own local NED frame, nose on yaw_rad.
+
+        Same contract as send_velocity: setpoint-thread only. This is what
+        makes a hover a CLOSED loop -- with only a velocity setpoint PX4 never
+        sees a position error, so `offboard_control_mode.position` stays 0 and
+        any bias in the estimator's velocity walks the airframe away unopposed.
+        """
+        self.conn.mav.set_position_target_local_ned_send(
+            0,                                  # time_boot_ms (PX4 ignores)
+            self.target_system, self.target_component,
+            MAV_FRAME_LOCAL_NED,
+            POS_YAW_TYPE_MASK,
+            float(north), float(east), float(down),
+            0.0, 0.0, 0.0,                      # vx, vy, vz    -- masked off
+            0.0, 0.0, 0.0,                      # afx, afy, afz -- masked off
+            float(yaw_rad),
+            0.0)                                # yaw_rate      -- masked off
 
     def send_position_global(self, lat, lon, rel_alt_m, yaw_deg):
         """Fly to a lat/lon at an altitude relative to home, nose on yaw_deg.

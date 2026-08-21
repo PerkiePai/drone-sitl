@@ -1258,7 +1258,34 @@ somewhere between.
 That is a falsifiable prediction with an obvious test: **the position gain
 should have to scale as 1/h.** `MPC_XY_P` is now genuinely in the loop (it was
 not before ADR-0008), so halving it at 98 m should buy back what the height
-spent. Untested as of this writing.
+spent.
+
+**Flown, and refuted** (`logs/20260822-highgain/`) — 49 m at `baseline`, then
+98 m at `gentler_p` (`MPC_XY_P` 0.95 -> 0.50 *and* `MPC_XY_VEL_P_ACC` 1.8 ->
+1.2, so both loops softened, not just the outer one):
+
+| | AGL | peak | mean | slope |
+|---|---|---|---|---|
+| baseline | 49.3 m | 1.64 m | 0.68 m | +0.0027 m/s |
+| **gentler_p** | 98.1 m | **33.43 m** | 10.77 m | +0.1235 m/s |
+
+33 m against baseline's 25 m and 50 m at the same height — inside the
+run-to-run spread of that regime, so **softening the controller does nothing
+at altitude.** The collapse is not "the controller is too aggressive for the
+loop gain."
+
+**A confound in the open-loop sweep, stated because it survives:** GNSS was on
+for it, so EKF2 had GPS-quality *velocity* the whole time. In a real phase-2
+hold EKF2 must derive velocity by differentiating the vision position, and at
+98 m the same angular noise is twice the metres — so twice the velocity noise
+into the term the controller reacts to hardest. That is the next hypothesis
+and it is **untested**; the sweep as flown cannot separate "closed loop" from
+"no GNSS velocity."
+
+Two hypotheses about the >60 m collapse have now been flown and refuted (the
+bias gate, and the 1/h gain scaling). It is not the estimator's position
+solve, and it is not controller aggressiveness. **Recorded as open rather than
+guessed at a third time.**
 
 **The established operating envelope is up to ~60 m at default gains**, and
 the larger bias estimate at 98 m reads as a symptom of an aircraft being

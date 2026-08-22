@@ -23,7 +23,7 @@
 #
 # Per-flight overrides, no file editing needed:
 #   SITE=bangkok-survey-040 ./sim/launch-sitl.sh         # which site (this is the default)
-#   SPAWN_XYZ='[12.0, -4.0, -26.5]' ./sim/launch-sitl.sh # takeoff point (ABSOLUTE z)
+#   SPAWN_XYZ='[12.0, -4.0, -24.5]' ./sim/launch-sitl.sh # takeoff point (ABSOLUTE z)
 #   HEADING_DEG=90 ./sim/launch-sitl.sh                  # compass heading
 #   AUTOPLAY=0 ./sim/launch-sitl.sh                      # spawn but stay stopped
 #   VIO=1 ./sim/launch-sitl.sh                           # also start vio-streamer.py
@@ -36,8 +36,11 @@
 # invalid for VIO.
 #
 # SPAWN_XYZ's z is absolute, so an override has to account for the ground plane
-# (ground_z = -26.99 at this site). Prefer editing spawn_agl_m in sim/sites.py,
-# which is measured from the ground and cannot drift away from it.
+# (ground_z = -25.0 at this site, matching the survey mesh it stands on -- the
+# example above is that plus sites.py's 0.5 m spawn_agl_m). Below it the drone
+# falls through; above it, it hovers on an invisible floor. Prefer editing
+# spawn_agl_m in sim/sites.py, which is measured from the ground and cannot
+# drift away from it.
 # ============================================================================
 set -euo pipefail
 

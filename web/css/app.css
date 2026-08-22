@@ -16,11 +16,22 @@ body { margin:0; background:#111; color:#ddd; font:14px system-ui,sans-serif;
 .leaflet-control-attribution { background:rgba(0,0,0,.6); color:#888; }
 .leaflet-control-attribution a { color:#aaa; }
 /* The drone: a triangle rotated to the live heading. A divIcon, not an
-   image marker -- vendored Leaflet has no image sprites to 404 on. */
+   image marker -- vendored Leaflet has no image sprites to 404 on.
+
+   Colour is identity here and matches the traces in map.js: amber is PX4's own
+   estimate, green is ground truth, cyan is the raw vision estimate. PX4's arrow
+   used to be the green one and gave the colour up -- truth earns it, and two
+   green arrows would be worse than one. */
 .drone-icon { display:flex; align-items:center; justify-content:center; }
 .drone-arrow { width:0; height:0; border-left:9px solid transparent;
-               border-right:9px solid transparent; border-bottom:22px solid #6f6;
+               border-right:9px solid transparent; border-bottom:22px solid #fc6;
                filter:drop-shadow(0 0 3px #000); transform-origin:50% 65%; }
+/* Hollow, so a green arrow sitting on top of the amber one still shows both --
+   which is exactly the case worth seeing: estimate and truth agreeing. */
+.gt-arrow { width:0; height:0; border-left:9px solid transparent;
+            border-right:9px solid transparent; border-bottom:22px solid #6f6;
+            opacity:.85; filter:drop-shadow(0 0 3px #000);
+            transform-origin:50% 65%; }
 .wp-icon { display:flex; align-items:center; justify-content:center;
            width:22px; height:22px; border-radius:50%; background:#fc6;
            color:#111; font:bold 12px system-ui,sans-serif;
@@ -34,6 +45,15 @@ body { margin:0; background:#111; color:#ddd; font:14px system-ui,sans-serif;
 #mapbar input { width:62px; padding:7px; border-radius:6px;
                 border:1px solid #444; background:#222; color:#eee;
                 font-size:14px; }
+/* Map legend. The three hexes are the contract with map.js -- change one here
+   and the legend starts lying about what is on the map. */
+#maplegend { display:flex; gap:12px; justify-content:center; flex-wrap:wrap;
+             font-size:12px; color:#9a9a9a; }
+#maplegend span { display:flex; align-items:center; gap:5px; }
+.sw { width:11px; height:11px; border-radius:2px; display:inline-block; }
+.sw-truth { background:#6f6; }
+.sw-px4 { background:#fc6; }
+.sw-vio { background:#6cf; }
 #mstat { min-height:1.3em; font-size:13px; text-align:center; color:#9a9a9a;
          font-variant-numeric:tabular-nums; }
 #telem { display:flex; gap:14px; flex-wrap:wrap; justify-content:center;

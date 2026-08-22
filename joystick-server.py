@@ -114,6 +114,16 @@ PX4's clock, which under lockstep is sim time, and at sim_rate 0.11 one
 simulated second is nine wall seconds.
 """
 
+M_PER_DEG_LAT = 111320.0
+"""Metres per degree of latitude, for the map's ENU -> lat/lon projection.
+
+Equirectangular, not geodetic. Over the ~100 m these flights cover the error
+against WGS-84 is under a centimetre, which is three orders of magnitude below
+the excursions this display exists to show. A proper projection would be more
+code for a difference no pixel can render.
+"""
+
+
 PX4_RESTART_GAP_S = 10.0
 """Heartbeat silence that means PX4 restarted rather than merely lagged.
 
@@ -366,6 +376,11 @@ class SetpointLoop(threading.Thread):
         # the aircraft every tick would make the position error zero by
         # construction, which is the open-loop behaviour it replaces.
         self._hold_ned = None
+        # Lat/lon of PX4's local-NED origin, latched at the first fix that has a
+        # local position to pair with. LATCHED, not recomputed: an origin that
+        # tracked the aircraft would slide under the traces, drawing a drifting
+        # aircraft as a stationary one on a moving world.
+        self._map_origin = None
         self._px4_ned = None           # (north, east, down), LOCAL_POSITION_NED
         self._px4_yaw = None           # radians, ATTITUDE
         self._px4_vel = None           # (vx, vy, vz) m/s, LOCAL_POSITION_NED
@@ -395,13 +410,22 @@ class SetpointLoop(threading.Thread):
         Heading comes from here rather than ATTITUDE so the map arrow and the
         telemetry row are the same number and cannot disagree.
         """
+        lat, lon = msg.lat / 1e7, msg.lon / 1e7
         with self._telem_lock:
-            self._telem["lat"] = msg.lat / 1e7
-            self._telem["lon"] = msg.lon / 1e7
+            self._telem["lat"] = lat
+            self._telem["lon"] = lon
             # hdg is centidegrees 0-35999, with 65535 meaning UNKNOWN. Keep
             # the last good heading rather than reporting 655 degrees.
             if msg.hdg != 65535:
                 self._telem["heading_deg"] = msg.hdg / 100.0
+        # Site the local frame on Earth, once. Both halves are needed: this
+        # message says where the aircraft IS, `_px4_ned` says how far that is
+        # from local (0,0), and the traces are drawn from the latter.
+        if self._map_origin is None and self._px4_ned is not None:
+            north, east, _ = self._px4_ned
+            lat0 = lat - north / M_PER_DEG_LAT
+            lon0 = lon - east / (M_PER_DEG_LAT * math.cos(math.radians(lat0)))
+            self._map_origin = (lat0, lon0)
 
     def load_mission(self, points, alt_m):
         """Called from the web thread. Mission carries its own lock and
@@ -906,6 +930,20 @@ class SetpointLoop(threading.Thread):
             return "1b"
         return "1"
 
+    def _enu_to_latlon(self, east, north):
+        """A point in the local ENU frame -> (lat, lon) for the map.
+
+        None until the origin is latched, and None rather than (0, 0): an
+        unsited point drawn at null island is a lie the page would render
+        without complaint.
+        """
+        if self._map_origin is None or east is None or north is None:
+            return None
+        lat0, lon0 = self._map_origin
+        lat = lat0 + north / M_PER_DEG_LAT
+        lon = lon0 + east / (M_PER_DEG_LAT * math.cos(math.radians(lat0)))
+        return (lat, lon)
+
     def _excursion_m(self):
         """Distance from the hold point taken at the cut, in ground truth.
 
@@ -962,6 +1000,41 @@ class SetpointLoop(threading.Thread):
             # the console.
             "realigned": self.vision_sender.realigned,
             "align_m": self.vision_sender.alignment.offset_m(),
+            # The map's other two positions. PX4's own is already in the
+            # telemetry root as lat/lon; these are ground truth and the vision
+            # estimate, projected through the SAME latched origin so the three
+            # are directly comparable on screen.
+            #
+            # Projected RAW. GT is anchored at the spawn point and PX4's local
+            # frame at the EKF origin, and they are not the same point -- any
+            # constant offset between them belongs on the map, because this
+            # display exists to show frame disagreement rather than hide it.
+            # Same for EKF2's position reset at the GNSS cut: the PX4 trace
+            # jumps, the GT trace does not, and that difference IS the picture.
+            **self._map_positions(last),
+        }
+
+    def _map_positions(self, last):
+        """The GT and VIO map fields, all None-safe. Split out because the
+        None cases outnumber the arithmetic and belong somewhere readable.
+
+        None, never 0.0 or (0, 0) -- the same convention as `drift_m`. No GT
+        topic means "cannot tell", and a marker parked at the origin would read
+        as an aircraft sitting on the pad.
+        """
+        gt = self._enu_to_latlon(last.get("gt_x"), last.get("gt_y"))
+        vio = self._enu_to_latlon(last.get("x"), last.get("y"))
+        gt_yaw = last.get("gt_yaw")
+        return {
+            "gt_lat": None if gt is None else gt[0],
+            "gt_lon": None if gt is None else gt[1],
+            # ENU yaw (counter-clockwise from east) -> compass bearing
+            # (clockwise from north), which is what the CSS rotation on the
+            # arrow wants and what telemetry["heading_deg"] already is.
+            "gt_heading_deg": (None if gt_yaw is None or gt is None
+                               else (90.0 - math.degrees(gt_yaw)) % 360.0),
+            "vio_lat": None if vio is None else vio[0],
+            "vio_lon": None if vio is None else vio[1],
         }
 
     def _write_csv_row(self, vio_status):

@@ -112,6 +112,10 @@ class Estimator:
         self.n_frames = 0
         self.n_solved = 0
         self.last_gt = None         # SCORING ONLY -- never read by the estimate
+        # The GT heading, same scoring-only status. The map's green arrow
+        # points where the airframe TRULY points, which nothing else in
+        # this payload can supply -- self.state's yaw is the estimate.
+        self.last_gt_yaw = None
 
     # --- sensor inputs -----------------------------------------------------
 
@@ -141,6 +145,14 @@ class Estimator:
         """Drift reporting only. Nothing here may reach self.pos."""
         if self.use_gt:
             self.last_gt = np.asarray(msg["p"], dtype=float)
+            q = msg.get("q")
+            if q is not None:
+                # xyzw, FLU in ENU (vio-streamer.py sends Isaac's own order).
+                # Yaw about up, counter-clockwise from EAST -- the server turns
+                # it into a compass bearing for the arrow.
+                x, y, z, w = (float(v) for v in q)
+                self.last_gt_yaw = float(np.arctan2(
+                    2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
 
     def on_frame(self, msg):
         """One camera frame. Returns the vio payload, or None if not processed."""
@@ -218,6 +230,9 @@ class Estimator:
             "gt_x": None if gt is None else float(gt[0]),
             "gt_y": None if gt is None else float(gt[1]),
             "gt_z": None if gt is None else float(gt[2]),
+            # Radians, ENU, counter-clockwise from east. None when the GT topic
+            # is absent or predates the field -- same convention as gt_x.
+            "gt_yaw": self.last_gt_yaw,
         }
 
 

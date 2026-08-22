@@ -19,6 +19,14 @@
         <button id="m-pause" disabled>PAUSE</button>
         <button id="m-clear" disabled>CLEAR</button>
       </div>
+      <!-- Hidden until the vio block arrives: without --vision there is no
+           green arrow and no cyan trace, so two of the three rows would name
+           things that are not on the map. -->
+      <div id="maplegend" hidden>
+        <span><i class="sw sw-truth"></i>truth</span>
+        <span><i class="sw sw-px4"></i>PX4</span>
+        <span><i class="sw sw-vio"></i>VIO</span>
+      </div>
       <div id="mstat">click the map to add waypoints</div>
     </div>
   </div>

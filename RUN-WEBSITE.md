@@ -347,6 +347,34 @@ estimator has sent its first message:
 | `fix` | Estimator frame rate, Hz |
 | `align` | How far the last frame realignment (at fusion start, or at the cut) had to close |
 
+**The map draws all three positions**, once the estimator is running:
+
+| | What it is | Where it comes from |
+|---|---|---|
+| **green arrow** | Ground truth | Isaac's physics, via `vio-streamer.py` |
+| **amber arrow + trace** | PX4/EKF2's own estimate — what the aircraft is actually flying on | `GLOBAL_POSITION_INT` |
+| **cyan trace** | The raw vision estimate, before EKF2 fuses it | `pipeline-streaming.py` |
+
+Each trace is the last **100 m of path flown**, so it doubles as a scale bar: a
+tight tangle around the hold point when the hold is good, a 100 m streak when it
+is not.
+
+Reading any one of the three alone tells the wrong story. At 98 m the vision
+drift stays ~2 m — the estimator is fine — while the aircraft leaves by 25 m,
+and PX4's estimate tracks the vision, so **amber looks calm the whole way**.
+Amber and cyan agreeing while green walks away IS the failure.
+
+The three frames are drawn **raw**, through one origin latched at the first PX4
+fix. Nothing is aligned on the way, so a constant offset between ground truth's
+spawn anchor and PX4's EKF origin is visible rather than hidden, and EKF2's
+position reset at the GNSS cut shows as an amber jump with green staying put.
+The cyan trace is cleared at each realignment (fusion start, and the cut),
+because those redefine the vision frame — a trace spanning one would draw a jump
+the aircraft never made.
+
+Green is absent on a flight with no ground truth (`--no-vision`, or `VIO=0` at
+sim launch): the arrow comes off the map rather than freezing in place.
+
 **The flow, in order:**
 
 1. **Climb.** The down camera is blind near the ground at `bangkok-survey-040`

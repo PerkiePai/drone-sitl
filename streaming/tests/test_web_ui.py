@@ -441,3 +441,102 @@ def test_cutting_gnss_is_reported_as_taken_and_not_offered_twice():
     seg = js.split("function paintGpsDenied")[1]
     assert "t.gps_denied" in seg
     assert "GNSS OFF" in seg
+
+
+# --- the three positions on the map ---------------------------------------
+
+def test_the_map_draws_all_three_positions():
+    """Ground truth, PX4's estimate and the vision estimate are three different
+    numbers, and reading any one of them alone tells the wrong story: at 98 m
+    the VIO drift stays ~2 m while the aircraft leaves by 25 m."""
+    js = _read("web", "js", "map.js")
+    for source in ("gt_lat", "vio_lat", "t.lat"):
+        assert source in js, f"the map never reads {source}"
+
+
+def test_ground_truth_is_the_green_arrow_and_px4_is_not():
+    """Green means truth. The PX4 marker was green before this and had to give
+    the colour up -- two green arrows would be worse than one."""
+    css = _read("web", "css", "app.css")
+    gt = css.split(".gt-arrow")[1].split("}")[0]
+    assert "#6f6" in gt, "ground truth must be the green arrow"
+    px4 = css.split(".drone-arrow")[1].split("}")[0]
+    assert "#6f6" not in px4, "PX4's marker must not also be green"
+
+
+def test_the_traces_are_trimmed_to_a_hundred_metres_of_path():
+    """Path length, not sample count and not a time window: the trail is then
+    its own scale bar -- a tight tangle at a good hold, a 100 m streak at a
+    divergence."""
+    js = _read("web", "js", "map.js")
+    assert "TRACE_LEN_M = 100" in js
+    assert "map.distance" in js, (
+        "trimming by path length needs real metres, not degrees")
+
+
+def test_the_ground_truth_arrow_is_hidden_when_there_is_no_ground_truth():
+    """--no-vision and VIO=0 flights have no GT topic at all. A green arrow
+    parked at the origin would read as an aircraft sitting on the pad."""
+    js = _read("web", "js", "map.js")
+    seg = js.split("export function paintTruth")[1]
+    assert "=== null" in seg or "== null" in seg
+    assert "removeLayer" in seg, "the arrow must come off the map, not freeze"
+
+
+def test_the_map_is_given_the_vio_block():
+    """paintDrone only ever saw the telemetry root, where GT and VIO are not.
+    main.js is the dispatcher that fans a frame out to the modules, so the new
+    call belongs beside paintDrone there rather than inside telemetry.js."""
+    js = _read("web", "js", "main.js")
+    assert "paintTruth(t.vio)" in js
+    assert "paintTruth" in js.split("from './map.js'")[0], (
+        "paintTruth must be imported, or the dispatch throws on the first frame")
+
+
+def test_the_vio_trace_is_dropped_when_the_vision_frame_is_realigned():
+    """A realignment REDEFINES the vision frame -- at fusion start and again at
+    the GNSS cut. Points either side of one are in different frames, so keeping
+    them would draw a line between two coordinate systems and read as a jump the
+    aircraft never made. PX4's trace is not reset for EKF2's own position reset:
+    that jump is in ONE frame and is exactly what the display exists to show."""
+    js = _read("web", "js", "map.js")
+    assert "realigned" in js, "map.js never notices a frame realignment"
+    seg = js.split("export function paintTruth")[1]
+    assert "reset(vioTrace)" in seg
+
+
+def test_the_map_legend_names_all_three_positions():
+    """Three coloured things on a satellite image mean nothing unlabelled, and
+    mistaking amber (PX4's estimate) for green (truth) inverts the reading of
+    every GPS-denied hold."""
+    html = _read("web", "index.html")
+    assert 'id="maplegend"' in html
+    legend = html.split('id="maplegend"')[1].split("</div>")[0]
+    for word in ("truth", "px4", "vio"):
+        assert word in legend.lower(), f"the legend never names {word}"
+
+
+def test_the_legend_swatches_match_the_colours_the_map_draws():
+    """A legend that drifts from the map is worse than none. These three hex
+    values are the contract between app.css and map.js."""
+    css = _read("web", "css", "app.css")
+    js = _read("web", "js", "map.js")
+    for cls, colour, where in (("sw-truth", "#6f6", ".gt-arrow"),
+                               ("sw-px4", "#fc6", ".drone-arrow"),
+                               ("sw-vio", "#6cf", None)):
+        swatch = css.split(f".{cls}")[1].split("}")[0]
+        assert colour in swatch, f".{cls} must be {colour}"
+        if where:
+            assert colour in css.split(where)[1].split("}")[0]
+    assert "'#fc6'" in js and "'#6cf'" in js, "the traces must use the same hexes"
+
+
+def test_the_legend_is_hidden_on_a_flight_with_no_vision():
+    """Without --vision there is no green arrow and no cyan trace, so two of
+    the three rows would name things that are not on the map."""
+    html = _read("web", "index.html")
+    row = html.split('id="maplegend"')[1].split(">")[0]
+    assert "hidden" in row, "the legend must start hidden"
+    js = _read("web", "js", "map.js")
+    seg = js.split("export function paintTruth")[1]
+    assert "maplegend" in seg

@@ -2,7 +2,7 @@
 // dispatch that fans a telemetry frame out to the other modules.
 import { connect } from './ws.js';
 import { setStatus, paint as paintTelemetry, sendCmd, clearPending } from './telemetry.js';
-import { paintDrone } from './map.js';
+import { paintDrone, paintTruth } from './map.js';
 import { updateMission, syncAltDefault, setMissionSpeed } from './route.js';
 import { resetHeld } from './controls.js';
 import { paintRecorder } from './recorder.js';
@@ -29,6 +29,9 @@ connect({
     paintTelemetry(t);
     syncAltDefault(t);
     paintDrone(t);
+    // Ground truth and the raw vision estimate ride in the vio block, not
+    // the telemetry root paintDrone reads.
+    paintTruth(t.vio);
     updateMission(t);
     paintRecorder(t);
   },

@@ -10,9 +10,16 @@ Five flights, each fix exposing the next fault. Read the chain top to bottom.
 ## Running it
 
 ```bash
-DRONE_SETUP_DOWN_VIB_DAMP=False VIO=1 ./sim/launch-sitl.sh
+./sim/launch-sitl.sh
 python joystick-server.py --takeoff-alt 50 --speed-up 3.0
 ```
+
+`VIO=1` and `DRONE_SETUP_DOWN_VIB_DAMP=False` used to be typed on the front of
+that first command; both are the launcher's defaults now (`VIO=0` for a GNSS-only
+flight, which also restores the soft mount). The change was forced by a flight
+launched without them on 2026-08-22: nothing bound :5556, so no vision estimate
+ever reached the server, and GO GPS-DENIED refused at 75 m with a message about
+climbing higher — altitude advice for a problem that was a missing publisher.
 
 Two commands. `joystick-server.py` spawns and supervises `pipeline-streaming.py`,
 `--vision` defaults ON, and `--site` defaults to the launcher's. Isaac stays

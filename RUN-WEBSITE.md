@@ -187,19 +187,24 @@ SITE=bangkok-survey-040 ./sim/launch-sitl.sh           # which site (this is the
 SPAWN_XYZ='[12.0, -4.0, -26.5]' ./sim/launch-sitl.sh   # takeoff point (x=E, y=N, z=Up)
 HEADING_DEG=90 ./sim/launch-sitl.sh                    # compass heading
 AUTOPLAY=0 ./sim/launch-sitl.sh                        # spawn, but leave it stopped
-VIO=1 ./sim/launch-sitl.sh                             # also start vio-streamer.py, for GPS-denied flight
+VIO=0 ./sim/launch-sitl.sh                             # skip vio-streamer.py (GNSS-only flight)
+VIB_DAMP=True ./sim/launch-sitl.sh                     # force the soft camera mount back on
 ```
 
-`VIO=1` publishes IMU/baro/camera over ZMQ:5556 for GPS-denied flight (section
-5.5). It is off by default because it runs from inside the physics callback
-PX4 SITL is lockstepped to, which is not a cost worth putting on an ordinary
-GPS flight. Pair it with `DRONE_SETUP_DOWN_VIB_DAMP=False` — the soft camera
-mount otherwise low-passes the body attitude, making the camera↔IMU extrinsic
-time-varying and the rig invalid for VIO:
+`vio-streamer.py` publishes IMU/baro/camera over ZMQ:5556 for GPS-denied flight
+(section 5.5), and is **on by default**. Launching without it is a silent dead
+end: `pipeline-streaming.py` gets no frames, so no vision estimate ever reaches
+`joystick-server.py`, and GO GPS-DENIED refuses for the whole flight with
+*"EKF2 is not fusing vision yet — climb until the camera can see ground"* — a
+message about altitude for a problem that has nothing to do with altitude.
+`VIO=0` buys back the work the streamer does inside the physics callback PX4
+SITL is lockstepped to, for a flight that is only ever going to use GNSS.
 
-```bash
-DRONE_SETUP_DOWN_VIB_DAMP=False VIO=1 ./sim/launch-sitl.sh
-```
+The camera mount follows VIO, so there is nothing to pair by hand any more.
+With VIO on, `DOWN_VIB_DAMP` defaults to `False` — the soft mount otherwise
+low-passes the body attitude, making the camera↔IMU extrinsic time-varying and
+the rig invalid for VIO. With `VIO=0` it stays `True`, the silicone mount the
+real airframe has. `VIB_DAMP=True|False` overrides the pairing either way.
 
 `SPAWN_XYZ`'s z is **absolute**, so an override has to account for the ground
 plane — `ground_z = -26.99` at this site, so `z = 0.5` would drop the drone 27 m
@@ -815,13 +820,13 @@ can fly the drone. Fine on a trusted LAN, not fine on an open network.
 # one-time: cp sim/secrets.env.example sim/secrets.env && paste your ion token
 
 # plain GPS flight (pad + waypoints only):
-./sim/launch-sitl.sh                                                    # stage + drone + Play
+VIO=0 ./sim/launch-sitl.sh                                              # stage + drone + Play
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/detect   # 200
 conda run -n drone python joystick-server.py --no-vision                # wait for line 4
 hostname -I | awk '{print $1}'                                          # your IP
 
 # GPS-denied / VIO stack (two commands, per SESSION.md):
-DRONE_SETUP_DOWN_VIB_DAMP=False VIO=1 ./sim/launch-sitl.sh
+./sim/launch-sitl.sh                                                    # VIO on by default
 conda run -n drone python joystick-server.py --takeoff-alt 50 --speed-up 3.0
 
 # browse to http://<ip>:8090/

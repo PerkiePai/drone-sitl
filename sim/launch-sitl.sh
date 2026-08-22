@@ -26,14 +26,21 @@
 #   SPAWN_XYZ='[12.0, -4.0, -24.5]' ./sim/launch-sitl.sh # takeoff point (ABSOLUTE z)
 #   HEADING_DEG=90 ./sim/launch-sitl.sh                  # compass heading
 #   AUTOPLAY=0 ./sim/launch-sitl.sh                      # spawn but stay stopped
-#   VIO=1 ./sim/launch-sitl.sh                           # also start vio-streamer.py
+#   VIO=0 ./sim/launch-sitl.sh                           # skip vio-streamer.py
+#   VIB_DAMP=True ./sim/launch-sitl.sh                   # force the soft camera mount
 #
-# VIO=1 publishes IMU/baro/camera over ZMQ:5556 for GPS-denied flight. It is off
-# by default because it works from inside the physics callback that PX4 SITL is
-# lockstepped to, which is not a cost to put on ordinary GPS flights. Pair it
-# with DRONE_SETUP_DOWN_VIB_DAMP=False: the soft camera mount low-passes the
-# body attitude, making the camera<->IMU extrinsic time-varying and the rig
-# invalid for VIO.
+# VIO publishes IMU/baro/camera over ZMQ:5556 for GPS-denied flight, and is ON
+# by default: a launch without it starves pipeline-streaming.py, so the vision
+# estimate never appears and the page's GO GPS-DENIED button refuses forever
+# with a message about climbing higher. That silent dead end costs more than the
+# streamer does. VIO=0 buys back the work it does inside the physics callback
+# PX4 SITL is lockstepped to, for a flight that is only ever going to use GNSS.
+#
+# The camera mount follows VIO. With VIO on, DOWN_VIB_DAMP defaults to False --
+# the soft mount low-passes the body attitude, making the camera<->IMU extrinsic
+# time-varying and the rig invalid for VIO. With VIO=0 it stays True, which is
+# the silicone mount the real airframe has. VIB_DAMP sets it explicitly either
+# way, for a VIO run that wants to measure what the damping actually costs.
 #
 # SPAWN_XYZ's z is absolute, so an override has to account for the ground plane
 # (ground_z = -25.0 at this site, matching the survey mesh it stands on -- the
@@ -93,7 +100,7 @@ export SITL_SITE="$SITE"
 export SITL_SETUP_SCRIPT="$SETUP_SCRIPT"
 export SITL_AUTOPLAY="${AUTOPLAY:-1}"
 export SITL_TILE_SETTLE_FRAMES="${TILE_SETTLE_FRAMES:-240}"
-export SITL_VIO_STREAM="${VIO:-0}"
+export SITL_VIO_STREAM="${VIO:-1}"
 
 # --- consumed by drone_setup_px4_cesium.py's env-override block -------------
 # Only exported when the operator actually set them; otherwise the site config
@@ -103,6 +110,19 @@ export SITL_VIO_STREAM="${VIO:-0}"
 #
 # Anything else in that script's tunables block can be set the same way, e.g.
 #   DRONE_SETUP_ADD_WIND=True DRONE_SETUP_STREAM_PORT=8081 ./sim/launch-sitl.sh
+#
+# DOWN_VIB_DAMP is the exception: always exported, because it tracks VIO rather
+# than the site config. A rigid mount is what VIO needs; the silicone one is
+# what the airframe actually has. VIB_DAMP overrides the pairing.
+if [[ -z "${VIB_DAMP:-}" ]]; then
+    if [[ "${SITL_VIO_STREAM}" == "1" ]]; then
+        VIB_DAMP=False
+    else
+        VIB_DAMP=True
+    fi
+fi
+export DRONE_SETUP_DOWN_VIB_DAMP="$VIB_DAMP"
+
 if [[ -n "${SPAWN_XYZ:-}" ]]; then
     export DRONE_SETUP_SPAWN_XYZ="$SPAWN_XYZ"
 fi

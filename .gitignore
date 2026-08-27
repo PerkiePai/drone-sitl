@@ -8,3 +8,7 @@ sim/secrets.env
 # NvStreamer ETW traces. Isaac's WebRTC streamer drops these in the CWD and they
 # run to tens of megabytes each.
 NvStreamer-*.etli
+
+# Runtime output: Isaac/joystick-server console logs and uploaded agent scripts
+# (AGENT_UPLOAD_DIR in joystick-server.py).
+logs/

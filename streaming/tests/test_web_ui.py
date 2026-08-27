@@ -199,3 +199,61 @@ def test_releasing_a_direction_does_not_pause(server):
             assert t["mission"]["state"] == "RUNNING"
 
     asyncio.run(exercise())
+
+
+# --- agent upload / list -------------------------------------------------
+
+import urllib.error  # noqa: E402
+
+
+def test_agent_upload_accepts_a_py_file_and_lists_it(server):
+    import urllib.request
+    src = b"from competition import Agent\nclass A(Agent):\n    pass\n"
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{WEB_PORT}/agent/upload?name=myagent.py",
+        data=src, method="POST",
+        headers={"Content-Type": "text/x-python"})
+    with urllib.request.urlopen(req) as r:
+        body = json.loads(r.read())
+    assert body["stored"].startswith("myagent-") and body["stored"].endswith(".py")
+
+    with urllib.request.urlopen(f"http://127.0.0.1:{WEB_PORT}/agent/list") as r:
+        files = json.loads(r.read())["files"]
+    assert body["stored"] in files
+
+
+def test_agent_upload_rejects_a_non_py_name(server):
+    import urllib.request
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{WEB_PORT}/agent/upload?name=evil.sh",
+        data=b"rm -rf /", method="POST")
+    try:
+        urllib.request.urlopen(req)
+        assert False, "expected 400"
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+
+
+def test_agent_upload_rejects_a_path_traversal_name(server):
+    import urllib.request
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{WEB_PORT}/agent/upload?name=../../etc/x.py",
+        data=b"x = 1", method="POST")
+    try:
+        urllib.request.urlopen(req)
+        assert False, "expected 400"
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+
+
+def test_agent_upload_rejects_an_oversize_body(server):
+    import urllib.request
+    big = b"# " + b"x" * (256 * 1024 + 10)
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{WEB_PORT}/agent/upload?name=big.py",
+        data=big, method="POST")
+    try:
+        urllib.request.urlopen(req)
+        assert False, "expected 400"
+    except urllib.error.HTTPError as e:
+        assert e.code == 400

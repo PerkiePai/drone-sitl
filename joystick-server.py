@@ -31,6 +31,25 @@ import offboard  # noqa: E402
 import waypoints  # noqa: E402
 import agent_control as agentctl  # noqa: E402
 
+# Uploaded control scripts land here; agent_runner.py is spawned against them.
+# A module constant, not a flag -- the server still runs with a bare
+# `python joystick-server.py`.
+AGENT_UPLOAD_DIR = os.path.join(ROOT, "logs", "agents")
+AGENT_MAX_BYTES = 256 * 1024
+ARENA_RADIUS_M = 500.0
+AGENT_TIME_LIMIT_S = None
+os.makedirs(AGENT_UPLOAD_DIR, exist_ok=True)
+
+
+def _safe_agent_name(name):
+    """A base filename ending .py with no path parts, or None."""
+    if not name or not name.endswith(".py"):
+        return None
+    if name != os.path.basename(name) or "/" in name or "\\" in name \
+            or ".." in name:
+        return None
+    return name
+
 
 class SetpointLoop(threading.Thread):
     """Sole owner of the MAVLink connection.
@@ -295,7 +314,7 @@ async def _push_telemetry(sock, loop_thread, hz=5.0):
 
 
 def build_app(loop_thread, state, video_port, mission_speed):
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
     from fastapi.responses import JSONResponse
     from fastapi.staticfiles import StaticFiles
 
@@ -305,6 +324,39 @@ def build_app(loop_thread, state, video_port, mission_speed):
     def config():
         return JSONResponse({"video_port": video_port,
                              "mission_speed": mission_speed})
+
+    @app.post("/agent/upload")
+    async def agent_upload(request: Request):
+        # Raw body, not multipart -- keeps python-multipart out of the deps.
+        # The browser reads the .py with FileReader and POSTs the text.
+        name = request.query_params.get("name", "")
+        safe = _safe_agent_name(name)
+        if safe is None:
+            return JSONResponse({"detail": "name must be a bare *.py filename"},
+                                status_code=400)
+        body = await request.body()
+        if len(body) > AGENT_MAX_BYTES:
+            return JSONResponse({"detail": f"file over {AGENT_MAX_BYTES} bytes"},
+                                status_code=400)
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError:
+            return JSONResponse({"detail": "file is not valid UTF-8 text"},
+                                status_code=400)
+        stored = f"{safe[:-3]}-{time.strftime('%Y%m%d-%H%M%S')}.py"
+        with open(os.path.join(AGENT_UPLOAD_DIR, stored), "w") as fh:
+            fh.write(text)
+        return JSONResponse({"stored": stored})
+
+    @app.get("/agent/list")
+    def agent_list():
+        try:
+            entries = [e for e in os.scandir(AGENT_UPLOAD_DIR)
+                       if e.is_file() and e.name.endswith(".py")]
+        except FileNotFoundError:
+            entries = []
+        entries.sort(key=lambda e: e.stat().st_mtime, reverse=True)
+        return JSONResponse({"files": [e.name for e in entries]})
 
     @app.websocket("/ws")
     async def ws(sock: WebSocket):

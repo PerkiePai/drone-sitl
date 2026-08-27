@@ -304,10 +304,17 @@ class SetpointLoop(threading.Thread):
                 next_tick = time.monotonic()   # fell behind; resync
 
 
-async def _push_telemetry(sock, loop_thread, hz=5.0):
+async def _push_telemetry(sock, loop_thread, agent_run=None, hz=5.0):
     try:
         while True:
-            await sock.send_text(json.dumps(loop_thread.telemetry()))
+            t = loop_thread.telemetry()
+            if agent_run is not None:
+                # The agent run state machine is stepped on exactly one
+                # cadence -- this one, the /ws pusher's. The /agent/control
+                # pusher passes agent_run=None.
+                agent_run.tick()
+                t["agent"] = agent_run.snapshot()
+            await sock.send_text(json.dumps(t))
             await asyncio.sleep(1.0 / hz)
     except Exception:
         pass          # socket closed; the /ws handler cleans up
@@ -401,6 +408,51 @@ def build_app(loop_thread, state, video_port, mission_speed):
             pusher.cancel()
             # A dropped socket must not latch the last commanded velocity.
             state.clear()
+
+    @app.websocket("/agent/control")
+    async def agent_control_ws(sock: WebSocket):
+        """agent_runner.py connects here. One socket carries both directions:
+        the server pushes telemetry, the child sends translated Commands."""
+        await sock.accept()
+        t0 = loop_thread.telemetry()
+        origin = ([t0["lat"], t0["lon"]] if t0.get("home_valid")
+                  and t0.get("lat") is not None else None)
+        await sock.send_text(json.dumps({
+            "type": "arena", "origin": origin,
+            "radius_m": ARENA_RADIUS_M, "time_limit": AGENT_TIME_LIMIT_S}))
+        pusher = asyncio.create_task(_push_telemetry(sock, loop_thread))
+        ac = loop_thread.agent_control
+        try:
+            while True:
+                msg = json.loads(await sock.receive_text())
+                kind = msg.get("type")
+                if kind == "velocity":
+                    ac.set_velocity_body(msg["forward"], msg["right"],
+                                         msg["up"], msg["yaw_rate"])
+                elif kind == "velocity_world":
+                    ac.set_velocity_world(msg["north"], msg["east"],
+                                          msg["up"], msg["yaw_rate"])
+                elif kind == "goto":
+                    # `speed` is accepted but the server clamps MPC_XY_VEL_MAX
+                    # to --mission-speed at startup; per-leg speed is not wired.
+                    loop_thread.load_mission([[msg["lat"], msg["lon"]]],
+                                             msg["alt"])
+                    loop_thread.submit("mission_fly")
+                elif kind == "route":
+                    loop_thread.load_mission(msg["points"], msg["alt"])
+                    loop_thread.submit("mission_fly")
+                elif kind == "hold":
+                    loop_thread.submit("mission_clear")
+                    ac.hold()
+                elif kind == "camera":
+                    loop_thread.agent_camera = msg.get("camera", "nadir")
+        except (WebSocketDisconnect, json.JSONDecodeError, KeyError, ValueError):
+            pass
+        finally:
+            pusher.cancel()
+            # Deliberately NOT clearing agent_control here: a control-socket
+            # blip must not drop a latched Hold. The /ws stop path and the
+            # velocity watchdog own cleanup.
 
     # Mounted last so /config and /ws above take priority for those paths;
     # this serves index.html at "/" plus css/js/vendor as plain static files.

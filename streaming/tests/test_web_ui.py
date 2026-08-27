@@ -257,3 +257,45 @@ def test_agent_upload_rejects_an_oversize_body(server):
         assert False, "expected 400"
     except urllib.error.HTTPError as e:
         assert e.code == 400
+
+
+# --- /agent/control socket ---------------------------------------------
+
+def test_agent_control_socket_sends_arena_then_applies_a_velocity(server):
+    websockets = pytest.importorskip("websockets")
+
+    async def exercise():
+        async with websockets.connect(
+                f"ws://127.0.0.1:{WEB_PORT}/agent/control") as ws:
+            first = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            assert first["type"] == "arena"
+            assert "radius_m" in first and "time_limit" in first
+
+            await ws.send(json.dumps({"type": "velocity", "forward": 3.0,
+                                      "right": 0.0, "up": 1.0,
+                                      "yaw_rate": 0.0}))
+            for _ in range(10):
+                t = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if t.get("type") != "arena":
+                    break
+            assert "streaming_s" in t
+
+    asyncio.run(exercise())
+
+
+def test_agent_control_route_message_loads_and_flies_a_mission(server):
+    websockets = pytest.importorskip("websockets")
+
+    async def exercise():
+        async with websockets.connect(
+                f"ws://127.0.0.1:{WEB_PORT}/agent/control") as ws:
+            await asyncio.wait_for(ws.recv(), timeout=10)   # arena
+            await ws.send(json.dumps({
+                "type": "route",
+                "points": [[40.0, -74.0], [40.001, -74.0]],
+                "alt": 20.0, "speed": None}))
+            t = await _telem_where(ws, lambda t: (t.get("mission") or {}).get(
+                "count") == 2)
+            assert t["mission"]["state"] == "RUNNING"
+
+    asyncio.run(exercise())

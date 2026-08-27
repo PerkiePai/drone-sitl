@@ -200,9 +200,13 @@ outward effect is JSON on the control socket.
 
 **New HTTP:**
 
-- `POST /agent/upload` (multipart, one `.py` file) — reject non-`.py` and files
-  over 256 KiB; save to `<repo>/logs/agents/` (module constant `AGENT_UPLOAD_DIR`,
-  created on startup) under a timestamped name; return `{"stored": "<name>"}`.
+- `POST /agent/upload?name=<file.py>` — the raw file bytes as the request body
+  (`text/x-python`); **no multipart**, so no `python-multipart` dependency.
+  Reject a `name` not ending `.py` or containing a path separator, and bodies
+  over 256 KiB. Save to `<repo>/logs/agents/` (module constant
+  `AGENT_UPLOAD_DIR`, created on startup) under `<stem>-<timestamp>.py`; return
+  `{"stored": "<name>"}`. The browser reads the file with `FileReader` and
+  `fetch`es it here.
 - `GET /agent/list` — the uploaded files, newest first, for a picker.
 
 **New WebSocket `/agent/control`** — the child connects here.

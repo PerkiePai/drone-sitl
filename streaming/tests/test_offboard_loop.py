@@ -215,3 +215,109 @@ def test_leaving_offboard_auto_pauses_a_running_mission():
 
     loop._note_mode("AUTO.LAND")
     assert loop.mission.status()["state"] == "PAUSED"
+
+
+# --- agent setpoint source + attitude telemetry --------------------------
+
+from agent_control import AgentControl  # noqa: E402
+
+
+def test_attitude_message_populates_roll_and_pitch_telemetry():
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 20}")
+    loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0), rate_hz=20.0)
+
+    class Msg:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+        def get_type(self):
+            return "ATTITUDE"
+
+    import math as _m
+    loop._handle_attitude(Msg(roll=_m.radians(4.0), pitch=_m.radians(-11.0),
+                              yaw=0.0))
+    t = loop.telemetry()
+    assert abs(t["roll_deg"] - 4.0) < 1e-6
+    assert abs(t["pitch_deg"] + 11.0) < 1e-6
+
+
+def test_agent_body_velocity_is_sent_when_no_mission_and_no_manual():
+    js = _load_server()
+    port = FAKE_PX4_PORT + 21
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{port}")
+        ac = AgentControl(watchdog_s=10.0)
+        loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0),
+                               rate_hz=20.0, agent_control=ac)
+        loop.start()
+        ac.set_velocity_body(forward=4.0, right=0.0, up=0.0, yaw_rate=0.0)
+
+        seen = _collect(px4, 1.0)
+        assert len(seen) >= 10
+        last = seen[-1]
+        assert last.coordinate_frame == offboard.MAV_FRAME_BODY_NED
+        assert abs(last.vx - 4.0) < 1e-6
+    finally:
+        px4.close()
+
+
+def test_agent_world_velocity_uses_the_local_ned_frame():
+    js = _load_server()
+    port = FAKE_PX4_PORT + 22
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{port}")
+        ac = AgentControl(watchdog_s=10.0)
+        loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0),
+                               rate_hz=20.0, agent_control=ac)
+        loop.start()
+        ac.set_velocity_world(north=3.0, east=0.0, up=0.0, yaw_rate=0.0)
+
+        seen = _collect(px4, 1.0)
+        assert seen[-1].coordinate_frame == offboard.MAV_FRAME_LOCAL_NED
+        assert abs(seen[-1].vx - 3.0) < 1e-6
+    finally:
+        px4.close()
+
+
+def test_mission_target_beats_agent_velocity():
+    js = _load_server()
+    port = FAKE_PX4_PORT + 23
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{port}")
+        ac = AgentControl(watchdog_s=10.0)
+        loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0),
+                               rate_hz=20.0, agent_control=ac)
+        loop._handle_global_position(_fake_gpi(400000000, -740000000))
+        loop.load_mission([[40.0010, -74.0]], 12.0)
+        loop.mission.fly()
+        ac.set_velocity_body(9.0, 0.0, 0.0, 0.0)
+        loop.start()
+
+        seen = _collect(px4, 1.0, kind="SET_POSITION_TARGET_GLOBAL_INT")
+        assert len(seen) >= 10, "mission did not win over the agent velocity"
+    finally:
+        px4.close()
+
+
+def test_expired_agent_velocity_sends_zero_not_the_manual_command():
+    js = _load_server()
+    port = FAKE_PX4_PORT + 24
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{port}")
+        ac = AgentControl(watchdog_s=0.2)
+        state = offboard.CommandState(2.0, 1.0, watchdog_s=10.0)
+        state.set("fwd", True)               # manual also held
+        loop = js.SetpointLoop(conn, state, rate_hz=20.0, agent_control=ac)
+        ac.set_velocity_body(5.0, 0.0, 0.0, 0.0)   # will go stale
+        loop.start()
+        time.sleep(0.6)                        # agent watchdog expires
+
+        seen = _collect(px4, 0.5)
+        assert abs(seen[-1].vx) < 1e-6, "manual leaked past a latched agent"
+    finally:
+        px4.close()

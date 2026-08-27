@@ -29,6 +29,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, "streaming"))
 import offboard  # noqa: E402
 import waypoints  # noqa: E402
+import agent_control as agentctl  # noqa: E402
 
 
 class SetpointLoop(threading.Thread):
@@ -47,12 +48,17 @@ class SetpointLoop(threading.Thread):
                         "mission_clear": "clear"}
 
     def __init__(self, conn, state, rate_hz=20.0, takeoff_alt=5.0, warmup_s=1.0,
-                 mission_speed=3.0, arrival_radius=2.0):
+                 mission_speed=3.0, arrival_radius=2.0, agent_control=None):
         super().__init__(daemon=True)
         self.conn = conn
         self.state = state
         self.link = offboard.OffboardLink(conn)
         self.mission = waypoints.Mission(arrival_radius)
+        # Third setpoint source, alongside manual (state) and mission. Owned
+        # here so existing callers/tests that don't pass one still work.
+        self.agent_control = (agent_control if agent_control is not None
+                              else agentctl.AgentControl())
+        self.agent_camera = "nadir"
         self.dt = 1.0 / rate_hz
         self.takeoff_alt = takeoff_alt
         self.mission_speed = mission_speed
@@ -66,6 +72,14 @@ class SetpointLoop(threading.Thread):
             "alt_m": 0.0,
             "vz": 0.0,
             "heading_deg": 0.0,
+            # Attitude, degrees. The agent API's state.roll/pitch -- "read this
+            # before trusting a frame" -- and unused by the manual UI.
+            "roll_deg": 0.0,
+            "pitch_deg": 0.0,
+            # World-frame horizontal velocity, m/s (+N, +E). Feeds the agent
+            # state.vx/vy; the manual UI shows ground speed (gs) instead.
+            "vn": 0.0,
+            "ve": 0.0,
             # Map feed. None until the first GLOBAL_POSITION_INT, so the page
             # can say "waiting for position" instead of centring on 0,0.
             "lat": None,
@@ -117,6 +131,12 @@ class SetpointLoop(threading.Thread):
             # the last good heading rather than reporting 655 degrees.
             if msg.hdg != 65535:
                 self._telem["heading_deg"] = msg.hdg / 100.0
+
+    def _handle_attitude(self, msg):
+        """ATTITUDE carries radians; the agent API and any UI want degrees."""
+        with self._telem_lock:
+            self._telem["roll_deg"] = math.degrees(msg.roll)
+            self._telem["pitch_deg"] = math.degrees(msg.pitch)
 
     def load_mission(self, points, alt_m):
         """Called from the web thread. Mission carries its own lock and
@@ -200,6 +220,11 @@ class SetpointLoop(threading.Thread):
                         self._sim_ref = (msg.time_boot_ms, wall)
             elif kind == "GLOBAL_POSITION_INT":
                 self._handle_global_position(msg)
+                with self._telem_lock:
+                    self._telem["vn"] = msg.vx / 100.0     # cm/s -> m/s
+                    self._telem["ve"] = msg.vy / 100.0
+            elif kind == "ATTITUDE":
+                self._handle_attitude(msg)
             elif kind == "HOME_POSITION":
                 with self._telem_lock:
                     self._telem["home_valid"] = True
@@ -223,6 +248,17 @@ class SetpointLoop(threading.Thread):
                 wp_lat, wp_lon, wp_alt, wp_yaw = target
                 self.link.send_position_global(wp_lat, wp_lon, wp_alt, wp_yaw)
                 vx, yaw_rate = 0.0, 0.0
+            elif (agent_cmd := self.agent_control.command()) is not None:
+                # An uploaded script has the aircraft: its Velocity /
+                # VelocityWorld, or a zeroed hover once its watchdog expires.
+                # Wins over the manual pad -- a manual press kills the agent
+                # up in the /ws handler, so this branch is the backstop.
+                akind, a0, a1, a2, yaw_rate = agent_cmd
+                if akind == "world":
+                    self.link.send_velocity_world(a0, a1, a2, yaw_rate)
+                else:
+                    self.link.send_velocity(a0, a1, a2, yaw_rate)
+                vx = math.hypot(a0, a1)
             else:
                 vx, vy, vz, yaw_rate = self.state.command()
                 self.link.send_velocity(vx, vy, vz, yaw_rate)

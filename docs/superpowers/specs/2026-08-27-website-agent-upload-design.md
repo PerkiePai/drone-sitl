@@ -129,12 +129,14 @@ that check `state.pitch` before trusting a frame should work here too.
 
 ```python
 arena.bounds        # (lat_min, lon_min, lat_max, lon_max) — a box around the
-                    # site origin, ± AGENT_ARENA_RADIUS_M (default 500 m)
-arena.time_limit    # seconds, or None. From --agent-time-limit (default: none)
+                    # PX4 home position, ± ARENA_RADIUS_M (module constant, 500 m)
+arena.time_limit    # None (module constant AGENT_TIME_LIMIT_S = None)
 ```
 
-No `lawnmower` (out of scope). The site origin comes from `sim/sites.py` via a
-new `--site` flag on the server, defaulting to `bangkok-survey-040`.
+No `lawnmower` (out of scope). The origin is **PX4's home position** —
+`telem["lat"]/["lon"]` at the moment `HOME_POSITION` was received, which the
+server already tracks (`home_valid`). No `sim/sites.py` dependency, no flag: the
+arena is centred on wherever the drone actually took off.
 
 ### `Harness` — the loop
 
@@ -173,9 +175,13 @@ loop at 20 Hz:
 ### `agent_runner.py` — the child process
 
 ```
-agent_runner.py --file <path> --host 127.0.0.1 --port 8090 \
-                --control-path /agent/control [--time-limit N] [--arena-radius M]
+agent_runner.py --file <path> --host 127.0.0.1 --port 8090
 ```
+
+The server passes only what it cannot default: the file and its own address.
+`agent_runner.py` keeps a `--host`/`--port` default of `127.0.0.1:8090` so it is
+still runnable by hand for debugging, but nothing the operator does requires
+passing them.
 
 1. `importlib` the uploaded file in its own module namespace.
 2. Find exactly one `Agent` subclass. Zero or many → print an error, exit 2.
@@ -195,15 +201,14 @@ outward effect is JSON on the control socket.
 **New HTTP:**
 
 - `POST /agent/upload` (multipart, one `.py` file) — reject non-`.py` and files
-  over 256 KiB; save to `AGENT_UPLOAD_DIR` (a scratch dir, `--agent-dir`,
-  default `<repo>/logs/agents/`) under a timestamped name; return
-  `{"stored": "<name>"}`.
+  over 256 KiB; save to `<repo>/logs/agents/` (module constant `AGENT_UPLOAD_DIR`,
+  created on startup) under a timestamped name; return `{"stored": "<name>"}`.
 - `GET /agent/list` — the uploaded files, newest first, for a picker.
 
 **New WebSocket `/agent/control`** — the child connects here.
 
-- On connect the server sends `{"type":"arena", ...}` (site origin, bounds,
-  time limit).
+- On connect the server sends `{"type":"arena", ...}` (home-position origin,
+  bounds, `time_limit: null`).
 - The server pushes the same telemetry dict it pushes on `/ws`, at the same
   5 Hz, so the child needs only one socket.
 - Inbound messages: `{"type":"velocity"|"velocity_world"|"goto"|"route"|"hold"|
@@ -477,8 +482,10 @@ switches which stream the harness decodes for `on_frame` and which the web
 **Edited:**
 
 - `joystick-server.py` — upload/list routes, `/agent/control` WebSocket, `/ws`
-  agent actions, run state machine, telemetry `agent` block, `--site` /
-  `--agent-dir` / `--agent-time-limit` / `--agent-arena-radius` flags
+  agent actions, run state machine, telemetry `agent` block. **No new flags** —
+  `AGENT_UPLOAD_DIR`, `ARENA_RADIUS_M`, `AGENT_TIME_LIMIT_S` are module
+  constants; the arena origin is the PX4 home position. Running the server is
+  still `conda run -n drone python joystick-server.py` with nothing added.
 - `streaming/offboard.py` — `send_velocity_world`; `ATTITUDE` (roll/pitch) and
   world velocity into `_drain_mavlink` / telemetry
 - `streaming/waypoints.py` — no change expected; note if `advance` needs a
@@ -488,7 +495,17 @@ switches which stream the harness decodes for `on_frame` and which the web
 - `RUN-WEBSITE.md` — a new section for the Agent panel and the manual test list
 - `SESSION.md` — how to run it
 
+### AD9 — No new flags on `joystick-server.py`
+
+The server must run exactly as it does today — `conda run -n drone python
+joystick-server.py`, nothing appended. Everything the agent feature needs is a
+module constant (`AGENT_UPLOAD_DIR = logs/agents/`, `ARENA_RADIUS_M = 500`,
+`AGENT_TIME_LIMIT_S = None`) or is derived at runtime (the arena origin is PX4's
+home position, which the server already receives). `agent_runner.py` keeps
+`--host`/`--port`/`--file` for standalone debugging, but the server supplies
+them and the operator never types a flag. (User choice.)
+
 ## Open questions
 
-None blocking. `--agent-time-limit` defaults to unlimited; revisit if example
+None blocking. `AGENT_TIME_LIMIT_S` is `None` (unlimited); revisit if example
 scripts want a clock to read.

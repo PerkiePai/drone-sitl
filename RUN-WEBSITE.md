@@ -431,6 +431,62 @@ being thrown away.
 
 ---
 
+## 7A. Fly an uploaded script
+
+The **Agent** panel below the command buttons runs a Python control script
+written against the competition API (`docs/competition-api.md`). The script is
+a callback class, not a loop — the harness calls `on_tick`, `on_frame` and the
+event callbacks and flies whatever `Command` they return. The script runs as a
+**child process** (`agent_runner.py`) that talks to the server over
+`/agent/control` and never touches MAVLink.
+
+Design / plan: `docs/superpowers/specs/2026-08-27-website-agent-upload-design.md`,
+`docs/superpowers/plans/2026-08-27-website-agent-upload.md`.
+
+### Step 1 — pick or upload a script
+
+`examples/` ships one script per flight primitive: `velocity.py`,
+`velocity_world.py`, `goto.py`, `route.py`, `hold.py`, `camera.py`. Upload one
+(or your own `.py`) with **upload** — it is stored under `logs/agents/` and
+selected in the dropdown.
+
+### Step 2 — RUN SCRIPT
+
+**RUN SCRIPT** arms, takes off to 5 m, enters OFFBOARD, then starts the script —
+you do **not** press ARM/TAKEOFF/OFFBOARD yourself. The state readout goes
+`arming → running`. The log pane shows the script's `print()` output and any
+harness messages. RUN is greyed out until `link` is up.
+
+### Step 3 — take over
+
+**Touch the pad or press any flight key** and the script is killed immediately —
+you are flying manually. There is no resume; press **RUN SCRIPT** again to
+restart it from the top. **STOP** does the same without needing to fly.
+
+### When it goes wrong
+
+| Symptom | Cause |
+|---|---|
+| RUN SCRIPT greyed out | `link` is down (see 9.1), or a script is already running — press STOP |
+| state jumps to `error`, log shows a traceback | the script raised. The drone holds position; take over or LAND |
+| state `error`, log says "no Agent subclass" / "more than one" | your file needs exactly one `class X(Agent):` |
+| script runs but the drone barely moves | the `sim` figure — same as 9.4. Check `speed` in telemetry |
+| `on_frame` frame is always `None` in the log | the Isaac camera server on :8080 is unreachable; flight still works |
+| closed the browser mid-run, drone kept flying | by design — the child runs server-side. Reload to reconnect |
+
+### Manual test checklist (run once after any change to this feature)
+
+1. Upload and RUN each of the six `examples/`; confirm the motion each
+   describes and the expected log lines.
+2. RUN `examples/route.py`, press **W** mid-route: the child dies within
+   ~0.5 s, the route stops, manual works.
+3. Upload a file whose `on_tick` does `raise RuntimeError("boom")`: the drone
+   hovers, the log shows the traceback, state is `error`.
+4. RUN `examples/hold.py`, close the browser tab, reopen it: telemetry shows
+   the agent still `running`.
+
+---
+
 ## 8. Checking it actually works
 
 Worth doing on the first flight:

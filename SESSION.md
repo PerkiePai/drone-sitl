@@ -1,3 +1,28 @@
+# Agent panel -- uploading a control script (2026-08-27)
+
+The website can now fly an uploaded competition-API `Agent`. See
+RUN-WEBSITE.md section 7A. Design/plan:
+`docs/superpowers/specs/2026-08-27-website-agent-upload-design.md` and
+`docs/superpowers/plans/2026-08-27-website-agent-upload.md`.
+
+Run it exactly as before -- **no new flags**:
+
+    ./sim/launch-sitl.sh
+    conda run -n drone python joystick-server.py
+    # browse to :8090, use the Agent panel: upload a .py, RUN SCRIPT
+
+The agent runs as a child process (`agent_runner.py`) that talks to the server
+over `/agent/control`; it never touches MAVLink. RUN auto-sequences
+ARM -> TAKEOFF -> OFFBOARD; the first manual pad/key input kills it.
+
+`examples/` has one uploadable script per flight primitive (velocity,
+velocity_world, goto, route, hold, camera).
+
+Tests: `conda run -n drone python -m pytest competition/ streaming/tests/ -q`
+(167 pass as of 2026-08-27).
+
+---
+
 # autopilot_poc.py -- how to run it
 
 **Date:** 2026-08-19

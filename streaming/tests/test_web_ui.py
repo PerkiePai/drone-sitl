@@ -329,3 +329,11 @@ def test_ws_telemetry_carries_an_agent_block_from_the_start(server):
                                   "camera": None, "log": []}
 
     asyncio.run(exercise())
+
+
+def test_agent_js_and_panel_are_served(server):
+    import urllib.request
+    with urllib.request.urlopen(f"http://127.0.0.1:{WEB_PORT}/js/agent.js") as r:
+        assert r.status == 200 and b"initAgent" in r.read()
+    with urllib.request.urlopen(f"http://127.0.0.1:{WEB_PORT}/") as r:
+        assert b'id="agent"' in r.read()

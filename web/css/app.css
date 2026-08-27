@@ -68,3 +68,20 @@ button:active:not(:disabled) { transform:translateY(1px); filter:brightness(1.5)
    registered click is distinguishable from a dropped one. */
 #cmds button.sent { background:#2a6; border-color:#6f6; }
 #status { min-height:1.3em; font-size:13px; text-align:center; }
+
+/* Agent panel: upload a control script, run it, watch its log. */
+#agent { margin:8px; font:13px/1.4 system-ui, sans-serif; }
+#agent .a-row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+#agent select { max-width:42vw; background:#222; color:#eee;
+                border:1px solid #444; border-radius:6px; padding:6px; }
+#agent .a-file-btn { border:1px solid #444; border-radius:6px; padding:6px 10px;
+                     background:#222; color:#eee; cursor:pointer; }
+#agent .a-file-btn input { display:none; }
+#agent button { padding:8px 12px; border-radius:8px; border:1px solid #444;
+                background:#222; color:#eee; font-size:13px; }
+#agent button:disabled { opacity:.35; }
+#agent #a-state { color:#9cf; }
+#a-log { margin-top:6px; height:9em; overflow-y:auto; white-space:pre-wrap;
+         background:#111; color:#cde; padding:6px; border-radius:6px;
+         font:12px/1.35 ui-monospace, Menlo, monospace; }
+#a-log:empty { display:none; }

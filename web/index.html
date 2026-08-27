@@ -62,6 +62,16 @@
     <button id="c-disarm">DISARM</button>
   </div>
   <div id="status"></div>
+  <div id="agent">
+    <div class="a-row">
+      <select id="a-file" title="uploaded scripts"></select>
+      <label class="a-file-btn">upload<input id="a-upload" type="file" accept=".py"></label>
+      <button id="a-run" disabled>RUN SCRIPT</button>
+      <button id="a-stop" disabled>STOP</button>
+      <span id="a-state">idle</span>
+    </div>
+    <pre id="a-log"></pre>
+  </div>
 <script src="/vendor/leaflet.js"></script>
 <script type="module" src="/js/main.js"></script>
 </body>

@@ -1045,6 +1045,49 @@ Order matters: each step isolates one failure class.
 > a horizontal runaway. Best result yet (78 m peak excursion, vs. 220-270 m
 > in every pre-Task-10 attempt) but not a pass. See `SESSION.md`, Task 10
 > Step 10.7 attempt, and Task 10's own status blockquote.
+>
+> **Status 2026-08-22 — 8.6 passes, up to ~60 m.** Six 180 s vision-only holds,
+> none aborted; every hold flown first in a fresh session is inside ADR-0001's
+> bar (2.02 m and 2.05 m at 49 m, 2.65 m at 59 m, all settling), against
+> 158.6 m for the same gains before. **No parameter was changed** — Task 10's
+> sweep is void as guidance, because it ranked candidates on `MPC_XY_P` while
+> that gain was not in the loop at all. Three faults, each invisible until the
+> one before it was fixed: the hover was commanded as zero *velocity* so the
+> position loop was open (ADR-0008); the flow was derotated by an
+> accelerometer-corrupted attitude; nothing estimated gyro bias.
+>
+> **What remains open is altitude.** The hold collapses above ~60 m — 25 m and
+> 50 m peaks at 98 m against 1.6–2.1 m at 49 m. Flown and refuted: the
+> estimator degrading with height (an open-loop sweep is flat to 125 m),
+> position-gain scaling as 1/h, a climb-polluted gyro-bias estimate, and
+> (2026-08-22, later) gating the accelerometer out of the derotation's bias.
+> That last one identified a real mechanism — the Mahony integral absorbs
+> `atan(a/g)` as a gyro bias and the derotation subtracts it, fabricating
+> `1.26*h*|bias|` m/s — and the gate still came out net-negative in flight,
+> halving the 100 m peak but breaking the 50 m hold (2.0 -> 13.7 m), because a
+> frozen bias is a coherent ramp where a wandering one partly cancels.
+> Reverted. The surviving hypothesis and the one experiment that would settle
+> it — a 98 m phase-2 hold on velocity setpoints, position loop open — are at
+> the end of `SESSION.md`, along with the new constraint that the frozen-bias
+> walk was altitude-INDEPENDENT (0.094 m/s at 50 m, 0.096 at 100 m).
+> **Established envelope: ~60 m at default gains.**
+>
+> **Status 2026-08-22, latest — the collapse is the POSITION LOOP, not the
+> estimator.** The velocity-setpoint experiment named above was flown, with a
+> 49 m companion. A 98 m phase-2 hold with the position loop OPEN holds flat
+> at **3.34 m** (settling), and its 49 m companion at **2.97 m** — open-loop
+> performance is altitude-INDEPENDENT, while the same aircraft, gains and
+> estimator closed-loop goes 2 m -> 25-33 m over the same height change.
+> Opening the loop at 98 m is worth a factor of 8-10.
+>
+> This is not a reason to revert ADR-0008: a velocity hold has no position
+> reference and creeps on any velocity bias (+0.023 m/s on the 49 m run). It
+> narrows the question to *what closing the loop around a vision position
+> estimate does at 98 m that it does not do at 49 m* — measurement delay
+> (`EKF2_EV_DELAY`, ADR-0006) and EKF2's own `estimator_ev_pos_bias` under a
+> measurement now correlated with commanded motion are the two candidates, and
+> the open/closed pair of 98 m ulogs to compare them is already on disk.
+> `--open-loop-hold` is the (default-off, test-pinned) lever.
 
 - [x] **8.1** `DRONE_SETUP_DOWN_VIB_DAMP=False ./sim/launch-sitl.sh` → drone
       spawned, Play pressed, MJPEG on 8080. **Done 2026-08-11.**
@@ -1061,9 +1104,12 @@ Order matters: each step isolates one failure class.
       **Partial** — origin landed and the VIO row works, but `EKF2_HGT_REF` is
       @reboot_required and cannot take effect when applied at connect time.
       See SESSION.md 2026-08-11.
-- [ ] **8.6** Arm, take off, hover **180 s** vision-only. Pass bar is a
+- [x] **8.6** Arm, take off, hover **180 s** vision-only. Pass bar is a
       **non-growing aircraft-excursion envelope**, not zero drift (ADR-0001).
-      Blocked on Task 9 — nothing currently computes the pass/fail number.
+      **Done 2026-08-22** — peak aircraft excursion 2.02 m (+0.0029 m/s,
+      settling) at 49.3 m, six holds flown, none aborted. Passes up to ~60 m;
+      above that the hold collapses and the cause is open. See the status
+      note above and `SESSION.md`.
 - [ ] **8.7** Manual flight — forward/back/turn. Watch drift accumulate.
 - [ ] **8.8** Fly a short map route vision-only. This exercises
       `MAV_FRAME_GLOBAL_RELATIVE_ALT_INT` against a vision-only estimator, the
@@ -1256,6 +1302,20 @@ this exists").
 > was only 78 m at that point, nowhere near the 400 m ceiling). **8.6 is
 > still open** — no candidate in this sweep has yet passed ADR-0001's bar.
 > Full ranked table and detail in `SESSION.md`, Task 10 Step 10.7 attempt.
+>
+> **Status 2026-08-22 — closed, and void as guidance.** 8.6 passes, at
+> `baseline`: the same stock gains that peaked at 158.6 m in Step 10.6 gave a
+> 2.02 m peak once three faults outside the controller were fixed (Step 10.10,
+> `SESSION.md`). **No gain was changed, and this sweep's ranking should not be
+> used.** It scored candidates on `MPC_XY_P` while the position loop was open
+> — station keeping went out as `send_velocity(0,0,0)`, so PX4 never computed
+> a position error and that gain was not in the loop at all (ADR-0008). Its
+> one apparent signal, `MPC_XY_VEL_I_ACC` low ranking best, is just the
+> velocity integrator being the only term that could fight a velocity bias
+> when nothing else was closed. `analyze_gain_sweep.py` is still the scoring
+> tool, with `TREND_WINDOW_S` now 120 s — at 20 s it called the passing
+> 2.02 m flight "growing". The open question is the >60 m collapse, tracked
+> in Task 8's status above, and it is not a `MPC_XY_*` question.
 
 ### Step 10.1 — `MPC_XY_DEFAULTS` and `revert_mpc_gains`
 

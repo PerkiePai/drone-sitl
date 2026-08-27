@@ -1818,3 +1818,103 @@ def test_the_cut_re_anchors_the_hold_point():
     loop._restore_gnss()
 
     assert loop._hold_ned is None
+
+
+# --- the position loop, deliberately reopened ------------------------------
+#
+# ADR-0008 closed the position loop, and everything since has flown with it
+# closed. The >60 m collapse has one experiment left that can separate "the
+# fault is upstream of the position loop" from "the position loop is what
+# amplifies at altitude", and that experiment needs the PRE-ADR-0008 shape
+# back for one flight: EKF2 on vision alone, position loop open.
+#
+# So this is an experiment lever, not a mode. Default off, and the flight that
+# uses it says so in its run name.
+
+def test_open_loop_hold_sends_zero_velocity_instead_of_a_position():
+    js = _load_server()
+    port = FAKE_PX4_PORT + 118
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{port}")
+        state = offboard.CommandState(2.0, 1.0, watchdog_s=10.0)
+        loop = js.SetpointLoop(conn, state, rate_hz=20.0, hold_open_loop=True)
+        loop._px4_ned = (10.0, 20.0, -30.0)
+        loop._px4_yaw = 0.5
+        loop._note_mode("OFFBOARD")
+        loop.start()
+
+        seen = _collect(px4, 1.0)
+        assert len(seen) >= 10, f"idle loop went quiet: only {len(seen)} sent"
+        last = seen[-1]
+        assert last.coordinate_frame == offboard.MAV_FRAME_BODY_NED
+        assert last.type_mask == offboard.VEL_YAWRATE_TYPE_MASK
+        assert (last.vx, last.vy, last.vz) == pytest.approx((0.0, 0.0, 0.0))
+    finally:
+        px4.close()
+
+
+def test_the_position_hold_is_still_the_default():
+    """The lever must not be reachable by accident: ADR-0008 is the shipped
+    behaviour and stays so unless a flight explicitly asks otherwise."""
+    js = _load_server()
+    port = FAKE_PX4_PORT + 119
+    px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
+    try:
+        loop, _ = _hold_loop(js, port)
+        loop.start()
+        seen = _collect(px4, 1.0)
+        assert seen[-1].coordinate_frame == offboard.MAV_FRAME_LOCAL_NED
+    finally:
+        px4.close()
+
+
+# --- the VPE levers --------------------------------------------------------
+#
+# Two knobs that only exist for the >60 m campaign, both defaulting to the
+# flown configuration for the same reason the position hold does: every result
+# on record was measured with them off, and an unflown change that quietly
+# becomes the baseline makes the next comparison meaningless.
+
+def test_vpe_repeats_are_on_by_default():
+    """One VPE per setpoint tick is what every flight on record streamed."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 120}")
+    state = offboard.CommandState(2.0, 1.0, watchdog_s=10.0)
+    loop = js.SetpointLoop(conn, state, rate_hz=20.0, vision=object())
+    assert loop.vision_sender.send_repeats is True
+
+
+def test_no_vpe_repeats_reaches_the_sender():
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 121}")
+    state = offboard.CommandState(2.0, 1.0, watchdog_s=10.0)
+    loop = js.SetpointLoop(conn, state, rate_hz=20.0, vision=object(),
+                           vpe_repeats=False)
+    assert loop.vision_sender.send_repeats is False
+
+
+def test_ev_delay_defaults_to_leaving_px4s_stored_value_alone():
+    """None, not 0.0: phase 0 still sends EKF2_EV_DELAY=0 from
+    EKF2_BOOT_PARAMS, but nothing in the server asserts a delay of its own."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 122}")
+    state = offboard.CommandState(2.0, 1.0, watchdog_s=10.0)
+    loop = js.SetpointLoop(conn, state, rate_hz=20.0)
+    assert loop.ev_delay_ms is None
+
+
+def test_ev_delay_is_sent_in_phase_0_where_a_reboot_follows():
+    """EKF2_EV_DELAY is @reboot_required. The only place a reboot follows a
+    param set is phase 0, so that is the only place it can be sent from."""
+    js = _load_server()
+    conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT + 123}")
+    state = offboard.CommandState(2.0, 1.0, watchdog_s=10.0)
+    loop = js.SetpointLoop(conn, state, rate_hz=20.0, vision=object(),
+                           ev_delay_ms=250.0)
+    sent = []
+    loop.link.set_param = lambda name, value, ptype: sent.append((name, value))
+    loop.link.reboot_autopilot = lambda: sent.append(("REBOOT", None))
+    vision_bridge.reboot_for_boot_params(loop.link, loop.ev_delay_ms)
+    assert ("EKF2_EV_DELAY", 250.0) in sent
+    assert sent[-1] == ("REBOOT", None)

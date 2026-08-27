@@ -233,7 +233,8 @@ class RunCSV:
               "hold_n", "hold_e", "hold_d",
               "gyro_bias_x", "gyro_bias_y", "gyro_bias_z",
               "excursion_m", "drift_m", "align_m", "realigned",
-              "n_inliers", "fresh", "dropped_stale", "sim_rate")
+              "n_inliers", "fresh", "dropped_stale", "sim_rate",
+              "vpe_capture_s", "vpe_repeats")
 
     def __init__(self, path):
         self.path = path
@@ -269,7 +270,8 @@ class SetpointLoop(threading.Thread):
 
     def __init__(self, conn, state, rate_hz=20.0, takeoff_alt=5.0, warmup_s=1.0,
                  mission_speed=3.0, arrival_radius=2.0,
-                 vision=None, vision_origin=None, csv_path=None):
+                 vision=None, vision_origin=None, csv_path=None,
+                 hold_open_loop=False, vpe_repeats=True, ev_delay_ms=None):
         super().__init__(daemon=True)
         self.conn = conn
         self.state = state
@@ -282,12 +284,26 @@ class SetpointLoop(threading.Thread):
         # side effect of starting the server.
         self.vision = vision
         self.vision_origin = vision_origin
-        self.vision_sender = (vision_bridge.VisionPositionSender(conn)
-                              if vision is not None else None)
+        self.vision_sender = (
+            vision_bridge.VisionPositionSender(conn, send_repeats=vpe_repeats)
+            if vision is not None else None)
+        # EXPERIMENT lever, phase 0 only: EKF2_EV_DELAY is @reboot_required, so
+        # it can only be set in the same breath as EKF2_HGT_REF. None leaves
+        # PX4's stored value alone at 0, which is the flown configuration.
+        self.ev_delay_ms = ev_delay_ms
         self._last_heartbeat = None
         self.mission = waypoints.Mission(arrival_radius)
         self.dt = 1.0 / rate_hz
         self.takeoff_alt = takeoff_alt
+        # An EXPERIMENT lever, off everywhere except the one flight that asks
+        # for it. True restores the pre-ADR-0008 shape -- idle sends a zero
+        # VELOCITY instead of a position setpoint, so PX4 never computes a
+        # position error and MPC_XY_P is out of the loop. The only reason it
+        # exists is to separate "the >60 m collapse is upstream of the
+        # position loop" from "the position loop is what amplifies at
+        # altitude": fly the same hold with the loop open and see whether it
+        # still goes. See SESSION.md.
+        self.hold_open_loop = hold_open_loop
         self.mission_speed = mission_speed
         self.warmup_s = warmup_s
         self.commands = queue.Queue()
@@ -822,7 +838,8 @@ class SetpointLoop(threading.Thread):
                 # clears _params_sent, and this method runs again with
                 # _vision_rebooted set -- so phase 1 lands on the fresh PX4.
                 self._vision_rebooted = True
-                vision_bridge.reboot_for_boot_params(self.link)
+                vision_bridge.reboot_for_boot_params(self.link,
+                                                     self.ev_delay_ms)
                 print(f">>> vision: set {', '.join(vision_bridge.HGT_REF_NEEDS_REBOOT)}"
                       f" and rebooting PX4 so it takes effect -- "
                       f"params resume when it comes back")
@@ -1073,6 +1090,17 @@ class SetpointLoop(threading.Thread):
             "fresh": (vio_status or {}).get("fresh"),
             "dropped_stale": self.vision_sender.dropped_stale
                 if self.vision_sender is not None else None,
+            # Sim-time capture stamp of the last estimate actually sent
+            # (vio-streamer.py:242). `sim_s - vpe_capture_s` is the end-to-end
+            # pipeline lag less a constant offset -- PX4's clock restarts at
+            # the phase-0 reboot and Isaac's does not -- so subtract the
+            # run's own minimum before reading it as a latency.
+            "vpe_capture_s": self.vision_sender.last_capture_s
+                if self.vision_sender is not None else None,
+            # Cumulative ticks on which the pose had not moved on since the
+            # last one sent. Counted under both --vpe-repeats settings.
+            "vpe_repeats": self.vision_sender.repeats
+                if self.vision_sender is not None else None,
             "sim_rate": self._telem.get("sim_rate"),
         })
 
@@ -1161,7 +1189,7 @@ class SetpointLoop(threading.Thread):
             self._hold_ned = None
             self.link.send_velocity(vx, vy, vz, yaw_rate)
             return
-        if self._px4_ned is None or self._px4_yaw is None:
+        if self._px4_ned is None or self._px4_yaw is None or self.hold_open_loop:
             self._hold_ned = None
             self.link.send_velocity(vx, vy, vz, yaw_rate)
             return
@@ -1545,6 +1573,24 @@ def main():
     ap.add_argument("--yaw-rate", type=float, default=offboard.DEFAULT_YAW_RATE_DPS,
                     help="turn rate for the left/right buttons, deg/s")
     ap.add_argument("--takeoff-alt", type=float, default=5.0, help="m")
+    ap.add_argument("--open-loop-hold", action="store_true",
+                    help="EXPERIMENT: idle sends a zero velocity instead of a "
+                         "position setpoint, reopening the position loop that "
+                         "ADR-0008 closed. Only for the >60 m diagnostic "
+                         "flight; never for ordinary flying.")
+    ap.add_argument("--vpe-repeats", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="EXPERIMENT: --no-vpe-repeats sends a "
+                         "VISION_POSITION_ESTIMATE only when the estimate has "
+                         "moved on. 55%% of the flown VPE traffic is repeats, "
+                         "which PX4 re-stamps as fresh measurements; default "
+                         "True is the flown behaviour")
+    ap.add_argument("--ev-delay-ms", type=float, default=None,
+                    help=f"EXPERIMENT: EKF2_EV_DELAY, ms, clamped to PX4's max "
+                         f"of {vision_bridge.EV_DELAY_MS_MAX:.0f}. "
+                         f"@reboot_required, so it is sent in phase 0 with "
+                         f"EKF2_HGT_REF. Default leaves PX4's stored value "
+                         f"(0) alone")
     ap.add_argument("--mission-speed", type=float, default=3.0,
                     help="waypoint cruise, m/s. Clamps PX4's MPC_XY_VEL_MAX, "
                          "whose 12 m/s default dwarfs the pad's 2 m/s")
@@ -1645,7 +1691,10 @@ def main():
                                args.offboard_warmup, args.mission_speed,
                                args.arrival_radius,
                                vision=vision, vision_origin=vision_origin,
-                               csv_path=csv_path)
+                               csv_path=csv_path,
+                               hold_open_loop=args.open_loop_hold,
+                               vpe_repeats=args.vpe_repeats,
+                               ev_delay_ms=args.ev_delay_ms)
     loop_thread.start()
 
     print(f">>> MAVLink offboard link: {args.mavlink}")

@@ -419,3 +419,98 @@ def test_origin_uses_degE7_and_millimetres(conn):
     assert args[1] == 136615687
     assert args[2] == 1002982350
     assert args[3] == 12500
+
+
+# --- repeated estimates ----------------------------------------------------
+
+def _same_pose():
+    return vision_bridge.VisionPose(ts_ns=7_000_000_000, x=1.0, y=2.0, z=3.0,
+                                    roll=0.0, pitch=0.0, yaw=0.0)
+
+
+def test_repeats_are_sent_by_default_and_counted(conn):
+    """The SHIPPED behaviour is one VPE per setpoint tick, repeats included --
+    that is what every flight on record used, and it is not changed on the
+    strength of an unflown argument. The counter exists so a run can be read
+    back for how much of its VPE traffic was repeats.
+    """
+    s = vision_bridge.VisionPositionSender(conn)
+    pose = _same_pose()
+    assert s.send(pose, now=10.0)
+    assert s.send(pose, now=10.03)
+    assert s.send(pose, now=10.06)
+    assert conn.mav.vision_position_estimate_send.call_count == 3
+    assert s.sent == 3
+    assert s.repeats == 2
+
+
+def test_no_repeats_sends_only_when_the_estimate_moves_on(conn):
+    """`send_repeats=False`: EKF2 stamps every arrival with its own clock, so a
+    repeat reaches it as a fresh independent measurement of the current instant
+    while describing a frame up to 120 ms older."""
+    s = vision_bridge.VisionPositionSender(conn, send_repeats=False)
+    pose = _same_pose()
+    assert s.send(pose, now=10.0)
+    assert not s.send(pose, now=10.03)
+    assert not s.send(pose, now=10.06)
+    assert conn.mav.vision_position_estimate_send.call_count == 1
+    assert s.sent == 1
+    assert s.repeats == 2
+
+    moved = vision_bridge.VisionPose(ts_ns=7_080_000_000, x=1.1, y=2.0, z=3.0,
+                                     roll=0.0, pitch=0.0, yaw=0.0)
+    assert s.send(moved, now=10.09)
+    assert conn.mav.vision_position_estimate_send.call_count == 2
+
+
+def test_realigning_makes_an_unchanged_pose_new_information(conn):
+    """A new transform maps the same pose to a different NED position, so
+    suppression must not swallow the first send after a realign -- the phase
+    transitions are exactly where that send matters most."""
+    s = vision_bridge.VisionPositionSender(conn, send_repeats=False)
+    pose = _same_pose()
+    assert s.send(pose, now=10.0)
+    assert not s.send(pose, now=10.03)
+    s.realign(pose, vision_bridge.Px4Pose(north=5.0, east=-3.0, down=-49.0,
+                                          yaw=0.4))
+    assert s.send(pose, now=10.06)
+
+
+def test_last_capture_s_exposes_the_frame_stamp(conn):
+    """`sim_s - vpe_capture_s` in the run CSV is the end-to-end pipeline lag,
+    less the constant offset PX4's phase-0 reboot puts between its clock and
+    Isaac's."""
+    s = vision_bridge.VisionPositionSender(conn)
+    assert s.last_capture_s is None
+    s.send(_same_pose(), now=10.0)
+    assert s.last_capture_s == pytest.approx(7.0)
+
+
+# --- EKF2_EV_DELAY ---------------------------------------------------------
+
+def test_ev_delay_is_a_boot_param_because_px4_only_reads_it_at_boot(conn):
+    """@reboot_required true (ekf2_params.c:148). Sent in phase 1b it would
+    store and do nothing -- the failure EKF2_HGT_REF produced on 2026-08-11."""
+    assert "EKF2_EV_DELAY" in {n for n, _, _ in vision_bridge.EKF2_BOOT_PARAMS}
+    assert "EKF2_EV_DELAY" in vision_bridge.HGT_REF_NEEDS_REBOOT
+    p = dict((n, v) for n, v, _ in vision_bridge.EKF2_BOOT_PARAMS)
+    assert p["EKF2_EV_DELAY"] == 0.0        # the flown value; default unchanged
+    t = dict((n, t) for n, _, t in vision_bridge.EKF2_BOOT_PARAMS)
+    assert t["EKF2_EV_DELAY"] == offboard.MAV_PARAM_TYPE_REAL32
+
+
+def test_ev_delay_override_is_clamped_to_px4s_own_maximum():
+    """PX4 declares `@max 300` (ekf2_params.c:146). The measured pipeline lag
+    is larger than that, so the clamp is load-bearing: asking for 1000 must not
+    look like it was granted."""
+    def delay(params):
+        return dict((n, v) for n, v, _ in params)["EKF2_EV_DELAY"]
+
+    assert delay(vision_bridge.boot_params()) == 0.0
+    assert delay(vision_bridge.boot_params(120.0)) == 120.0
+    assert delay(vision_bridge.boot_params(1000.0)) == vision_bridge.EV_DELAY_MS_MAX
+    assert delay(vision_bridge.boot_params(-5.0)) == 0.0
+    # Nothing else in phase 0 moves.
+    assert (dict((n, v) for n, v, _ in vision_bridge.boot_params(120.0))
+            | {"EKF2_EV_DELAY": 0.0}
+            == dict((n, v) for n, v, _ in vision_bridge.EKF2_BOOT_PARAMS))

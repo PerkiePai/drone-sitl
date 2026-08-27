@@ -31,8 +31,17 @@ it is what stops a previous GPS-denied session leaving the next run to boot
 with GNSS already disabled.
 """
 
+EV_DELAY_MS_MAX = 300.0
+"""PX4's own ceiling on EKF2_EV_DELAY (ekf2_params.c:146, `@max 300`).
+
+Stated as a constant because the flown pipeline lag is LARGER than it -- see
+EKF2_EV_DELAY in EKF2_BOOT_PARAMS -- so the ceiling is a fact about what this
+knob can and cannot buy back, not an input-validation detail.
+"""
+
 EKF2_BOOT_PARAMS = (
     ("EKF2_HGT_REF", 0, MAV_PARAM_TYPE_INT32),
+    ("EKF2_EV_DELAY", 0.0, MAV_PARAM_TYPE_REAL32),
     ("SDLOG_MODE", 2, MAV_PARAM_TYPE_INT32),
     ("SDLOG_PROFILE", 131, MAV_PARAM_TYPE_INT32),
 )
@@ -49,6 +58,27 @@ restarts.
 `SDLOG_MODE` logger/params.c:68, default 0 (armed until disarm). 2 = boot until
 shutdown, so a flight is captured even if it never arms cleanly.
 @reboot_required true (logger/params.c:65).
+
+`EKF2_EV_DELAY` ekf2_params.c:151, default 0 ms, `@max 300`, *** and
+@reboot_required true (ekf2_params.c:148) *** -- which is why it is HERE and
+not in the phase-1b fusion set. Applied at connect time it would store and do
+nothing, exactly as EKF2_HGT_REF did on 2026-08-11.
+
+It is how long ago the vision measurement actually describes. Left at 0, EKF2
+treats every VISION_POSITION_ESTIMATE as a measurement of where the aircraft is
+at the instant the message lands, and it is not: it is at best a solve of a
+frame captured a while earlier. PX4 makes that worse than it looks -- the
+`usec` field VisionPositionSender sends is DISCARDED, because Timesync never
+converges on this link (Timesync.cpp:127-136, and Run 2 below), so PX4 stamps
+each estimate with its own arrival time. This param is the only remaining way
+to tell EKF2 the measurement is old.
+
+**The default stays 0 because the flown lag does not fit in the param.**
+Measured 2026-08-22 against ground truth from the estimator's own payload,
+where gt and the estimate are the same frame: the position estimate trails
+truth by ~0.7-1.2 s of sim time. 300 ms is the ceiling, so this knob can
+model at most a third of it. Set it from `--ev-delay-ms` for the experiment;
+do not read a partial improvement as the fix.
 
 `SDLOG_PROFILE` logger/params.c:147, default 1 (mission messages only). 131 =
 bit0 (1, default set) + bit1 (2, full-rate EKF2 replay) + bit7 (128, computer
@@ -370,9 +400,22 @@ def apply_ekf2_vision_params(link):
     _apply(link, EKF2_VISION_PARAMS)
 
 
-def apply_ekf2_boot_params(link):
+def boot_params(ev_delay_ms=None):
+    """EKF2_BOOT_PARAMS with EKF2_EV_DELAY overridden, clamped to PX4's max.
+
+    Kept separate from the applier so a caller -- or a test -- can see exactly
+    what phase 0 is about to send without a link.
+    """
+    if ev_delay_ms is None:
+        return EKF2_BOOT_PARAMS
+    delay = max(0.0, min(float(ev_delay_ms), EV_DELAY_MS_MAX))
+    return tuple((name, delay if name == "EKF2_EV_DELAY" else value, ptype)
+                 for name, value, ptype in EKF2_BOOT_PARAMS)
+
+
+def apply_ekf2_boot_params(link, ev_delay_ms=None):
     """Phase 0. Setpoint thread only. Requires a reboot to take effect."""
-    _apply(link, EKF2_BOOT_PARAMS)
+    _apply(link, boot_params(ev_delay_ms))
 
 
 def apply_ekf2_gps_flight_params(link):
@@ -422,7 +465,7 @@ def revert_mpc_gains(link):
     _apply(link, MPC_XY_DEFAULTS)
 
 
-def reboot_for_boot_params(link):
+def reboot_for_boot_params(link, ev_delay_ms=None):
     """Set the @reboot_required params and restart PX4. Setpoint thread only.
 
     PX4 refuses a reboot while armed, so this is a pre-flight act by
@@ -430,7 +473,7 @@ def reboot_for_boot_params(link):
     PX4 comes back -- joystick-server.py already re-sends its startup params on
     a heartbeat gap, which is exactly what a reboot looks like from outside.
     """
-    apply_ekf2_boot_params(link)
+    apply_ekf2_boot_params(link, ev_delay_ms)
     link.reboot_autopilot()
 
 
@@ -453,13 +496,47 @@ def send_gps_global_origin(link, lat_deg, lon_deg, alt_m):
 
 
 class VisionPositionSender:
-    """Streams VISION_POSITION_ESTIMATE. Setpoint thread only."""
+    """Streams VISION_POSITION_ESTIMATE. Setpoint thread only.
 
-    def __init__(self, conn, max_age_s=DEFAULT_MAX_AGE_S):
+    One message per setpoint tick, which is FASTER than estimates arrive: the
+    setpoint loop runs at ~32 Hz and the estimator solves at ~14.7 Hz, so the
+    same pose goes out more than once. Measured on the flown ulogs of
+    2026-08-22 (`logs/20260822-twohold`, `logs/20260822-openloop98b`): 15627
+    messages carrying 7010 distinct poses, 2.23 repeats each, max 4, 55% of
+    all traffic. Identical in both, open loop and closed.
+
+    That is not free. PX4 stamps each arrival with its own clock (see
+    EKF2_EV_DELAY), so a repeat is presented to EKF2 as a fresh, independent
+    measurement of the current instant while actually describing a frame up to
+    120 ms older -- a delay that VARIES sample to sample, which no constant
+    EKF2_EV_DELAY can model -- and 2.23 identical samples at EKF2_EVP_NOISE
+    also understate the variance by about the same factor.
+
+    `send_repeats=False` sends only when the estimate has moved on.
+    **Default True, because the shipped behaviour is the flown one** and the
+    repeats are the smaller half of the problem: they are worth ~120 ms
+    against the ~0.7-1.2 s of lag measured end to end. Fly it before believing
+    it, at 98 m AND at 49 m -- the 49 m companion is the test the gyro-bias
+    gate failed.
+    """
+
+    def __init__(self, conn, max_age_s=DEFAULT_MAX_AGE_S, send_repeats=True):
         self.conn = conn
         self.max_age_s = max_age_s
+        self.send_repeats = send_repeats
         self.sent = 0
         self.dropped_stale = 0
+        # Ticks on which the pose had not changed since the last one sent.
+        # Counted whether or not they were suppressed, so the two
+        # configurations are readable from the same field.
+        self.repeats = 0
+        # pose.ts_ns of the last estimate actually sent, and its capture time
+        # in seconds -- the sim clock the streamer stamped the FRAME with
+        # (vio-streamer.py:242). Against the send clock this is the end-to-end
+        # pipeline lag, less a constant PX4-boot offset; logged rather than
+        # differenced here because only the caller knows both clocks.
+        self._last_sent_ts = None
+        self.last_capture_s = None
         # Identity until the caller takes an alignment at a phase transition.
         self.alignment = IDENTITY_ALIGNMENT
         self.realigned = 0
@@ -472,6 +549,9 @@ class VisionPositionSender:
         """
         self.alignment = align_to_px4(pose, px4)
         self.realigned += 1
+        # A new transform makes the SAME pose a different NED position, so the
+        # next send is new information even if the estimate has not moved on.
+        self._last_sent_ts = None
         return self.alignment
 
     def send(self, pose, now, received_at=None):
@@ -486,16 +566,25 @@ class VisionPositionSender:
         be sim time wherever the caller can get it -- see DEFAULT_MAX_AGE_S for
         what measuring this in wall time costs. This function cannot check that
         for itself, which is why the requirement is stated rather than enforced.
+
+        With `send_repeats=False` a pose already sent is not sent again. See
+        the class docstring for what the repeats cost EKF2.
         """
         if pose is None:
             return False
         if received_at is not None and (now - received_at) > self.max_age_s:
             self.dropped_stale += 1
             return False
+        if pose.ts_ns == self._last_sent_ts:
+            self.repeats += 1
+            if not self.send_repeats:
+                return False
         n, e, d, roll, pitch, yaw = self.alignment.to_px4_ned(pose)
         self.conn.mav.vision_position_estimate_send(
             int(pose.ts_ns // 1000),        # usec
             float(n), float(e), float(d),
             float(roll), float(pitch), float(yaw))
+        self._last_sent_ts = pose.ts_ns
+        self.last_capture_s = pose.ts_ns / 1e9
         self.sent += 1
         return True

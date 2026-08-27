@@ -1,11 +1,44 @@
 # Session notes: VIO GPS-denied live bring-up (plan Task 8)
 
 **Plan:** `docs/superpowers/plans/2026-08-07-vio-gps-denied.md`, Task 8
-**Status 2026-08-13:** 8.1–8.5 pass. **GPS-denied flight is real and repeatable**
-— `cs_gps: False`, `cs_ev_pos: True`, OFFBOARD held on vision alone. It does not
-hold station, so **8.6 does not pass**. 8.7–8.9 sit downstream of a stable hover.
 
-Five flights, each fix exposing the next fault. Read the chain top to bottom.
+**Status 2026-08-22:** 8.1–8.5 pass, and **8.6 passes up to ~60 m** — six 180 s
+vision-only holds, none aborted, and every hold flown first in a fresh session
+inside ADR-0001's bar: 2.02 m, 2.05 m at 49 m and 2.65 m at 59 m, all settling,
+against 158.6 m for the same gains before. No parameter was changed to get
+there; the three faults were a hover commanded as zero *velocity* (ADR-0008),
+an accelerometer-corrupted derotation, and an unestimated gyro bias.
+8.7–8.9 not attempted.
+
+## The one open bug
+
+**Above ~60 m the hold collapses** — 25 m and 50 m peaks at 98 m — **and it is
+the position loop, not the estimator.** The same hold at 98 m with the position
+loop OPEN holds flat at 3.34 m, and its 49 m companion at 2.97 m: open-loop
+performance is altitude-independent, closed-loop performance is not.
+
+The leading candidate is **measurement delay**. Measured 2026-08-22 from logs
+already on disk, no flight: the estimate trails ground truth by **~0.7–1.2 s**,
+PX4 discards the vision timestamp and stamps every estimate at arrival, and 55%
+of the VPE traffic is repeats re-presented as fresh samples. `MPC_XY_P = 0.95`
+gives the outer loop a ~1 s time constant, so the lag is the size of the loop
+it sits inside. **Not flown.** See the last section for the evidence, the two
+levers it justifies, and the flight list.
+
+### Flown and refuted, in order — do not re-test these
+
+| Hypothesis | Verdict |
+|---|---|
+| The estimator degrades with height | Refuted: open-loop drift is flat, 1.2–1.9 m to 125 m |
+| Position gain must scale as 1/h | Refuted: softening both loops at 98 m gave 33 m, inside the spread |
+| A climb-polluted gyro-bias estimate | Refuted: the `\|a\|` gate admitted 18° of tilt and never fired |
+| Gating the accelerometer out of that estimate | Real, h-linear mechanism; **still made it worse** — halved 98 m and broke the 50 m hold. Reverted |
+| Velocity noise scaling with height | Weakened, not killed: 0.48 → 0.59 relative error, not the 2x predicted |
+| EKF2's EV position-bias state | Eliminated: not observable with GNSS off, published only in phase 1b |
+| A dead-zone in the flow solve | Refuted: recovers 0.018 px/frame to within 1–7% at 100 m |
+
+Each fix exposed the next fault. The chronology below is in the order things
+were found, and is worth reading top to bottom the first time.
 
 ## Running it
 
@@ -31,10 +64,69 @@ leaves the estimator to you.
 run, including GPS-only ones. That is the cost of the one-command default, and
 the startup banner says so.
 
-Offline: **247/249 tests pass** in the `drone` conda env (the 2 failures are
-environmental — see Task 9 note below). They fail in *base* conda for want of
-`websockets`/`msgpack` — wrong interpreter, not a real failure. Use
-`~/miniconda3/envs/drone/bin/python`.
+### Experiment levers
+
+Off by default, every one of them. The shipped configuration is the flown one,
+and a lever that quietly becomes the baseline makes the next comparison
+meaningless — which is what the gyro-bias gate cost.
+
+| Flag | What it does |
+|---|---|
+| `--open-loop-hold` | Idle sends a zero velocity in `MAV_FRAME_BODY_NED` instead of a position setpoint, reopening the loop ADR-0008 closed |
+| `--no-vpe-repeats` | Sends a VPE only when the estimate has moved on, instead of one per setpoint tick |
+| `--ev-delay-ms N` | `EKF2_EV_DELAY`, sent in phase 0 because it is `@reboot_required`. PX4 caps it at 300 |
+
+### Tests
+
+**332 pass, 0 fail** in the `drone` conda env (2026-08-22), run file by file.
+Use `~/miniconda3/envs/drone/bin/python` — in *base* conda they fail for want
+of `websockets`/`msgpack`, which is the wrong interpreter, not a real failure.
+
+**Run `streaming/tests` one file at a time.** Invoking the directory as a whole
+hangs: the suite spawns a real `pipeline-streaming.py`, and if its parent dies
+the grandchild is orphaned, holds port 5557 and keeps the pytest pipe open —
+indistinguishable from a hung suite, and it also blocks the next server's
+estimator from binding.
+
+**Two flakes, both load-dependent, both confirmed pre-existing** by re-running
+them in a clean `HEAD` worktree with none of this branch's changes:
+
+- `test_offboard_loop.py` collects setpoints off a real UDP socket against a
+  wall-clock deadline. Under load, `test_a_joystick_command_releases_the_hold`,
+  `test_loop_streams_setpoints_fast_enough_for_offboard`,
+  `test_pausing_a_mission_hands_control_back_to_the_joystick` and
+  `test_a_hanging_recorder_call_does_not_gap_the_setpoint_stream` fail in
+  varying combinations. All 87 pass on a quiet machine.
+- `test_web_ui.py::test_server_logs_no_websocket_support_warning` intermittently
+  **hangs** — not fails — at `server.stdout.read()`, which blocks until every
+  writer on that pipe closes. It passes alone in 1.6 s, passes with its
+  neighbour, and the whole file passes in ~8 s when the box is quiet; it hung
+  twice in a row while `celery`/`gunicorn` workers were busy, and hung
+  identically on a clean HEAD tree. If a run stalls with no output, this is it.
+
+## Sim operating gotchas
+
+Collected here because they cost flights, and they are not discoverable from
+the code.
+
+- **`sim/save-ulog.sh <run-name>` MUST run before Isaac exits.** Pegasus runs
+  PX4 in a `TemporaryDirectory` it deletes on exit. Four flights in one session
+  left no ulog.
+- **PX4 is left in OFFBOARD, disarmed, after a campaign lands**, and refuses to
+  arm from there — a second campaign in one session reports `failed_to_arm`.
+  Restart the sim between campaigns.
+- **Wait for a sustained `AUTO.LOITER` + disarmed** on the websocket before
+  starting a driver. `sim/mpc_gain_sweep.py` started as soon as port 8090 opens
+  races the server's own phase-0 PX4 reboot and reports `failed_to_arm`.
+- **A landed airframe's gyro reads ~3.97e-2 rad/s** while its position is
+  static to 1 mm and its yaw moves 0.003 deg in 60 s — a contact-solver
+  artifact, not bias. Any pre-flight gyro calibration must reject it.
+- **Read the 30 s envelope, not the slope.** A settled hold wanders inside a
+  bounded envelope. Pass = ADR-0001: 180 s, non-growing envelope, peak recorded.
+- **Do not read a similarity fit of `vio` against `gt` as "the estimate is
+  frozen".** With a large coherent drift in `vio` the fit is swamped and its
+  scale means nothing; it reported 0.021 on a hold whose estimate was tracking
+  fine.
 
 ## Run 1 — `EKF2_HGT_REF` is reboot-required, and not optional
 
@@ -1361,3 +1453,399 @@ explained away.
 Nothing here needed a parameter change. Every candidate Task 9 and Task 10
 ruled out was correctly ruled out — the lever was never in EKF2's tuning or
 in `MPC_XY_*`.
+
+## 2026-08-22, later — the accelerometer still reaches the derotation, and gating it is not the fix
+
+A fourth mechanism behind the >60 m collapse, **found, quantified, flown three
+times, and reverted.** It is real; the fix built on it is net-negative.
+
+### The mechanism
+
+The derotation subtracts `self.state.gyro_bias`, and that bias is written by
+the **accelerometer**. Mahony's integral term is driven by the gravity error,
+and a multirotor's accelerometer measures specific force along its own thrust
+axis: while it accelerates horizontally at `a` the reading is tilted
+`atan(a/g)` from true down, and the integral absorbs that tilt as a gyro bias.
+The derotation then subtracts a rate the airframe never turned at. Fault 3's
+fix reopened fault 2's path through a different door.
+
+Reproducible offline with no sim. A still camera -- identical frames, zero true
+rotation -- under 2 m/s^2 of sustained lateral acceleration fabricates:
+
+| h | fabricated in 60 s | / h |
+|---|---|---|
+| 49 m | 11.83 m | 0.2414 |
+| 98 m | 23.66 m | 0.2414 |
+| 125 m | 30.18 m | 0.2414 |
+
+**Exactly linear in height, and 0.00 m at every height with `Ki=0`.**
+
+The transfer from a rate error to fabricated ground velocity, measured through
+the whole pipeline, is **1.26 * h * |bias error|** -- linear in both, which
+confirms the `h*omega` model the earlier faults were argued from.
+
+Driving `MahonyState` with the flown IMU of `logs/20260822-twohold`:
+`|bias_xy|` means **9.6e-4 rad/s** through the 49.3 m hold that passes and
+**6.2e-3** through the 98.2 m hold that collapses -- 0.048 against 0.60 m/s of
+fabricated velocity.
+
+**Why the 2026-08-22 `|a|` gate refuted nothing.** It fired at 5% of g.
+Horizontal acceleration enters the magnitude only in quadrature --
+`|a|/g - 1 ~= (a/g)^2 / 2` -- so 5% is **18 degrees** of admitted tilt. The
+flown deviation is 0.9% (p95) at 49 m and 5.5% (p95) at 98 m: the gate almost
+never fired. It refuted a gate that could not work, not the mechanism.
+
+### The fix, and why it is reverted
+
+Gate the integral on quiescence -- low-passed specific force back at 1 g,
+nothing turning, held 3 s. (A first version without the dwell made things
+*worse*, 2.7e-3 against 1.6e-3 ungated: the gate opens at each zero crossing,
+which is exactly when the attitude is still settling from the lie either side
+of it.) On the flown IMU this took the collapsing hold from 0.605 to 0.027 m/s.
+
+Flown three times, all 180 s, `baseline` gains:
+
+| run | h | peak | slope | note |
+|---|---|---|---|---|
+| `20260822-gatefix98` | 100.3 m | **14.6 m** | +0.081 | gate only |
+| `20260822-calib98b` | 100.3 m | **17.6 m** | +0.096 | gate + fast calibration |
+| `20260822-calib50` | 50.3 m | **13.7 m** | +0.094 | **regression: this altitude passed at ~2 m** |
+
+The gate does exactly what it was built to do -- in flight the bias goes from
+wandering (mean 6.2e-3, max 1.5e-2) to frozen solid (mean = max, spread
+**0.000**) -- and at 100 m it halves the peak, 25.4 -> 14.6 m. **And it breaks
+the altitude that already worked.**
+
+**Why: a frozen estimate is worse than a wandering one when it is wrong.** A
+wandering bias produces a random walk that partly cancels; a frozen wrong one
+produces a straight line. Both high holds walked at exactly the rate their own
+frozen residual predicts, and the 50 m hold -- which has no altitude problem at
+all -- walked 13.7 m for the same reason.
+
+Trying to freeze a *better* value made it worse, not better: the calibration
+schedule converged the estimate further (1.17e-3 -> 1.33e-3) and the walk grew
+with it (0.081 -> 0.096 m/s).
+
+**Reverted.** `flow_odometry.py` and `pipeline-streaming.py` are back at the
+flown configuration; the tree is byte-identical to what passes at 49 m.
+
+### What this leaves for whoever picks it up
+
+- The mechanism is real and worth removing, but **not by freezing.** Anything
+  that stops tracking mid-flight converts a bounded wander into a coherent
+  ramp. A bias estimator that keeps tracking while staying deaf to the
+  accelerometer's lie needs a rate reference the accelerometer cannot corrupt
+  -- the images themselves are the obvious candidate and are not used for this
+  today.
+- **The new datum that constrains the next hypothesis:** with the bias frozen,
+  the walk velocity was **0.094 m/s at 50 m and 0.096 m/s at 100 m** --
+  altitude-*independent*. Whatever sets that residual is not `h*omega`.
+- A dead-zone in the flow solve was hypothesised and **refuted**: synthesised
+  frames at an exact known pixel shift recover slow motion to within 1-7% down
+  to 0.018 px/frame at 100 m. The solve does not under-report slow motion.
+- Do not read a similarity fit of `vio` against `gt` as "the estimate is
+  frozen". With a large coherent drift in `vio` the fit is swamped and its
+  scale means nothing; it reported 0.021 on a hold whose estimate was tracking
+  fine.
+
+### Sim operating notes learned the hard way
+
+(Folded into **Sim operating gotchas** at the top of this file, where they are
+findable before a flight rather than after one.)
+
+## 2026-08-22, later still — the velocity-setpoint experiment: it is the position loop
+
+The experiment named at the end of the previous section, finally flown. A
+phase-2 hold at 98 m on **velocity** setpoints -- EKF2 on vision alone, but the
+position loop OPEN, as it was before ADR-0008 -- plus a 49 m companion so the
+comparison means something.
+
+The prediction on record was: *still diverges => the fault is upstream of the
+position loop; drifts slowly and linearly => the position loop is what
+amplifies at altitude.*
+
+**It did neither. It held flat, at both altitudes.**
+
+| position loop | 49 m | 98 m |
+|---|---|---|
+| **closed** (ADR-0008, shipped) | 1.6–2.1 m, flat envelope | **25.4 / 33.4 m, growing** |
+| **open** (`--open-loop-hold`) | **2.97 m** | **3.34 m** |
+
+30 s envelopes, 180 s vision-only holds, `baseline` gains throughout:
+
+    49 m open-loop   1.2  1.0  1.0  2.1  2.7  3.0     (slope +0.023)
+    98 m open-loop   1.1  2.3  3.3  3.3  2.7  2.9     (slope -0.007, settling)
+    98 m closed      3.1  8.9 16.6 20.9 24.1 25.4     (logs/20260822-twohold)
+
+`logs/20260822-openloop49`, `logs/20260822-openloop98`. Both genuine phase-2
+holds: 180 s, 585 inliers, `gps_denied` throughout.
+
+### What this settles
+
+**The estimator is not the problem at altitude, and the position loop is.**
+Open-loop the hold is ~3 m at 50 m and ~3 m at 100 m -- **altitude-independent**
+-- while the same aircraft, same gains, same estimator, closed-loop, goes from
+2 m to 25-33 m over the same change in height. At 98 m, opening the position
+loop is worth a factor of **8-10**.
+
+This also explains why the Task 10 gain sweep found nothing: softening
+`MPC_XY_P` and `MPC_XY_VEL_P_ACC` together at 98 m gave 33 m, inside the
+spread. Whatever the position loop is doing wrong at altitude is not simply
+"too much gain", because removing the loop entirely fixes it and halving its
+gains does not.
+
+Estimator drift, open-loop, does grow a little with height -- peak 1.12 m at
+50 m against 4.01 m at 100 m -- but it stays bounded, which is exactly what the
+open-loop altitude sweep said back when it was flat to 125 m.
+
+### What this does NOT mean
+
+**Not "revert ADR-0008".** A velocity hold has no position reference at all: it
+holds only as well as the velocity estimate is unbiased, which is why the 49 m
+open-loop run creeps at +0.023 m/s while the closed-loop one sits flat at 2 m.
+ADR-0008 exists because that creep was 225 m when the velocity estimate was
+still corrupted by faults 2 and 3. The open loop is a diagnostic, not a
+configuration.
+
+The question is now much narrower and much better posed: **what does closing
+the position loop around a vision position estimate do at 98 m that it does not
+do at 49 m?** Candidates worth ranking before flying anything:
+
+- **Measurement delay.** `EKF2_EV_DELAY` is measured on a clock whose rate
+  wanders (ADR-0006). A position loop closed around a delayed estimate is the
+  textbook case, and delay costs phase margin in a way a P-gain reduction
+  alone does not buy back.
+- **EKF2's own EV position-bias estimator.** It is already known to matter at
+  the cut (`estimator_ev_pos_bias`, see the handover work). In closed loop the
+  vision measurement is correlated with the aircraft's commanded motion, which
+  is exactly the assumption an EKF bias state is not allowed to violate.
+- Read `estimator_ev_pos_bias` and the EV innovations from the ulogs of the
+  two 98 m runs above -- one open, one closed, same altitude, same gains. That
+  is a free comparison and it is already on disk.
+
+### The lever
+
+`joystick-server.py --open-loop-hold` restores the pre-ADR-0008 shape (idle
+sends a zero velocity in `MAV_FRAME_BODY_NED` instead of a position setpoint).
+**Default off**, pinned both ways in `streaming/tests/test_offboard_loop.py`
+including a guard that ADR-0008 stays the shipped behaviour. It is an
+experiment lever, not a mode.
+
+### The EV innovations and bias state, open loop against closed
+
+Both ulogs now exist (`logs/20260822-openloop98b/15_03_21.ulg`, flown to
+replace an open-loop run whose ulog was lost -- Pegasus's rootfs is a
+TemporaryDirectory and `sim/save-ulog.sh` MUST run before Isaac exits). The
+re-fly reproduced: peak **3.66 m**, settling, envelope 1.7 2.3 2.1 3.7 2.8 2.4.
+
+**`estimator_ev_pos_bias` is eliminated as the in-hold mechanism.** It is
+published only in phase 1b -- t = 0-76, 240-302, 485-491 s on
+`logs/20260822-twohold` -- because the EV bias state is not observable once
+GNSS is off. Its one large move is *after* the collapsed hold is restored,
+snapping 19 -> 24.4 m to absorb the drift the vision frame had accumulated.
+That is confirmation of the collapse, not its cause.
+
+**The EV innovations say the loop makes its own disturbance.** Mean
+`|innovation|` on `estimator_aid_src_ev_pos`:
+
+| | h | first 30 s | full hold | p95 | max |
+|---|---|---|---|---|---|
+| open loop | 100.2 m | **0.183** | 0.538 | 0.988 | 1.28 |
+| closed loop | 49.3 m | 0.252 | 0.283 | 0.482 | 0.85 |
+| closed loop | 98.2 m | **0.642** | 2.875 | 7.369 | 11.44 |
+
+By 30 s bin:
+
+    open   98 m   0.183  0.493  0.543  0.603  0.665  0.743   bounded
+    closed 49 m   0.252  0.295  0.320  0.224  0.285  0.322   flat
+    closed 98 m   0.642  1.569  2.907  3.895  4.155  4.050   runaway
+
+**At 98 m with the loop open the innovation is 0.183 m -- better than the
+closed-loop hold at 49 m that passes.** So the 0.642 m seen closed-loop at the
+same altitude is an EFFECT of closing the loop, not an altitude-driven input to
+it. Altitude alone does not degrade the vision measurement.
+
+That completes the mechanism, and it is a positive feedback the earlier work
+had the pieces of without joining: the position loop commands a correction ->
+the airframe accelerates and tilts -> the derotation error scales as `h*omega`
+-> the flow solve fabricates position error -> the apparent position error
+grows -> a larger correction. Open the loop and the airframe never manoeuvres,
+so the `h*omega` term is never excited and the same estimator at the same
+height is clean. It also explains why the quiescence gate helped at 98 m
+(25 -> 14.6 m) without fixing it: it removed the accelerometer's contribution
+to that path, not the path.
+
+Nothing is ever rejected -- `innovation_rejected` is 0% and `fused` 100% at
+both altitudes, so EKF2 swallows every sample all the way into the collapse.
+
+### One lever this exposes, and the caveat on it
+
+`observation_variance` is **9.0 m^2 per axis -- sigma = 3.0 m -- identical at
+both altitudes**, which is exactly the `EKF2_EVP_NOISE = 3.0` the bridge sets.
+EKF2 is told the vision is good to 3.0 m while its actual innovation is 0.18 m
+open-loop and 0.25 m at the 49 m hold that passes: it under-trusts vision by
+more than a factor of ten and leans on IMU dead reckoning, which lags.
+
+`streaming/vision_bridge.py:89` records why 3.0 was chosen on 2026-08-13: to
+stop EKF2 chasing **8-13 m position jumps between consecutive samples**. Those
+jumps were the accel-corrupted derotation -- **fault 2, fixed 2026-08-22**. The
+measured max innovation is now 1.28 m open-loop and 0.85 m at 49 m closed. The
+value is filtering a fault that no longer exists.
+
+**The caveat, stated because it is the obvious trap:** dropping `EKF2_EVP_NOISE`
+has NOT been flown, and the argument for it is that a lagging estimate costs
+phase margin in the loop that is already the confirmed amplifier. The argument
+against is the one written in 2026-08-13's comment -- at 0.5 the aircraft ran
+165 m off. That was a different estimator. Fly it at 98 m against the 25.4 m
+closed-loop baseline, and fly the 49 m companion, before believing either.
+
+
+## 2026-08-22, last — the loop is closed around a measurement ~1 s old
+
+The previous section left one question: **what does closing the position loop
+around a vision position estimate do at 98 m that it does not do at 49 m?** Two
+candidates were ranked, measurement delay first. This is the free half of that
+work -- three measurements, no flight, all from logs already on disk -- plus
+the two levers they justify. **Nothing here has been flown.**
+
+### 1. PX4 throws the vision timestamp away, and always did
+
+`vehicle_visual_odometry.timestamp == timestamp_sample` for **every** sample in
+both 98 m ulogs -- 9,192 and 15,627 messages, exactly one distinct difference,
+0.000 ms. That is `sync_stamp()` returning PX4's own arrival time, which Run 2
+established from source and which nothing since has re-checked in flight. Now
+it is checked: the `usec` field `VisionPositionSender` sends is dead weight.
+
+So EKF2 believes every estimate describes the aircraft **at the instant the
+message lands**. With `EKF2_EV_DELAY = 0` -- its value on every flight this
+repo has made -- nothing corrects that.
+
+For completeness, ADR-0006's own named measurement, the applied delay from
+`estimator_aid_src_ev_pos`:
+
+| | mean | p50 | p95 | max |
+|---|---|---|---|---|
+| `openloop98b` | 80.5 ms | 80 | 84 | 84 |
+| `twohold` | 80.9 ms | 80 | 84 | 88 |
+
+That is EKF2's own fusion-horizon buffer, flat and identical across both runs.
+It compensates nothing; it is not `EKF2_EV_DELAY` doing work.
+
+### 2. 55% of the VPE traffic is repeats
+
+The setpoint loop sends one VPE per tick at ~32 Hz. The estimator solves at
+14.7 Hz. So poses go out more than once:
+
+| | messages | distinct poses | repeats/pose | max | new-pose interval |
+|---|---|---|---|---|---|
+| `openloop98b` | 9,192 | 4,125 | 2.23 | 4 | 68 ms mean / 80 p50 / 120 max |
+| `twohold` | 15,627 | 7,010 | 2.23 | 4 | same |
+
+Identical open loop and closed, so this is a property of the plumbing, not of
+the flight. Combined with finding 1 it means EKF2 receives, on average, 2.23
+copies of each measurement, each **presented as a fresh independent sample of
+the current instant** while describing a frame up to 120 ms older. That is a
+delay that varies sample to sample -- which no constant `EKF2_EV_DELAY` can
+model -- and 2.23 identical samples at `EKF2_EVP_NOISE` also understate the
+variance by about the same factor.
+
+`VisionPositionSender.send` already refuses to repeat a pose older than
+`DEFAULT_MAX_AGE_S = 0.5`, for exactly this reason. At 120 ms that guard never
+fires.
+
+### 3. The estimate trails ground truth by ~0.7-1.2 s
+
+`gt_*` and `vio_*` in `run.csv` come out of the **same** estimator payload
+(`pipeline-streaming.py` `payload()`), so they are the same frame and there is
+no clock-offset question: any lag between them is the estimator's own dynamics.
+Two independent estimators -- cross-correlation of the detrended tracks, and a
+least-squares fit of `(vio - gt)` against `d(gt)/dt`, whose slope is `-tau`:
+
+| run | position loop | h | xcorr peak | regression |
+|---|---|---|---|---|
+| `openloop98b` | open | 98 m | **+1.09 s** (rho 0.868) | 1.25 s (r -0.68) |
+| `openloop49` | open | 49 m | +0.74 s | 0.73 s |
+| `twohold` | closed | both | +1.06 s | 0.84 s |
+| `highgain` | closed | both | +1.06 s | 0.83 s |
+
+The open-loop runs are the ones that count: there the airframe's motion cannot
+be caused by the estimate, so the causal direction is not in question. Null
+control -- the same estimator against a time-reversed `vio`, same spectrum, no
+causal relation -- gives rho **0.089** against 0.868.
+
+**Read this as an order, not a number.** Hover motion is low-frequency, so the
+correlation peak is broad: rho is 0.809 at zero lag and 0.868 at 1.09 s, and
+0.85+ anywhere between 0.5 and 1.5 s. Fitting a first-order lag and a pure
+delay separately, both improve the residual by about the same amount
+(0.36 -> 0.25) and neither is distinguishable from the other, so the *shape* of
+the lag is not settled either.
+
+**A test that was run and thrown away:** the vertical axis reads 0.0 ms lag on
+all four runs, with a 100 m climb to correlate against. It measures nothing --
+height is barometric (`flow_odometry.py:29`), not solved from images.
+
+### Why this is a candidate for the >60 m collapse
+
+`MPC_XY_P = 0.95` gives the outer loop a time constant of about 1 s. The lag
+measured above is the same size as the loop it sits inside. That is the
+textbook way to lose phase margin, and it accounts for the three things about
+this collapse that "too much gain" never did:
+
+- **Non-monotonic in gain.** 0 -> 3.3 m, 0.50 -> 33.4 m, 0.95 -> 25.4 m. Delay
+  does that; a gain that is simply too high does not.
+- **Open loop is immune at every height.** No manoeuvre, no phase to lose.
+- **Softening both loops bought nothing.** Reducing gain does not buy back
+  phase.
+
+It does **not** explain the altitude dependence on its own -- the lag is
+altitude-independent, 0.74 s at 49 m against 1.09 s at 98 m, which is inside
+the spread of a broad peak. What it plausibly does is set the crossover
+frequency at which the already-established `1.26 * h * |bias error|` term is
+excited. Stated as a mechanism to test, not a conclusion.
+
+### What was changed, and why it changes nothing yet
+
+Two levers, both **defaulting to the flown configuration**, for the same reason
+the position hold does: every result on record was measured without them, and
+an unflown change that quietly becomes the baseline makes the next comparison
+meaningless. This is the lesson the gyro-bias gate cost.
+
+- **`EKF2_EV_DELAY` moved into `EKF2_BOOT_PARAMS`** at 0.0, with
+  `--ev-delay-ms` to override it. It is `@reboot_required`
+  (`ekf2_params.c:148`), so phase 0 -- alongside `EKF2_HGT_REF` -- is the only
+  place it can be set from; sent at connect time it would store and do nothing,
+  which is precisely the failure Run 1 spent a flight on. **PX4 caps it at
+  300 ms** (`@max 300`, `ekf2_params.c:146`), so the knob can model at most a
+  third of the measured lag. Do not read a partial improvement as the fix.
+- **`--no-vpe-repeats`** sends a VPE only when the estimate has moved on.
+  `VisionPositionSender.repeats` counts them under both settings, and
+  `vpe_capture_s` is now a `run.csv` column: `sim_s - vpe_capture_s` is the
+  end-to-end lag, less a constant offset (PX4's clock restarts at the phase-0
+  reboot, Isaac's does not -- subtract the run's own minimum).
+
+Repeats are the smaller half: ~120 ms against ~1 s. Expect little from that
+lever alone.
+
+### The flight list, reordered by this evidence
+
+Every candidate needs a 49 m companion. That is the test the gyro-bias gate
+failed -- it improved 98 m and broke 50 m.
+
+| # | Change | Read | What each outcome means |
+|---|---|---|---|
+| 1 | `--ev-delay-ms 300` (phase 0, the max PX4 allows) | 98 m peak + envelope | Peak drops materially -> delay is the amplifier, and the remaining ~700 ms is the target. No change -> delay is not the path, and levers 2-3 are next |
+| 2 | `--no-vpe-repeats` | 98 m peak, EV innovation | Isolates the varying part of the delay from the constant part |
+| 3 | `EKF2_EVP_NOISE` 3.0 -> 0.5-1.0 | 98 m peak, innov, rejected % | 3.0 filters a fault fixed on 2026-08-22; watch for the 2026-08-13 165 m failure returning |
+| 4 | Cap tilt (`MPC_TILTMAX_AIR`) | 98 m peak | Attacks `h*omega` at its source; never tried |
+| 5 | Altitude ladder 60 / 75 / 85 m on whatever wins | crossover height | Defines the envelope and the margin |
+
+**Reduce the lag itself** if 1 helps and 300 ms is not enough. ~1 s of sim time
+at `sim_rate` 0.55 is ~1.8 s of wall clock for a solve running at 14.7 Hz --
+far more than the CV work should cost, which points at queueing rather than
+compute. Not investigated.
+
+### Two things not worth retesting
+
+Unchanged from before, and this session adds nothing against them: the EV bias
+state (not observable with GNSS off) and the estimator degrading with height
+(open-loop drift is flat to 125 m).

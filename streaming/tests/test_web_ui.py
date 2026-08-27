@@ -299,3 +299,33 @@ def test_agent_control_route_message_loads_and_flies_a_mission(server):
             assert t["mission"]["state"] == "RUNNING"
 
     asyncio.run(exercise())
+
+
+# --- /ws agent run / stop ----------------------------------------------
+
+def test_ws_agent_run_is_refused_when_link_is_down(server):
+    websockets = pytest.importorskip("websockets")
+
+    async def exercise():
+        async with websockets.connect(f"ws://127.0.0.1:{WEB_PORT}/ws") as ws:
+            await asyncio.wait_for(ws.recv(), timeout=10)
+            await ws.send(json.dumps({"type": "agent", "action": "run",
+                                      "file": "whatever.py"}))
+            t = await _telem_where(ws, lambda t: "agent" in t)
+            for _ in range(6):
+                t = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                assert t["agent"]["state"] in ("idle", "error")
+
+    asyncio.run(exercise())
+
+
+def test_ws_telemetry_carries_an_agent_block_from_the_start(server):
+    websockets = pytest.importorskip("websockets")
+
+    async def exercise():
+        async with websockets.connect(f"ws://127.0.0.1:{WEB_PORT}/ws") as ws:
+            t = await _telem_where(ws, lambda t: "agent" in t)
+            assert t["agent"] == {"state": "idle", "file": None,
+                                  "camera": None, "log": []}
+
+    asyncio.run(exercise())

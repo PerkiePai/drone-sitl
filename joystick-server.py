@@ -15,10 +15,12 @@ Design: docs/superpowers/specs/2026-07-30-joystick-offboard-design.md
 """
 import argparse
 import asyncio
+import collections
 import json
 import math
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -304,6 +306,119 @@ class SetpointLoop(threading.Thread):
                 next_tick = time.monotonic()   # fell behind; resync
 
 
+class AgentRun:
+    """The lifecycle of one uploaded-script flight, on the web-async side.
+
+    RUN arms -> takes off -> settles -> enters OFFBOARD -> spawns the child
+    (agent_runner.py). First manual input, STOP, or child exit tears it
+    down. Reads the telemetry SetpointLoop already produces; never touches
+    MAVLink itself.
+    """
+
+    def __init__(self, loop_thread, python_exe, host, port, video_port):
+        self.loop_thread = loop_thread
+        self.python_exe = python_exe
+        self.host, self.port, self.video_port = host, port, video_port
+        self.state = "idle"        # idle | arming | running | stopped | error
+        self.file = None
+        self._proc = None
+        self._phase = None         # arm | takeoff | offboard  (while arming)
+        self._log = collections.deque(maxlen=40)
+        self._lock = threading.Lock()
+
+    def snapshot(self):
+        with self._lock:
+            running = self.state in ("arming", "running")
+            return {"state": self.state, "file": self.file,
+                    "camera": self.loop_thread.agent_camera if running else None,
+                    "log": list(self._log)}
+
+    def run(self, filename):
+        path = os.path.join(AGENT_UPLOAD_DIR, os.path.basename(filename or ""))
+        if not self.loop_thread.telemetry().get("connected"):
+            self._note("RUN refused: no MAVLink link")
+            self.state = "error"
+            return
+        if self.state in ("arming", "running"):
+            self._note("RUN refused: an agent is already running -- STOP first")
+            return
+        if not filename or not os.path.isfile(path):
+            self._note(f"RUN refused: {filename!r} not found")
+            self.state = "error"
+            return
+        self.file = filename
+        self.state = "arming"
+        self._phase = "arm"
+        self._note(f"arming for {filename}")
+        self.loop_thread.submit("arm")
+
+    def stop(self, why="stopped"):
+        if self.state not in ("arming", "running"):
+            return
+        self._note(f"stop: {why}")
+        p = self._proc
+        if p and p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        self._proc = None
+        self.loop_thread.submit("mission_clear")
+        self.loop_thread.agent_control.clear()
+        self.state = "stopped"
+        self._phase = None
+
+    def tick(self):
+        """Called ~5 Hz from the /ws telemetry pusher. Advances the preflight
+        state machine and reaps the child."""
+        if self.state == "arming":
+            self._advance_preflight()
+        elif self.state == "running" and self._proc \
+                and self._proc.poll() is not None:
+            code = self._proc.returncode
+            self._proc = None
+            self.loop_thread.agent_control.hold()
+            self.state = "error" if code else "stopped"
+            self._note(f"agent exited ({code})")
+
+    def _advance_preflight(self):
+        t = self.loop_thread.telemetry()
+        if self._phase == "arm" and t.get("armed"):
+            self._phase = "takeoff"
+            self._note("takeoff")
+            self.loop_thread.submit("takeoff")
+        elif self._phase == "takeoff" and t.get("alt_m", 0.0) > 1.0 \
+                and abs(t.get("vz", 9.0)) < 0.2 and t.get("ready_for_offboard"):
+            self._phase = "offboard"
+            self._note("offboard")
+            self.loop_thread.submit("offboard")
+        elif self._phase == "offboard" and t.get("mode") == "OFFBOARD":
+            self._phase = None
+            self._spawn()
+
+    def _spawn(self):
+        path = os.path.join(AGENT_UPLOAD_DIR, os.path.basename(self.file))
+        self._proc = subprocess.Popen(
+            [self.python_exe, "-u", os.path.join(ROOT, "agent_runner.py"),
+             "--file", path, "--host", self.host, "--port", str(self.port),
+             "--video-port", str(self.video_port)],
+            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1)
+        threading.Thread(target=self._drain_child, daemon=True).start()
+        self.state = "running"
+        self._note("agent running")
+
+    def _drain_child(self):
+        for line in self._proc.stdout:
+            self._note(line.rstrip())
+
+    def _note(self, msg):
+        with self._lock:
+            self._log.append(msg)
+        print(f">>> agent: {msg}")
+
+
 async def _push_telemetry(sock, loop_thread, agent_run=None, hz=5.0):
     try:
         while True:
@@ -320,7 +435,7 @@ async def _push_telemetry(sock, loop_thread, agent_run=None, hz=5.0):
         pass          # socket closed; the /ws handler cleans up
 
 
-def build_app(loop_thread, state, video_port, mission_speed):
+def build_app(loop_thread, state, video_port, mission_speed, agent_run):
     from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
     from fastapi.responses import JSONResponse
     from fastapi.staticfiles import StaticFiles
@@ -369,7 +484,8 @@ def build_app(loop_thread, state, video_port, mission_speed):
     async def ws(sock: WebSocket):
         await sock.accept()
         state.clear()
-        pusher = asyncio.create_task(_push_telemetry(sock, loop_thread))
+        pusher = asyncio.create_task(
+            _push_telemetry(sock, loop_thread, agent_run))
         try:
             while True:
                 msg = json.loads(await sock.receive_text())
@@ -383,6 +499,15 @@ def build_app(loop_thread, state, video_port, mission_speed):
                     # RESUME could never take.
                     if msg.get("pressed"):
                         loop_thread.submit("mission_pause")
+                        # First manual input is a hard kill for a running
+                        # script -- an agent is aborted, not paused.
+                        agent_run.stop("manual takeover")
+                elif kind == "agent":
+                    action = msg.get("action")
+                    if action == "run":
+                        agent_run.run(msg.get("file", ""))
+                    elif action == "stop":
+                        agent_run.stop("stop button")
                 elif kind == "cmd":
                     loop_thread.submit(msg["name"])
                 elif kind == "mission":
@@ -498,13 +623,16 @@ def main():
                                args.arrival_radius)
     loop_thread.start()
 
+    agent_run = AgentRun(loop_thread, sys.executable, "127.0.0.1", args.port,
+                         args.video_port)
+
     print(f">>> MAVLink offboard link: {args.mavlink}")
     print(f">>> setpoint loop at {args.rate:.0f} Hz "
           f"({args.speed_fwd} m/s fwd, {args.speed_up} m/s climb, "
           f"{args.yaw_rate:.0f} deg/s turn)")
     print(f">>> open http://<box-ip>:{args.port}/")
     uvicorn.run(build_app(loop_thread, state, args.video_port,
-                          args.mission_speed),
+                          args.mission_speed, agent_run),
                 host="0.0.0.0", port=args.port, log_level="warning")
 
 

@@ -311,3 +311,24 @@ def test_send_position_global_zeroes_the_masked_fields():
     link.send_position_global(40.0, -74.0, 5.0, 0.0)
     args = conn.mav.set_position_target_global_int_send.call_args[0]
     assert args[8:14] == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)   # vx..afz
+
+
+# --- send_velocity_world (agent VelocityWorld) ---------------------------
+
+def test_local_ned_constant_matches_pymavlink():
+    from pymavlink.dialects.v20 import common as m
+    assert offboard.MAV_FRAME_LOCAL_NED == m.MAV_FRAME_LOCAL_NED
+
+
+def test_send_velocity_world_uses_local_ned_frame_and_passes_ned_through():
+    conn = MagicMock()
+    link = offboard.OffboardLink(conn)
+    link.send_velocity_world(2.0, -1.0, -1.5, yaw_rate=0.3)
+
+    (_ms, _sys, _comp, frame, mask,
+     _x, _y, _z, vx, vy, vz, _ax, _ay, _az, _yaw, yaw_rate) = \
+        conn.mav.set_position_target_local_ned_send.call_args[0]
+    assert frame == offboard.MAV_FRAME_LOCAL_NED
+    assert mask == offboard.VEL_YAWRATE_TYPE_MASK
+    assert (vx, vy, vz) == (2.0, -1.0, -1.5)      # already NED; not re-flipped
+    assert yaw_rate == 0.3

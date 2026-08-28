@@ -20,6 +20,52 @@ pad mid-route takes over in about two-thirds of a second with no mode switch.
 
 ---
 
+## 0. Just run it
+
+```bash
+./sim/run-website.sh
+```
+
+One idempotent command. It checks what is already running and starts **only
+what is missing**:
+
+- **Isaac Sim + PX4 SITL** — if no sim is up, it launches `sim/launch-sitl.sh`
+  and waits for the camera server on `:8080` (first boot is 2–5 minutes). If a
+  sim is already running it leaves it alone.
+- **`joystick-server.py`** — the web page on `:8090`, same deal.
+
+Then it prints the URL. Safe to run twice; run it again after a crash and it
+brings back just the piece that died.
+
+This is also what **"run website"** triggers — the `run-website` skill
+(`.claude/skills/run-website/`) runs exactly this script and reports the URL.
+
+```bash
+SITE=bangkok-survey-040 ./sim/run-website.sh   # pass-through to launch-sitl.sh
+SKIP_SIM=1 ./sim/run-website.sh                # web server only, don't touch Isaac
+ISAAC_WAIT_S=600 ./sim/run-website.sh          # wait longer for a slow first boot
+```
+
+### Stopping
+
+```bash
+./sim/stop-website.sh
+```
+
+Stops `agent_runner.py`, `joystick-server.py`, and **this repo's** Isaac Sim /
+PX4 (SIGTERM, then SIGKILL after ~10 s). An unrelated SITL on the box is left
+alone. This is what **"stop website"** triggers (`.claude/skills/stop-website/`).
+
+Sections 3–6 below are the same steps done by hand, plus every knob and failure
+mode. Read on when `run-website.sh` prints a warning or the page misbehaves.
+
+> **If the sim keeps dropping out** (`logs/launch-sitl.console` full of
+> `poll timeout`, kit exits): PX4 runs in lockstep with Isaac and something
+> else is starving it of CPU. `ps -eo pcpu,cmd --sort=-pcpu | head` — if a
+> non-Isaac process is pinning several cores, that is your answer. See 9.4.
+
+---
+
 ## 1. What talks to what
 
 ```
@@ -446,7 +492,9 @@ Design / plan: `docs/superpowers/specs/2026-08-27-website-agent-upload-design.md
 ### Step 1 — pick or upload a script
 
 `examples/` ships one script per flight primitive: `velocity.py`,
-`velocity_world.py`, `goto.py`, `route.py`, `hold.py`, `camera.py`. Upload one
+`velocity_world.py`, `goto.py`, `route.py`, `hold.py`, `camera.py`, plus
+`full_sortie.py` (every primitive in one flight: climb to 50 m, forward 50 m,
+yaw 360, west 50 m, land). Upload one
 (or your own `.py`) with **upload** — it is stored under `logs/agents/` and
 selected in the dropdown.
 
@@ -476,7 +524,7 @@ restart it from the top. **STOP** does the same without needing to fly.
 
 ### Manual test checklist (run once after any change to this feature)
 
-1. Upload and RUN each of the six `examples/`; confirm the motion each
+1. Upload and RUN each of the `examples/`; confirm the motion each
    describes and the expected log lines.
 2. RUN `examples/route.py`, press **W** mid-route: the child dies within
    ~0.5 s, the route stops, manual works.
@@ -736,6 +784,8 @@ can fly the drone. Fine on a trusted LAN, not fine on an open network.
 
 ```bash
 # one-time: cp sim/secrets.env.example sim/secrets.env && paste your ion token
+./sim/run-website.sh                                                    # sim (if needed) + web server + URL
+# -- or by hand --
 ./sim/launch-sitl.sh                                                    # stage + drone + Play
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/detect   # 200
 conda run -n drone python joystick-server.py                            # wait for line 4

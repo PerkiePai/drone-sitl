@@ -41,6 +41,6 @@ def test_example_callbacks_do_not_raise(fname):
     agent.on_route_complete(st)
 
 
-def test_all_six_primitives_are_covered():
+def test_examples_are_the_expected_set():
     assert set(FILES) == {"velocity.py", "velocity_world.py", "goto.py",
-                          "route.py", "hold.py", "camera.py"}
+                          "route.py", "hold.py", "camera.py", "full_sortie.py"}

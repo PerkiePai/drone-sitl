@@ -1,0 +1,98 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Drone joystick</title>
+<link rel="stylesheet" href="/vendor/leaflet.css">
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <div id="panels">
+
+    <figure class="panel">
+      <figcaption class="panel-hd">
+        <b>ONBOARD CAMERA</b>
+        <span id="cam-sub">oblique &middot; forward-down gimbal</span>
+      </figcaption>
+      <img id="video" alt="onboard camera feed">
+      <div class="panel-ft">the drone's own camera &mdash; this is what a
+        competitor sees</div>
+    </figure>
+
+    <figure class="panel">
+      <figcaption class="panel-hd">
+        <b>CHASE CAMERA</b>
+        <span>third-person &middot; trails the drone</span>
+      </figcaption>
+      <img id="video-chase" alt="chase camera feed">
+      <div class="panel-ft">external follow-cam &mdash; operator situational
+        awareness only, not on the real aircraft</div>
+    </figure>
+
+    <figure id="mapwrap" class="panel">
+      <figcaption class="panel-hd">
+        <b>MAP</b>
+        <span>satellite imagery &middot; Esri</span>
+      </figcaption>
+      <div id="map"></div>
+      <div id="maplegend">
+        <span class="lg lg-est">&#9650; PX4 estimate (EKF2)</span>
+        <span class="lg lg-gt">&#9651; ground truth (sim)</span>
+        <span class="lg lg-wp">&#9679; waypoint</span>
+      </div>
+      <div id="mapbar">
+        <label>alt <input id="m-alt" type="number" step="1" value="5"></label>
+        <button id="m-fly" disabled>FLY</button>
+        <button id="m-pause" disabled>PAUSE</button>
+        <button id="m-clear" disabled>CLEAR</button>
+      </div>
+      <div id="mstat">click the map to add waypoints</div>
+    </figure>
+  </div>
+  <div id="telem">
+    <span>link <b id="t-link" class="bad">--</b></span>
+    <span>mode <b id="t-mode">--</b></span>
+    <span>armed <b id="t-armed">--</b></span>
+    <span>alt <b id="t-alt">--</b> m</span>
+    <span>hdg <b id="t-hdg">--</b>&deg;</span>
+    <span>speed <b id="t-gs">--</b>/<b id="t-cmd">--</b> m/s</span>
+    <span>sim <b id="t-sim">--</b></span>
+    <span>GT err <b id="t-gterr">--</b></span>
+  </div>
+  <div id="controls">
+    <div>
+      <div id="stick-left" class="stick" data-stick="left"><div class="knob"></div></div>
+      <div class="cap">yaw &amp; thrust</div>
+    </div>
+    <div>
+      <div id="stick-right" class="stick" data-stick="right"><div class="knob"></div></div>
+      <div class="cap">roll &amp; pitch</div>
+    </div>
+  </div>
+  <div id="cmds">
+    <button id="c-arm">ARM</button>
+    <button id="c-takeoff">TAKEOFF</button>
+    <button id="c-offboard">OFFBOARD</button>
+    <button id="c-land">LAND</button>
+    <button id="c-disarm">DISARM</button>
+  </div>
+  <div id="status"></div>
+  <div id="agent">
+    <div class="a-row">
+      <select id="a-file" title="uploaded scripts"></select>
+      <label class="a-file-btn">upload<input id="a-upload" type="file" accept=".py"></label>
+      <button id="a-run" disabled>RUN SCRIPT</button>
+      <button id="a-stop" disabled>STOP</button>
+      <span id="a-state">idle</span>
+    </div>
+    <details id="a-src-wrap">
+      <summary>view script source</summary>
+      <pre id="a-src">select a script</pre>
+    </details>
+    <pre id="a-log"></pre>
+  </div>
+<script src="/vendor/leaflet.js"></script>
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>

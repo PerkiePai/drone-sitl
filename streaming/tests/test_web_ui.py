@@ -87,8 +87,8 @@ def test_websocket_accepts_control_messages_and_pushes_telemetry(server):
             # not a failure. What matters is that telemetry arrives at all.
             assert "connected" in first and "mode" in first
 
-            await ws.send(json.dumps({"type": "axis", "dir": "fwd",
-                                      "pressed": True}))
+            await ws.send(json.dumps({"type": "stick", "stick": "right",
+                                      "x": 0, "y": -1}))
             await ws.send(json.dumps({"type": "ping"}))
             await ws.send(json.dumps({"type": "cmd", "name": "arm"}))
 
@@ -158,9 +158,10 @@ def test_mission_can_be_planned_flown_paused_and_cleared_over_the_socket(server)
     asyncio.run(exercise())
 
 
-def test_pressing_a_direction_pauses_a_running_mission(server):
-    """The takeover edge. Polling held() at 20 Hz would miss a press-release
-    inside one tick and keep flying the route; a WS message cannot be missed."""
+def test_deflecting_a_stick_pauses_a_running_mission(server):
+    """The takeover edge. Polling command() at 20 Hz would miss a
+    deflect-and-release inside one tick and keep flying the route; a WS
+    message cannot be missed."""
     websockets = pytest.importorskip("websockets")
 
     async def exercise():
@@ -171,17 +172,17 @@ def test_pressing_a_direction_pauses_a_running_mission(server):
                 "points": [[40.0, -74.0]], "alt": 12.0}))
             await _telem_where(ws, lambda t: t["mission"]["state"] == "RUNNING")
 
-            await ws.send(json.dumps({"type": "axis", "dir": "fwd",
-                                      "pressed": True}))
+            await ws.send(json.dumps({"type": "stick", "stick": "right",
+                                      "x": 0, "y": -1}))
             t = await _telem_where(ws, lambda t: t["mission"]["state"] == "PAUSED")
             assert t["mission"]["count"] == 1     # route retained, not cleared
 
     asyncio.run(exercise())
 
 
-def test_releasing_a_direction_does_not_pause(server):
-    """Only pressed=True pauses. If releases paused too, the mission would
-    re-pause forever and RESUME could never take."""
+def test_centering_a_stick_does_not_pause(server):
+    """Only the rest-to-active edge pauses. If returning to center paused
+    too, the mission would re-pause forever and RESUME could never take."""
     websockets = pytest.importorskip("websockets")
 
     async def exercise():
@@ -192,8 +193,8 @@ def test_releasing_a_direction_does_not_pause(server):
                 "points": [[40.0, -74.0]], "alt": 12.0}))
             await _telem_where(ws, lambda t: t["mission"]["state"] == "RUNNING")
 
-            await ws.send(json.dumps({"type": "axis", "dir": "fwd",
-                                      "pressed": False}))
+            await ws.send(json.dumps({"type": "stick", "stick": "right",
+                                      "x": 0, "y": 0}))
             for _ in range(4):
                 t = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
             assert t["mission"]["state"] == "RUNNING"

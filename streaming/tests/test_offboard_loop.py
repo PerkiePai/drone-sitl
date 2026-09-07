@@ -44,7 +44,7 @@ def test_loop_streams_setpoints_fast_enough_for_offboard():
         conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{FAKE_PX4_PORT}")
         state = offboard.CommandState(2.0, 1.0, watchdog_s=10.0)
         js.SetpointLoop(conn, state, rate_hz=20.0).start()
-        state.set("fwd", True)
+        state.set_stick("right", 0.0, -1.0)
 
         seen = _collect(px4, 1.0)
         assert len(seen) >= 10, f"expected >=10 setpoints in 1 s, got {len(seen)}"
@@ -192,7 +192,7 @@ def test_pausing_a_mission_hands_control_back_to_the_joystick():
         loop.start()
         _collect(px4, 0.5, kind="SET_POSITION_TARGET_GLOBAL_INT")
 
-        state.set("fwd", True)
+        state.set_stick("right", 0.0, -1.0)
         loop.submit("mission_pause")
 
         seen = _collect(px4, 1.0, kind="SET_POSITION_TARGET_LOCAL_NED")
@@ -311,7 +311,7 @@ def test_expired_agent_velocity_sends_zero_not_the_manual_command():
         conn = mavutil.mavlink_connection(f"udpout:127.0.0.1:{port}")
         ac = AgentControl(watchdog_s=0.2)
         state = offboard.CommandState(2.0, 1.0, watchdog_s=10.0)
-        state.set("fwd", True)               # manual also held
+        state.set_stick("right", 0.0, -1.0)  # manual also held
         loop = js.SetpointLoop(conn, state, rate_hz=20.0, agent_control=ac)
         ac.set_velocity_body(5.0, 0.0, 0.0, 0.0)   # will go stale
         loop.start()

@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""Web joystick -> PX4 OFFBOARD velocity control (proof of concept).
+"""Web joystick -> PX4 OFFBOARD velocity control -- descriptive UI variant.
 
-Serves web/index.html plus a WebSocket at /ws, and streams body-frame velocity
-setpoints to PX4 SITL at 20 Hz. Four commands only: climb, descend, forward,
-backward.
+Identical flight logic to joystick-server.py. The differences:
+
+  * serves web-v2/ (labelled panels, map legend) instead of web/
+  * default web port 8091, so it can run alongside the original on 8090
+  * publishes simulator ground truth to the page: reads /tmp/drone_truth.json
+    (written by drone_setup_px4_cesium.py) and forwards lat_gt / lon_gt /
+    heading_gt in the telemetry frame, so the map can draw a second marker
+    for where the drone REALLY is next to where PX4 thinks it is.
 
 Run with Isaac Sim already playing drone_setup_px4_cesium.py:
 
-    conda run -n drone python joystick-server.py
+    conda run -n drone python joystick-server-descriptive.py
 
-then open http://<box-ip>:8090/ from any device on the LAN.
+then open http://<box-ip>:8091/ from any device on the LAN.
 
 Design: docs/superpowers/specs/2026-07-30-joystick-offboard-design.md
 """
@@ -41,6 +46,14 @@ AGENT_MAX_BYTES = 256 * 1024
 ARENA_RADIUS_M = 500.0
 AGENT_TIME_LIMIT_S = None
 os.makedirs(AGENT_UPLOAD_DIR, exist_ok=True)
+
+# Simulator ground truth, written ~10 Hz by drone_setup_px4_cesium.py. Same
+# file-drop IPC the GPS-denied work already uses (/tmp/vio_gps.json). Treated
+# as absent once it stops being refreshed, so a stale marker never lingers.
+# DRONE_TRUTH_FILE overrides the path (both sides read it) -- lets the tests
+# use a private file, and lets two sims not clobber each other.
+TRUTH_FILE = os.environ.get("DRONE_TRUTH_FILE", "/tmp/drone_truth.json")
+TRUTH_MAX_AGE_S = 2.0
 
 
 def _safe_agent_name(name):
@@ -105,6 +118,11 @@ class SetpointLoop(threading.Thread):
             # can say "waiting for position" instead of centring on 0,0.
             "lat": None,
             "lon": None,
+            # Simulator ground truth (TRUTH_FILE). None whenever the sim is not
+            # publishing it -- the page hides the second marker then.
+            "lat_gt": None,
+            "lon_gt": None,
+            "heading_gt": 0.0,
             # PX4 needs a valid home altitude to accept GLOBAL_RELATIVE_ALT
             # setpoints and returns SILENTLY without one
             # (mavlink_receiver.cpp:1107-1110). FLY is gated on this.
@@ -129,6 +147,7 @@ class SetpointLoop(threading.Thread):
         self._stream_start = None
         self._params_sent = False
         self._sim_ref = None          # (px4_boot_ms, wall_monotonic) baseline
+        self._truth_next = 0.0        # monotonic time of next TRUTH_FILE poll
 
     def telemetry(self):
         with self._telem_lock:
@@ -152,6 +171,25 @@ class SetpointLoop(threading.Thread):
             # the last good heading rather than reporting 655 degrees.
             if msg.hdg != 65535:
                 self._telem["heading_deg"] = msg.hdg / 100.0
+
+    def _read_truth(self):
+        """Poll TRUTH_FILE (~5 Hz) for simulator ground truth. Any problem --
+        missing, mid-write, stale, malformed -- just clears the fields so the
+        page drops the marker rather than freezing it at the last value."""
+        lat = lon = None
+        hdg = 0.0
+        try:
+            if time.time() - os.path.getmtime(TRUTH_FILE) <= TRUTH_MAX_AGE_S:
+                with open(TRUTH_FILE) as f:
+                    d = json.load(f)
+                lat, lon = float(d["lat"]), float(d["lon"])
+                hdg = float(d.get("heading_deg", 0.0))
+        except (OSError, ValueError, KeyError, TypeError):
+            lat = lon = None
+        with self._telem_lock:
+            self._telem["lat_gt"] = lat
+            self._telem["lon_gt"] = lon
+            self._telem["heading_gt"] = hdg
 
     def _handle_attitude(self, msg):
         """ATTITUDE carries radians; the agent API and any UI want degrees."""
@@ -254,6 +292,10 @@ class SetpointLoop(threading.Thread):
         next_tick = time.monotonic()
         while True:
             self._drain_mavlink()
+            now = time.monotonic()
+            if now >= self._truth_next:
+                self._read_truth()
+                self._truth_next = now + 0.2
             while True:
                 try:
                     self._run_command(self.commands.get_nowait())
@@ -437,7 +479,7 @@ async def _push_telemetry(sock, loop_thread, agent_run=None, hz=5.0):
 
 def build_app(loop_thread, state, video_port, mission_speed, agent_run):
     from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, PlainTextResponse
     from fastapi.staticfiles import StaticFiles
 
     app = FastAPI()
@@ -479,6 +521,19 @@ def build_app(loop_thread, state, video_port, mission_speed, agent_run):
             entries = []
         entries.sort(key=lambda e: e.stat().st_mtime, reverse=True)
         return JSONResponse({"files": [e.name for e in entries]})
+
+    @app.get("/agent/source")
+    def agent_source(file: str = ""):
+        """The raw text of an uploaded script, for the panel's source view."""
+        name = _safe_agent_name(os.path.basename(file))
+        if not name:
+            return JSONResponse({"detail": "name must be a bare *.py filename"},
+                                status_code=400)
+        try:
+            with open(os.path.join(AGENT_UPLOAD_DIR, name)) as fh:
+                return PlainTextResponse(fh.read())
+        except FileNotFoundError:
+            return JSONResponse({"detail": "no such script"}, status_code=404)
 
     @app.websocket("/ws")
     async def ws(sock: WebSocket):
@@ -583,7 +638,7 @@ def build_app(loop_thread, state, video_port, mission_speed, agent_run):
 
     # Mounted last so /config and /ws above take priority for those paths;
     # this serves index.html at "/" plus css/js/vendor as plain static files.
-    app.mount("/", StaticFiles(directory=os.path.join(ROOT, "web"), html=True),
+    app.mount("/", StaticFiles(directory=os.path.join(ROOT, "web-v2"), html=True),
               name="web")
 
     return app
@@ -595,7 +650,7 @@ def main():
     ap.add_argument("--mavlink", default="udpin:0.0.0.0:14540",
                     help="PX4 offboard link. MUST be udpin: PX4 binds 14580 "
                          "and sends TO 14540, so udpout never receives.")
-    ap.add_argument("--port", type=int, default=8090, help="web UI port")
+    ap.add_argument("--port", type=int, default=8091, help="web UI port")
     ap.add_argument("--video-port", type=int, default=8080,
                     help="Isaac MJPEG port from drone_setup_px4_cesium.py")
     ap.add_argument("--speed-fwd", type=float, default=2.0, help="m/s")

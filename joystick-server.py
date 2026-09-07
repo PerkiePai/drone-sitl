@@ -42,6 +42,16 @@ ARENA_RADIUS_M = 500.0
 AGENT_TIME_LIMIT_S = None
 os.makedirs(AGENT_UPLOAD_DIR, exist_ok=True)
 
+# sim/hil_tap.py (a separate, optional diagnostic process -- see
+# sim/HIL_TAP.md) polls this file for freeze/thaw. It is NOT this server's
+# job to run the tap or know whether it is up; a write here is a no-op if
+# nothing is listening. Same file the tap's own --control-file defaults to.
+HIL_CTL_FILE = os.path.join(ROOT, "logs", "hil_tap.ctl")
+# ...and writes a JSON snapshot here once a second (--status-file). If this
+# file's mtime is old, the tap is not running -- distinct from "frozen".
+HIL_STATUS_FILE = os.path.join(ROOT, "logs", "hil_tap.status.json")
+HIL_STATUS_STALE_S = 3.0   # > a few --interval ticks; a genuine freeze holds ts fresh
+
 
 def _safe_agent_name(name):
     """A base filename ending .py with no path parts, or None."""
@@ -442,6 +452,19 @@ def build_app(loop_thread, state, video_port, mission_speed, agent_run):
 
     app = FastAPI()
 
+    # Without this, StaticFiles sends no Cache-Control at all and browsers
+    # are free to heuristically cache js/css indefinitely -- a hard reload
+    # does not reliably bust that for module scripts in every browser. Bit
+    # us once already: a stale main.js kept an old build's click handlers
+    # (or a missing one) with no error, since nothing failed, it just never
+    # ran the new code. This is a local dev tool -- no-store costs nothing.
+    @app.middleware("http")
+    async def _no_cache(request: Request, call_next):
+        resp = await call_next(request)
+        if request.url.path.startswith(("/js/", "/css/", "/vendor/")) or request.url.path == "/":
+            resp.headers["Cache-Control"] = "no-store"
+        return resp
+
     @app.get("/config")
     def config():
         return JSONResponse({"video_port": video_port,
@@ -469,6 +492,39 @@ def build_app(loop_thread, state, video_port, mission_speed, agent_run):
         with open(os.path.join(AGENT_UPLOAD_DIR, stored), "w") as fh:
             fh.write(text)
         return JSONResponse({"stored": stored})
+
+    def _write_hil_ctl(word):
+        try:
+            os.makedirs(os.path.dirname(HIL_CTL_FILE), exist_ok=True)
+            with open(HIL_CTL_FILE, "w") as fh:
+                fh.write(word)
+            return JSONResponse({"ok": True})
+        except OSError as e:
+            return JSONResponse({"ok": False, "detail": str(e)}, status_code=500)
+
+    @app.post("/hil/freeze")
+    def hil_freeze():
+        return _write_hil_ctl("freeze")
+
+    @app.post("/hil/thaw")
+    def hil_thaw():
+        return _write_hil_ctl("thaw")
+
+    @app.get("/hil/status")
+    def hil_status():
+        try:
+            age = time.time() - os.path.getmtime(HIL_STATUS_FILE)
+        except OSError:
+            return JSONResponse({"up": False})
+        if age > HIL_STATUS_STALE_S:
+            return JSONResponse({"up": False, "age_s": age})
+        try:
+            with open(HIL_STATUS_FILE) as fh:
+                snapshot = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return JSONResponse({"up": False})
+        snapshot["up"] = True
+        return JSONResponse(snapshot)
 
     @app.get("/agent/list")
     def agent_list():

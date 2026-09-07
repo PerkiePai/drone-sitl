@@ -60,6 +60,9 @@ WIND_COEFF         = 0.8        # drag coefficient — how hard the wind pushes
 WIND_MIN_AGL_M     = 1.0        # wind engages only after the drone climbs this far (grounded drone untouched)
 WIND_SEED          = None       # int → reproducible wind for a dataset; None → different every run
 VEHICLE_ID         = 0
+SIM_TCP_BASEPORT   = 4560              # HIL MAVLink port Isaac listens on (PX4 dials 4560).
+                                      # Bump to 4561 (DRONE_SETUP_SIM_TCP_BASEPORT=4561) to
+                                      # slot sim/hil_tap.py in front of the link.
 ROBOT_MODEL        = "Iris"            # visual asset key in ROBOTS
 PX4_AUTOLAUNCH     = True              # let Pegasus start PX4 SITL (False = launch it yourself)
 ADD_CAMERAS        = True              # attach the ZED cameras after spawn
@@ -939,6 +942,7 @@ async def _spawn_px4_keep_stage():
         # stating the SITL values here keeps this script correct regardless.
         "connection_type": "tcpin",
         "connection_ip": "localhost",
+        "connection_baseport": SIM_TCP_BASEPORT,
         "enable_lockstep": True,
     })
     vcfg = MultirotorConfig()

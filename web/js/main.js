@@ -6,6 +6,7 @@ import { paintDrone } from './map.js';
 import { updateMission, syncAltDefault, setMissionSpeed } from './route.js';
 import { resetSticks } from './controls.js';
 import { initAgent, paintAgent } from './agent.js';
+import { initHil } from './hil.js';
 
 // The video comes from the Isaac MJPEG server on a different port, so derive
 // the host from the page rather than hard-coding an IP -- this has to work
@@ -24,6 +25,7 @@ fetch('/config').then(r => r.json()).then(c => {
     'click', () => sendCmd(name)));
 
 initAgent();
+initHil();
 
 connect({
   onOpen: () => setStatus('connected to server', 'good'),

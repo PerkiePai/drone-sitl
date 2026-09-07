@@ -61,6 +61,14 @@ button:active:not(:disabled) { transform:translateY(1px); filter:brightness(1.5)
 /* Flashes when the command actually goes out over the WebSocket, so a
    registered click is distinguishable from a dropped one. */
 #cmds button.sent { background:#2a6; border-color:#6f6; }
+/* FREEZE SIM is a sim-debug action, not a flight command -- deliberately
+   not green like .sent, so it never reads as "command acknowledged". */
+#c-freeze.frozen { background:#48c; border-color:#8cf; }
+/* Raw hil_tap.py stream readout -- exact per-second counts, not a chart. */
+#hil-stream { font:12px/1.4 ui-monospace, monospace; color:#888;
+              text-align:center; min-height:1.3em; }
+#hil-stream.live { color:#6f6; }
+#hil-stream.frozen { color:#8cf; }
 #status { min-height:1.3em; font-size:13px; text-align:center; }
 
 /* Agent panel: upload a control script, run it, watch its log. */

@@ -41,17 +41,11 @@ body { margin:0; background:#111; color:#ddd; font:14px system-ui,sans-serif;
 #telem b { color:#fff; font-weight:600; }
 .bad { color:#f66; } .good { color:#6f6; } .wait { color:#fc6; }
 #controls { display:flex; gap:22px; align-items:center; }
-#pad { display:grid; grid-template-columns:repeat(3,74px);
-       grid-template-rows:repeat(3,74px); gap:6px; }
-#alt { display:grid; grid-template-rows:repeat(2,74px); gap:6px; width:74px; }
-#controls button { border-radius:10px; border:1px solid #444;
-                   background:#222; color:#eee; display:flex;
-                   flex-direction:column; align-items:center;
-                   justify-content:center; gap:2px; line-height:1; }
-#controls button .g { font-size:24px; }
-#controls button .t { font-size:10px; letter-spacing:.5px; color:#9a9a9a; }
-#controls button.on { background:#2a6; border-color:#6f6; }
-#controls button.on .t { color:#dff; }
+.stick { width:148px; height:148px; border-radius:50%; background:#222;
+         border:1px solid #444; position:relative; touch-action:none; }
+.stick .knob { width:56px; height:56px; border-radius:50%; background:#2a6;
+               border:1px solid #6f6; position:absolute; left:50%; top:50%;
+               transform:translate(-50%,-50%); pointer-events:none; }
 .cap { font-size:11px; color:#888; text-align:center; margin-top:4px; }
 #cmds { display:flex; gap:6px; flex-wrap:wrap; justify-content:center; }
 #cmds button { padding:9px 14px; border-radius:8px; border:1px solid #444;

@@ -4,7 +4,7 @@ import { connect } from './ws.js';
 import { setStatus, paint as paintTelemetry, sendCmd, clearPending } from './telemetry.js';
 import { paintDrone } from './map.js';
 import { updateMission, syncAltDefault, setMissionSpeed } from './route.js';
-import { resetHeld } from './controls.js';
+import { resetSticks } from './controls.js';
 import { initAgent, paintAgent } from './agent.js';
 
 // The video comes from the Isaac MJPEG server on a different port, so derive
@@ -35,7 +35,7 @@ connect({
     paintAgent(t);
   },
   onClose: () => {
-    resetHeld();
+    resetSticks();
     clearPending();
     setStatus('lost connection to server — reconnecting…', 'bad');
   },

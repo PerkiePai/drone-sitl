@@ -130,13 +130,16 @@ the box itself.
 ```bash
 sudo ufw allow from 192.168.20.0/24 to any port 8090 proto tcp   # joystick UI
 sudo ufw allow from 192.168.20.0/24 to any port 8080 proto tcp   # camera video
+sudo ufw allow from 192.168.20.0/24 to any port 8091 proto tcp   # --descriptive UI (optional)
 sudo ufw status numbered                                          # confirm
 ```
 
-**Both ports are required.** The page is served from 8090, but the video is a
+**8090 + 8080 are required.** The page is served from 8090, but the video is a
 separate request your browser makes straight to 8080. Open only 8090 and you
 get a working joystick with a permanently blank video panel — which looks like
-a camera fault rather than a firewall one.
+a camera fault rather than a firewall one. **8091** is only needed if you run
+`./sim/run-website.sh --descriptive` (the labelled-panel / ground-truth UI);
+it still pulls video from 8080.
 
 Scoping the rules to the LAN (`from 192.168.20.0/24`) rather than opening them
 outright is worth doing: there is no authentication on either port (see

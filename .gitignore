@@ -12,3 +12,7 @@ NvStreamer-*.etli
 # Runtime output: Isaac/joystick-server console logs and uploaded agent scripts
 # (AGENT_UPLOAD_DIR in joystick-server.py).
 logs/
+
+# Private Cesium tile cache (sim/launch-sitl.sh --/app/tokens/omni_global_cache).
+# Keeps our runs off the shared, contention-prone ~/.cache/ov; grows large.
+.cache/

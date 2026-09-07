@@ -6,7 +6,8 @@
 #
 # Stops, in order:
 #   agent_runner.py     any uploaded-script child
-#   joystick-server.py  the web page on :8090
+#   joystick-server.py  the web page on :8090 -- and joystick-server-descriptive.py
+#                       (--descriptive, :8091) if that one was started instead
 #   Isaac Sim + PX4     ONLY the instance running this repo's sim/bootstrap.py
 #
 # It matches this repo's own process signatures, so an unrelated Isaac / SITL
@@ -48,7 +49,7 @@ stop_pat() {
 }
 
 stop_pat "agent_runner"    "$REPO_DIR/agent_runner\.py"
-stop_pat "joystick-server" "python .*joystick-server\.py"
+stop_pat "joystick-server" "python .*joystick-server(-descriptive)?\.py"
 stop_pat "isaac sim + px4" "$REPO_DIR/sim/bootstrap\.py"
 stop_pat "launch-sitl"     "$REPO_DIR/sim/launch-sitl\.sh"
 

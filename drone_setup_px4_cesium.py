@@ -18,6 +18,7 @@
 #   PX4 only. Does NOT touch ArduPilot or configs.yaml.
 # ============================================================================
 import asyncio
+import time
 from scipy.spatial.transform import Rotation
 from isaacsim.core.api.world import World
 from pegasus.simulator.params import ROBOTS
@@ -783,6 +784,121 @@ def setup_wind():
     print(f"    Disable wind: veh._drag = LinearDrag([0.5,0.3,0.0])")
 
 
+def setup_truth_publisher():
+    """Write the drone's TRUE world pose to /tmp/drone_truth.json at ~10 Hz.
+
+    joystick-server-descriptive.py reads this file and forwards it to the web
+    map, which draws a second marker for where the drone REALLY is next to
+    PX4's own (drifting) estimate. Same file-drop IPC as /tmp/vio_gps.json.
+
+    Pure read side-effect on the sim: it only samples the body prim's world
+    transform, never writes to the stage. Safe to leave running always.
+    """
+    import json as _json, math as _math, os as _os, tempfile as _tempfile
+    import numpy as _np
+    import omni.usd, omni.kit.app
+    from pxr import UsdGeom
+
+    stage = omni.usd.get_context().get_stage()
+    bodies = [str(p.GetPath()) for p in stage.Traverse() if p.GetName() == "body"]
+    body_path = next((b for kw in ("px4_drone", "quadrotor", "iris", "drone",
+                                   "multirotor")
+                      for b in bodies if kw in b.lower()), bodies[0] if bodies
+                     else None)
+    if body_path is None:
+        print("*** setup_truth_publisher: no drone 'body' prim — truth feed off. ***")
+        return
+
+    # Same live-first / XformCache-fallback pose getter as the camera mount.
+    _get_pose = None
+    for _mod in ("isaacsim.core.prims", "omni.isaac.core.prims"):
+        try:
+            XFormPrim = __import__(_mod, fromlist=["XFormPrim"]).XFormPrim
+            _vp = XFormPrim(body_path)
+
+            def _get_pose(_vp=_vp):
+                p, q = _vp.get_world_poses()
+                p = _np.asarray(p).reshape(-1)
+                q = _np.asarray(q).reshape(-1)                 # w, x, y, z
+                return (p[:3].astype(float),
+                        _np.array([q[1], q[2], q[3], q[0]], float))  # x,y,z,w
+            _get_pose()
+            break
+        except Exception:
+            _get_pose = None
+    if _get_pose is None:
+        body_prim = stage.GetPrimAtPath(body_path)
+        _xc = UsdGeom.XformCache()
+
+        def _get_pose(body_prim=body_prim, _xc=_xc):
+            _xc.Clear()
+            m = _xc.GetLocalToWorldTransform(body_prim)
+            t = m.ExtractTranslation()
+            qq = m.ExtractRotationQuat()
+            im = qq.GetImaginary()
+            return (_np.array([t[0], t[1], t[2]], float),
+                    _np.array([im[0], im[1], im[2], qq.GetReal()], float))
+
+    # Local ENU metres -> lat/lon, using the SAME spherical reprojection and
+    # Earth radius Pegasus's own GPS uses (geo_mag_utils.reprojection), so the
+    # truth marker and the PX4 estimate share a projection and any gap between
+    # them is real estimator error, not a datum mismatch.
+    EARTH_R = 6353000.0
+    lat0, lon0, alt0 = _math.radians(lat), _math.radians(lon), alt
+    out_path = _os.environ.get("DRONE_TRUTH_FILE", "/tmp/drone_truth.json")
+    acc = {"t": 0.0}
+
+    def _publish(e):
+        try:
+            acc["t"] += float(e.payload["dt"])
+        except Exception:
+            acc["t"] += 1.0 / 60.0
+        if acc["t"] < 0.1:
+            return
+        acc["t"] = 0.0
+        try:
+            pos, q = _get_pose()
+            x_rad = pos[1] / EARTH_R          # north
+            y_rad = pos[0] / EARTH_R          # east
+            c = _math.hypot(x_rad, y_rad)
+            if c > 1e-12:
+                sc, cc = _math.sin(c), _math.cos(c)
+                lat_r = _math.asin(cc * _math.sin(lat0)
+                                   + x_rad * sc * _math.cos(lat0) / c)
+                lon_r = lon0 + _math.atan2(
+                    y_rad * sc,
+                    c * _math.cos(lat0) * cc - x_rad * _math.sin(lat0) * sc)
+            else:
+                lat_r, lon_r = lat0, lon0
+            # yaw about world +Z from the xyzw quaternion, ENU -> compass.
+            qx, qy, qz, qw = q
+            yaw_enu = _math.atan2(2.0 * (qw * qz + qx * qy),
+                                  1.0 - 2.0 * (qy * qy + qz * qz))
+            heading = (90.0 - _math.degrees(yaw_enu)) % 360.0
+            payload = _json.dumps({
+                "t": time.time(),
+                "lat": _math.degrees(lat_r),
+                "lon": _math.degrees(lon_r),
+                "alt": float(pos[2]) + alt0,
+                "heading_deg": heading,
+            })
+            fd, tmp = _tempfile.mkstemp(dir=_os.path.dirname(out_path) or ".",
+                                        prefix=".drone_truth.")
+            with _os.fdopen(fd, "w") as f:
+                f.write(payload)
+            _os.replace(tmp, out_path)        # atomic: reader never sees a partial write
+        except Exception:
+            pass
+
+    prev = globals().get("_TRUTH_PUB_SUB")
+    if prev is not None:
+        try: prev.unsubscribe()
+        except Exception: pass
+    globals()["_TRUTH_PUB_SUB"] = omni.kit.app.get_app().get_update_event_stream(
+        ).create_subscription_to_pop(_publish, name="drone_truth_publish")
+    print(f">>> ground-truth feed: {out_path} @ ~10 Hz (body {body_path})")
+
+
 pg = PegasusInterface()
 
 # 1) Match the GPS origin to the Cesium map -----------------------------------
@@ -844,6 +960,9 @@ async def _spawn_px4_keep_stage():
     # 3) attach cameras now (sim is stopped) ---------------------------------
     if ADD_CAMERAS:
         setup_cameras()
+
+    # ground-truth feed for the descriptive web UI (read-only on the sim)
+    setup_truth_publisher()
 
     # 4) un-flip the ground plane, then add wind -----------------------------
     if FIX_GROUND_FLIP:

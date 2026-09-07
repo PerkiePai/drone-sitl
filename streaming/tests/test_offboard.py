@@ -13,38 +13,44 @@ import offboard  # noqa: E402
 
 # --- axes_to_body_velocity -------------------------------------------------
 
-def test_forward_is_positive_vx():
-    assert offboard.axes_to_body_velocity({"fwd"}, 2.0, 1.0) == (2.0, 0.0, 0.0)
+def test_full_forward_pitch_is_positive_vx():
+    assert offboard.axes_to_body_velocity(1.0, 0.0, 0.0, 2.0, 1.5, 1.0) == (2.0, 0.0, 0.0)
 
 
-def test_backward_is_negative_vx():
-    assert offboard.axes_to_body_velocity({"back"}, 2.0, 1.0) == (-2.0, 0.0, 0.0)
+def test_full_back_pitch_is_negative_vx():
+    assert offboard.axes_to_body_velocity(-1.0, 0.0, 0.0, 2.0, 1.5, 1.0) == (-2.0, 0.0, 0.0)
 
 
-def test_climb_is_negative_vz_because_ned_down_is_positive():
-    assert offboard.axes_to_body_velocity({"up"}, 2.0, 1.0) == (0.0, 0.0, -1.0)
+def test_pitch_is_proportional_to_deflection():
+    assert offboard.axes_to_body_velocity(0.5, 0.0, 0.0, 2.0, 1.5, 1.0) == (1.0, 0.0, 0.0)
 
 
-def test_descend_is_positive_vz():
-    assert offboard.axes_to_body_velocity({"down"}, 2.0, 1.0) == (0.0, 0.0, 1.0)
+def test_full_right_roll_is_positive_vy():
+    assert offboard.axes_to_body_velocity(0.0, 1.0, 0.0, 2.0, 1.5, 1.0) == (0.0, 1.5, 0.0)
 
 
-def test_nothing_held_is_hover():
-    assert offboard.axes_to_body_velocity(set(), 2.0, 1.0) == (0.0, 0.0, 0.0)
+def test_full_left_roll_is_negative_vy():
+    assert offboard.axes_to_body_velocity(0.0, -1.0, 0.0, 2.0, 1.5, 1.0) == (0.0, -1.5, 0.0)
 
 
-def test_forward_and_climb_combine():
-    assert offboard.axes_to_body_velocity({"fwd", "up"}, 2.0, 1.0) == (2.0, 0.0, -1.0)
+def test_roll_is_proportional_to_deflection():
+    assert offboard.axes_to_body_velocity(0.0, 0.5, 0.0, 2.0, 1.5, 1.0) == (0.0, 0.75, 0.0)
 
 
-def test_opposing_directions_cancel():
-    assert offboard.axes_to_body_velocity(
-        {"fwd", "back", "up", "down"}, 2.0, 1.0) == (0.0, 0.0, 0.0)
+def test_full_up_thrust_is_negative_vz_because_ned_down_is_positive():
+    assert offboard.axes_to_body_velocity(0.0, 0.0, 1.0, 2.0, 1.5, 1.0) == (0.0, 0.0, -1.0)
 
 
-def test_vy_is_always_zero_because_strafe_is_out_of_scope():
-    for d in offboard.DIRECTIONS:
-        assert offboard.axes_to_body_velocity({d}, 2.0, 1.0)[1] == 0.0
+def test_full_down_thrust_is_positive_vz():
+    assert offboard.axes_to_body_velocity(0.0, 0.0, -1.0, 2.0, 1.5, 1.0) == (0.0, 0.0, 1.0)
+
+
+def test_zero_axes_is_hover():
+    assert offboard.axes_to_body_velocity(0.0, 0.0, 0.0, 2.0, 1.5, 1.0) == (0.0, 0.0, 0.0)
+
+
+def test_pitch_roll_and_thrust_combine():
+    assert offboard.axes_to_body_velocity(1.0, 0.5, 1.0, 2.0, 1.5, 1.0) == (2.0, 0.75, -1.0)
 
 
 def test_local_constants_match_pymavlink():
@@ -60,55 +66,133 @@ def test_local_constants_match_pymavlink():
             == m.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED)
 
 
+# --- axes_to_yaw_rate -------------------------------------------------------
+
+def test_full_right_yaw_is_positive_rate():
+    """NED yaw is positive clockwise seen from above, so right turn > 0."""
+    assert offboard.axes_to_yaw_rate(1.0, 0.5) == 0.5
+
+
+def test_full_left_yaw_is_negative_rate():
+    assert offboard.axes_to_yaw_rate(-1.0, 0.5) == -0.5
+
+
+def test_yaw_is_proportional_to_deflection():
+    assert offboard.axes_to_yaw_rate(0.5, 0.5) == 0.25
+
+
+def test_zero_yaw_is_zero_rate():
+    assert offboard.axes_to_yaw_rate(0.0, 0.5) == 0.0
+
+
 # --- CommandState ----------------------------------------------------------
 
-def test_state_reports_held_velocity():
-    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
-    s.set("fwd", True, now=100.0)
+def test_state_reports_stick_velocity():
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, speed_right=1.5)
+    s.set_stick("right", 0.0, -1.0, now=100.0)   # up-drag = full forward pitch
     assert s.command(now=100.1) == (2.0, 0.0, 0.0, 0.0)
 
 
+def test_state_scales_with_partial_deflection():
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, speed_right=1.5)
+    s.set_stick("right", 0.0, -0.5, now=100.0)
+    assert s.command(now=100.1) == (1.0, 0.0, 0.0, 0.0)
+
+
 def test_state_release_returns_to_hover():
-    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
-    s.set("fwd", True, now=100.0)
-    s.set("fwd", False, now=100.2)
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, speed_right=1.5)
+    s.set_stick("right", 0.0, -1.0, now=100.0)
+    s.set_stick("right", 0.0, 0.0, now=100.2)
     assert s.command(now=100.3) == (0.0, 0.0, 0.0, 0.0)
 
 
+def test_right_stick_x_is_roll():
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, speed_right=1.5)
+    s.set_stick("right", 1.0, 0.0, now=100.0)
+    assert s.command(now=100.1) == (0.0, 1.5, 0.0, 0.0)
+
+
+def test_left_stick_drives_thrust_and_yaw():
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, yaw_rate_dps=45.0, speed_right=1.5)
+    s.set_stick("left", 1.0, -1.0, now=100.0)    # x=yaw right, up-drag=climb
+    vx, vy, vz, yr = s.command(now=100.1)
+    assert (vx, vy, vz) == (0.0, 0.0, -1.0)
+    assert math.isclose(yr, math.radians(45.0))
+
+
 def test_watchdog_zeroes_stale_input():
-    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
-    s.set("fwd", True, now=100.0)
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, speed_right=1.5)
+    s.set_stick("right", 0.0, -1.0, now=100.0)
     assert s.command(now=100.4) == (2.0, 0.0, 0.0, 0.0)   # still fresh
     assert s.command(now=101.0) == (0.0, 0.0, 0.0, 0.0)   # stale -> hover
 
 
-def test_touch_keeps_a_held_direction_alive():
-    """The page pings every 150 ms while a button is down; without that the
-    watchdog would cut hold-to-move off after watchdog_s."""
-    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
-    s.set("fwd", True, now=100.0)
+def test_watchdog_also_stops_the_turn():
+    """A stale link must not leave the aircraft spinning."""
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, yaw_rate_dps=45.0, speed_right=1.5)
+    s.set_stick("left", 1.0, 0.0, now=100.0)
+    assert s.command(now=101.0) == (0.0, 0.0, 0.0, 0.0)
+
+
+def test_touch_keeps_a_stick_alive():
+    """The page pings every 150 ms while a stick is off-center; without
+    that the watchdog would cut hold-to-move off after watchdog_s."""
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, speed_right=1.5)
+    s.set_stick("right", 0.0, -1.0, now=100.0)
     s.touch(now=100.4)
     assert s.command(now=100.7) == (2.0, 0.0, 0.0, 0.0)
 
 
 def test_clear_drops_everything():
-    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
-    s.set("fwd", True, now=100.0)
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, speed_right=1.5)
+    s.set_stick("right", 0.0, -1.0, now=100.0)
     s.clear()
     assert s.command(now=100.1) == (0.0, 0.0, 0.0, 0.0)
 
 
-def test_held_reports_current_set():
-    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5)
-    s.set("fwd", True, now=100.0)
-    s.set("up", True, now=100.0)
-    assert s.held() == {"fwd", "up"}
+def test_deadzone_snaps_small_deflection_to_zero():
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, speed_right=1.5)
+    s.set_stick("right", 0.02, -0.03, now=100.0)
+    assert s.command(now=100.1) == (0.0, 0.0, 0.0, 0.0)
 
 
-def test_out_of_scope_direction_is_rejected():
+def test_out_of_range_deflection_is_clamped():
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, speed_right=1.5)
+    s.set_stick("right", 2.0, -3.0, now=100.0)
+    assert s.command(now=100.1) == (2.0, 1.5, 0.0, 0.0)
+
+
+def test_unknown_stick_is_rejected():
     s = offboard.CommandState()
     with pytest.raises(ValueError):
-        s.set("strafe", True)
+        s.set_stick("middle", 0.0, 0.0)
+
+
+def test_set_stick_returns_true_on_rest_to_active_edge():
+    s = offboard.CommandState()
+    assert s.set_stick("right", 0.0, -1.0, now=100.0) is True
+
+
+def test_set_stick_returns_false_while_already_active():
+    s = offboard.CommandState()
+    assert s.set_stick("right", 0.0, -1.0, now=100.0) is True
+    assert s.set_stick("right", 0.0, -0.5, now=100.1) is False
+
+
+def test_set_stick_returns_true_again_after_returning_to_rest():
+    s = offboard.CommandState()
+    assert s.set_stick("right", 0.0, -1.0, now=100.0) is True
+    assert s.set_stick("right", 0.0, 0.0, now=100.1) is False   # back to rest, not an edge
+    assert s.set_stick("right", 0.0, -1.0, now=100.2) is True   # rest -> active again
+
+
+def test_command_combines_forward_climb_and_turn():
+    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, yaw_rate_dps=45.0, speed_right=1.5)
+    s.set_stick("right", 0.0, -1.0, now=100.0)   # pitch forward
+    s.set_stick("left", 1.0, -1.0, now=100.0)    # yaw right + climb
+    vx, vy, vz, yr = s.command(now=100.1)
+    assert (vx, vy, vz) == (2.0, 0.0, -1.0)
+    assert math.isclose(yr, math.radians(45.0))
 
 
 # --- decode_px4_mode -------------------------------------------------------
@@ -206,49 +290,6 @@ def test_bind_target_adopts_ids_from_heartbeat():
     msg.get_srcComponent.return_value = 7
     link.bind_target(msg)
     assert (link.target_system, link.target_component) == (3, 7)
-
-
-# --- yaw (left/right turn the aircraft; they do NOT strafe) -----------------
-
-def test_yaw_right_is_positive_rate():
-    """NED yaw is positive clockwise seen from above, so right turn > 0."""
-    assert offboard.axes_to_yaw_rate({"yaw_right"}, 0.5) == 0.5
-
-
-def test_yaw_left_is_negative_rate():
-    assert offboard.axes_to_yaw_rate({"yaw_left"}, 0.5) == -0.5
-
-
-def test_opposing_yaw_cancels():
-    assert offboard.axes_to_yaw_rate({"yaw_left", "yaw_right"}, 0.5) == 0.0
-
-
-def test_no_turn_held_is_zero_yaw_rate():
-    assert offboard.axes_to_yaw_rate(set(), 0.5) == 0.0
-
-
-def test_yaw_does_not_produce_any_translation():
-    """Turning must not sneak in sideways motion -- the whole point of putting
-    yaw on left/right instead of strafe."""
-    assert offboard.axes_to_body_velocity({"yaw_left"}, 2.0, 1.0) == (0.0, 0.0, 0.0)
-    assert offboard.axes_to_body_velocity({"yaw_right"}, 2.0, 1.0) == (0.0, 0.0, 0.0)
-
-
-def test_command_combines_forward_climb_and_turn():
-    import math
-    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, yaw_rate_dps=45.0)
-    for d in ("fwd", "up", "yaw_right"):
-        s.set(d, True, now=100.0)
-    vx, vy, vz, yr = s.command(now=100.1)
-    assert (vx, vy, vz) == (2.0, 0.0, -1.0)
-    assert math.isclose(yr, math.radians(45.0))
-
-
-def test_watchdog_also_stops_the_turn():
-    """A stale link must not leave the aircraft spinning."""
-    s = offboard.CommandState(2.0, 1.0, watchdog_s=0.5, yaw_rate_dps=45.0)
-    s.set("yaw_right", True, now=100.0)
-    assert s.command(now=101.0) == (0.0, 0.0, 0.0, 0.0)
 
 
 def test_send_velocity_forwards_yaw_rate():

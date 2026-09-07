@@ -1,8 +1,9 @@
 """PX4 OFFBOARD velocity control for the web-joystick PoC.
 
-Four commands only: climb, descend, forward, backward. Strafe and yaw are
-deliberately out of scope -- see
-docs/superpowers/specs/2026-07-30-joystick-offboard-design.md.
+Proportional dual-stick control: pitch, roll, yaw, thrust, all continuous
+in [-1, 1] -- see docs/superpowers/specs/2026-09-07-joystick-analog-sticks-design.md
+(supersedes the four-command, strafe-out-of-scope version described in
+docs/superpowers/specs/2026-07-30-joystick-offboard-design.md).
 
 Every MAVLink constant below was read out of ~/PX4-Autopilot rather than
 recalled; the source file and line are on each one. test_offboard.py also
@@ -66,52 +67,40 @@ PX4_SUB_MODE_AUTO_LAND = 6
 # mid-demo.
 COM_RCL_EXCEPT_OFFBOARD = 4
 
-DIRECTIONS = ("fwd", "back", "yaw_left", "yaw_right", "up", "down")
-
 DEFAULT_YAW_RATE_DPS = 45.0
 
+DEADZONE = 0.05
 
-def axes_to_body_velocity(held, speed_fwd, speed_up):
-    """Map held joystick directions to a body-NED velocity setpoint.
 
-    NED means +vx is nose-forward and +vz is DOWN, so climbing is negative vz.
-    vy is always 0.0 -- sideways strafe is out of scope; the left/right buttons
-    turn the aircraft instead (see axes_to_yaw_rate). Opposing directions
-    cancel.
+def _clamp(v):
+    return max(-1.0, min(1.0, v))
+
+
+def axes_to_body_velocity(pitch, roll, thrust, speed_fwd, speed_right, speed_up):
+    """Map proportional stick deflection to a body-NED velocity setpoint.
+
+    pitch/roll/thrust are each in [-1, 1]: full-back to full-forward
+    (pitch), full-left to full-right (roll), full-down to full-up
+    (thrust). NED means +vx is nose-forward, +vy is right, and +vz is
+    DOWN, so climbing (+thrust) is negative vz. Callers (CommandState)
+    own clamping and the deadzone; this function only scales.
     """
-    vx = 0.0
-    if "fwd" in held:
-        vx += speed_fwd
-    if "back" in held:
-        vx -= speed_fwd
-    vz = 0.0
-    if "up" in held:
-        vz -= speed_up
-    if "down" in held:
-        vz += speed_up
-    return vx, 0.0, vz
+    vx = pitch * speed_fwd
+    vy = roll * speed_right
+    vz = -thrust * speed_up
+    return vx, vy, vz
 
 
-def axes_to_yaw_rate(held, yaw_rate_rps):
-    """Map held turn directions to a yaw rate in rad/s.
-
-    NED yaw is positive clockwise viewed from above, so turning right is
-    positive. Opposing directions cancel.
-
-    Because setpoints go out in BODY_NED, turning also rotates what "forward"
-    means -- PX4 resolves vx against the current heading every tick, so
-    forward keeps tracking the nose with no extra work here.
-    """
-    rate = 0.0
-    if "yaw_right" in held:
-        rate += yaw_rate_rps
-    if "yaw_left" in held:
-        rate -= yaw_rate_rps
-    return rate
+def axes_to_yaw_rate(yaw, yaw_rate_rps):
+    """yaw in [-1, 1] -> rad/s. Positive yaw turns right (NED yaw is
+    positive clockwise viewed from above) -- CommandState.set_stick maps
+    a rightward stick drag to positive yaw, so the signs already agree
+    here with no flip needed."""
+    return yaw * yaw_rate_rps
 
 
 class CommandState:
-    """Thread-safe held-direction set with a staleness watchdog.
+    """Thread-safe proportional stick state with a staleness watchdog.
 
     The web thread writes; the setpoint thread reads. If the browser stops
     talking -- crash, wifi drop, backgrounded tab -- velocity decays to zero
@@ -119,40 +108,67 @@ class CommandState:
     """
 
     def __init__(self, speed_fwd=2.0, speed_up=1.0, watchdog_s=0.5,
-                 yaw_rate_dps=DEFAULT_YAW_RATE_DPS):
+                 yaw_rate_dps=DEFAULT_YAW_RATE_DPS, speed_right=1.5):
         self.speed_fwd = speed_fwd
         self.speed_up = speed_up
+        self.speed_right = speed_right
         self.watchdog_s = watchdog_s
         self.yaw_rate_rps = math.radians(yaw_rate_dps)
         self._lock = threading.Lock()
-        self._held = set()
+        self._pitch = 0.0
+        self._roll = 0.0
+        self._yaw = 0.0
+        self._thrust = 0.0
         self._last_input = 0.0
 
-    def set(self, direction, pressed, now=None):
-        if direction not in DIRECTIONS:
-            raise ValueError(
-                f"unknown direction {direction!r}; expected one of {DIRECTIONS}")
+    def _is_active(self):
+        return bool(self._pitch or self._roll or self._yaw or self._thrust)
+
+    def set_stick(self, stick, x, y, now=None):
+        """Update one stick's pair of axes from raw DOM-offset x/y in
+        [-1, 1] (right/down positive) -- the client sends screen
+        coordinates and never applies flight sign conventions itself.
+
+        Left stick: x -> yaw, y -> thrust (up-drag climbs, so thrust is
+        -y). Right stick: x -> roll, y -> pitch (up-drag pitches
+        forward, so pitch is -y too). Roll needs no flip: dragging right
+        (+x) strafes right, and body-NED +vy is right.
+
+        Returns True exactly when this call moves the whole command from
+        all-axes-at-rest to at least one axis off-center (past the
+        deadzone) -- the edge callers use to trigger mission-pause /
+        agent-abort on manual takeover.
+        """
+        x = _clamp(x)
+        y = _clamp(y)
+        if abs(x) < DEADZONE:
+            x = 0.0
+        if abs(y) < DEADZONE:
+            y = 0.0
         with self._lock:
-            if pressed:
-                self._held.add(direction)
+            was_active = self._is_active()
+            if stick == "left":
+                self._yaw = x
+                self._thrust = -y
+            elif stick == "right":
+                self._roll = x
+                self._pitch = -y
             else:
-                self._held.discard(direction)
+                raise ValueError(f"unknown stick {stick!r}; expected 'left' or 'right'")
             self._last_input = time.monotonic() if now is None else now
+            is_active = self._is_active()
+        return (not was_active) and is_active
 
     def touch(self, now=None):
-        """Keepalive. The watchdog measures time since the last message of any
-        kind, and holding a button produces exactly one message, so the page
-        must refresh the stamp periodically."""
+        """Keepalive. The watchdog measures time since the last message of
+        any kind, and dragging sends a message only on change, so the page
+        must refresh the stamp periodically while a stick is off-center."""
         with self._lock:
             self._last_input = time.monotonic() if now is None else now
 
     def clear(self):
         with self._lock:
-            self._held.clear()
-
-    def held(self):
-        with self._lock:
-            return set(self._held)
+            self._pitch = self._roll = self._yaw = self._thrust = 0.0
 
     def command(self, now=None):
         """Everything one setpoint needs: (vx, vy, vz, yaw_rate).
@@ -164,12 +180,13 @@ class CommandState:
         """
         now = time.monotonic() if now is None else now
         with self._lock:
-            held = set(self._held)
+            pitch, roll, yaw, thrust = self._pitch, self._roll, self._yaw, self._thrust
             last = self._last_input
-        if held and (now - last) > self.watchdog_s:
+        if (pitch or roll or yaw or thrust) and (now - last) > self.watchdog_s:
             return 0.0, 0.0, 0.0, 0.0
-        vx, vy, vz = axes_to_body_velocity(held, self.speed_fwd, self.speed_up)
-        return vx, vy, vz, axes_to_yaw_rate(held, self.yaw_rate_rps)
+        vx, vy, vz = axes_to_body_velocity(
+            pitch, roll, thrust, self.speed_fwd, self.speed_right, self.speed_up)
+        return vx, vy, vz, axes_to_yaw_rate(yaw, self.yaw_rate_rps)
 
 
 PX4_MODE_NAMES = {

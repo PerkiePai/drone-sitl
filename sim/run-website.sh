@@ -12,6 +12,12 @@
 # Run it twice and a component that is already live is left untouched. This is
 # the script behind "run website" -- the full operator handbook is RUN-WEBSITE.md.
 #
+# Flags (consumed here; everything else is passed through to launch-sitl.sh):
+#   --descriptive   run joystick-server-descriptive.py on :8091 instead --
+#                   labelled camera/map panels + a sim-truth marker on the map.
+#                   The two servers can run side by side (8090 and 8091); Isaac
+#                   is shared. See memory descriptive-web-ui-fork.md.
+#
 # Env:
 #   CONDA_ENV       conda env for joystick-server.py           (default: drone)
 #   ISAAC_WAIT_S    how long to wait for the sim to come up     (default: 360)
@@ -30,13 +36,30 @@ ISAAC_WAIT_S="${ISAAC_WAIT_S:-360}"
 
 say() { echo "run-website: $*"; }
 
+# --- which web server: default, or the --descriptive fork ------------------
+SERVER_SCRIPT="joystick-server.py"
+WEB_PORT=8090
+SERVER_LOG="logs/joystick-server.console"
+SIM_ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == "--descriptive" ]]; then
+        SERVER_SCRIPT="joystick-server-descriptive.py"
+        WEB_PORT=8091
+        SERVER_LOG="logs/joystick-server-descriptive.console"
+    else
+        SIM_ARGS+=("$arg")
+    fi
+done
+
 # The MJPEG camera server is the last thing drone_setup_px4_cesium.py starts, so
-# a 200 here means the whole Isaac -> Pegasus -> PX4 chain is live.
-isaac_up()      { curl -sf -o /dev/null --max-time 3 http://127.0.0.1:8080/detect; }
+# an answer here means the whole Isaac -> Pegasus -> PX4 chain is live. Hit the
+# index, NOT a feed: /detect is an unbounded multipart stream that never EOFs,
+# so `curl --max-time` always exits non-zero on it even when the server is up.
+isaac_up()      { curl -sf -o /dev/null --max-time 3 http://127.0.0.1:8080/; }
 # Match OUR bootstrap specifically -- this box sometimes runs a second, unrelated
 # SITL launcher, and "any kit process" would make us wait on theirs forever.
 isaac_running() { pgrep -f "$REPO_DIR/sim/bootstrap.py" >/dev/null 2>&1; }
-web_up()        { curl -sf -o /dev/null --max-time 3 http://127.0.0.1:8090/; }
+web_up()        { curl -sf -o /dev/null --max-time 3 "http://127.0.0.1:${WEB_PORT}/"; }
 
 # --- Isaac Sim + PX4 -------------------------------------------------------
 if [[ "${SKIP_SIM:-0}" == "1" ]]; then
@@ -47,7 +70,7 @@ elif isaac_running; then
     say "Isaac Sim process is already running -- waiting for it to finish booting"
 else
     say "starting Isaac Sim  (sim/launch-sitl.sh)"
-    nohup ./sim/launch-sitl.sh "$@" > logs/launch-sitl.console 2>&1 &
+    nohup ./sim/launch-sitl.sh "${SIM_ARGS[@]}" > logs/launch-sitl.console 2>&1 &
     disown || true
     say "  pid $!   log: logs/launch-sitl.console"
 fi
@@ -74,20 +97,23 @@ fi
 
 # --- joystick server ----------------------------------------------------
 if web_up; then
-    say "joystick server already up on :8090"
+    say "joystick server already up on :${WEB_PORT}"
 else
-    say "starting joystick-server.py"
-    nohup conda run -n "$CONDA_ENV" python joystick-server.py \
-        > logs/joystick-server.console 2>&1 &
+    say "starting ${SERVER_SCRIPT}"
+    # --no-capture-output + -u: without them `conda run` buffers the child's
+    # stdout and SERVER_LOG stays empty, so the RUN-WEBSITE.md ">>> params:"
+    # link check can never pass.
+    nohup conda run --no-capture-output -n "$CONDA_ENV" python -u "$SERVER_SCRIPT" \
+        > "$SERVER_LOG" 2>&1 &
     disown || true
-    say "  pid $!   log: logs/joystick-server.console"
+    say "  pid $!   log: ${SERVER_LOG}"
     for _ in $(seq 1 20); do web_up && break; sleep 1; done
     web_up && say "joystick server up" \
-           || say "WARNING joystick server not answering -- see logs/joystick-server.console" >&2
+           || say "WARNING joystick server not answering -- see ${SERVER_LOG}" >&2
 fi
 
 IP="$(hostname -I | awk '{print $1}')"
 echo
-say "ready  ->  http://${IP}:8090/"
+say "ready  ->  http://${IP}:${WEB_PORT}/"
 say "  video    http://${IP}:8080/detect"
 say "  fly      ARM -> TAKEOFF -> OFFBOARD -> pad, or click the map -> FLY"

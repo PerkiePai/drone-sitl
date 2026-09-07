@@ -102,10 +102,40 @@ echo "launch-sitl: site       $SITE"
 echo "launch-sitl: setup      $SETUP_SCRIPT"
 echo "launch-sitl: spawn      ${SPAWN_XYZ:-from sim/sites.py}  heading ${HEADING_DEG:-from sim/sites.py}"
 
+# Cesium's tile-request cache is one user-global SQLite file
+# (~/.cache/ov/cesium-request-cache.sqlite, ~10 GB warm on this box). Two
+# Isaac + Cesium instances writing it concurrently can deadlock each other
+# with SQLite "database is locked" (memory: cesium-cache-lock-contention).
+#
+# Default is that shared file. It is WARM, so cesium.omniverse starts in tens
+# of ms. Do NOT casually point Cesium at a private dir: a COLD/empty cache
+# makes cesium.omniverse on_startup() block forever on a first fetch with no
+# timeout, and Isaac never finishes booting (the log just stops right after
+# "Cesium cache file: <path>"). A private cache is only safe pre-warmed.
+#
+# Opt in with OMNI_CACHE_DIR=/some/dir ONLY when you know a second, unrelated
+# Isaac instance is running. We seed the private cache from the global one on
+# first use (a one-off ~10 GB copy) so startup does not hang.
+ISAAC_CACHE_ARGS=()
+if [[ -n "${OMNI_CACHE_DIR:-}" ]]; then
+    mkdir -p "$OMNI_CACHE_DIR"
+    _global_cesium="$HOME/.cache/ov/cesium-request-cache.sqlite"
+    _private_cesium="$OMNI_CACHE_DIR/cesium-request-cache.sqlite"
+    if [[ ! -s "$_private_cesium" && -s "$_global_cesium" ]]; then
+        echo "launch-sitl: seeding private Cesium cache from global (~$(du -h "$_global_cesium" | cut -f1), one-off copy) -- a cold cache hangs startup"
+        cp -n "$_global_cesium" "$_private_cesium"
+    fi
+    echo "launch-sitl: tile cache $OMNI_CACHE_DIR (private -- OMNI_CACHE_DIR set)"
+    ISAAC_CACHE_ARGS+=("--/app/tokens/omni_global_cache=$OMNI_CACHE_DIR")
+else
+    echo "launch-sitl: tile cache ~/.cache/ov (shared + warm; set OMNI_CACHE_DIR only if a second Isaac instance is up)"
+fi
+
 exec "$ISAAC_SH" \
     --ext-folder "$PEGASUS_EXTS" \
     --ext-folder "$CESIUM_EXTS" \
     --enable pegasus.simulator \
     --enable cesium.omniverse \
     --exec "$REPO_DIR/sim/bootstrap.py" \
+    ${ISAAC_CACHE_ARGS[@]+"${ISAAC_CACHE_ARGS[@]}"} \
     "$@"

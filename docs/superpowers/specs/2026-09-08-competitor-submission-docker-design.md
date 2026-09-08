@@ -32,19 +32,27 @@ machine, no network hop") rather than replacing it — Docker changes the
 ## Decision 1 — Submission unit: a Docker image, built on an organizer-published base
 
 Competitors submit a Dockerfile (+ their code + weights), not a bare
-`.py` file. The organizer publishes `competition-base:latest`, which
-already has the `competition` package (`Agent`/`Command`/`State`/
-`flight()`, once implemented), `pymavlink`, `numpy`, `Pillow` — everything
-`agent_runner.py`'s subprocess path already assumes today. A competitor's
-Dockerfile is just:
+`.py` file. The organizer publishes `competition-base:latest`
+(`docker/competition-base/Dockerfile`), which already has the
+`competition` package (`Agent`/`Command`/`State`/`flight()`),
+`agent_runner.py`, `websockets`, `numpy`, `Pillow` — everything
+`agent_runner.py` itself needs. Deliberately **not** `pymavlink`:
+`agent_runner.py` never touches MAVLink (see its own docstring), so the
+container doesn't need it either. A competitor's Dockerfile is just:
 
 ```dockerfile
 FROM competition-base:latest
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY agent.py weights.pt .
-ENTRYPOINT ["python", "agent.py"]
+ENTRYPOINT ["python", "agent_runner.py", "--file", "agent.py"]
 ```
+
+`agent_runner.py` is what actually drives the `Agent` — `agent.py` only
+*defines* one, it doesn't run itself. (A first pass of this design got this
+wrong — `ENTRYPOINT ["python", "agent.py"]` does nothing, since example
+agent files have no `if __name__ == "__main__"`. Caught during the
+verification build below.)
 
 **Why a base image instead of every submission being fully
 self-contained:** the real value Docker adds here is dependency
@@ -59,8 +67,11 @@ themselves.
 
 Organizer runs `docker run --network host --gpus all <image>`. Still one
 machine (Decision 1 of the flight() doc, unchanged) — the container just
-uses the host's loopback to reach mavlink (`udp:14540`) and the camera
-server (`:8080`) exactly like the current bare-subprocess path does.
+uses the host's loopback to reach the `/agent/control` WebSocket (`:8090`)
+and the camera server (`:8080`) exactly like the current bare-subprocess
+`agent_runner.py` does. No MAVLink port involved — the container never
+touches MAVLink at all (see Decision 1's correction above); all flight
+goes through `/agent/control`.
 `--network host` was chosen over a bridge network + port mapping for
 simplicity; that's the natural place to add isolation later if/when the
 still-deferred sandboxing work happens. GPU passthrough is assumed

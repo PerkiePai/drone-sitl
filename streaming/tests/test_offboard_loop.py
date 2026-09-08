@@ -263,7 +263,7 @@ def test_agent_body_velocity_is_sent_when_no_mission_and_no_manual():
         px4.close()
 
 
-def test_agent_world_velocity_uses_the_local_ned_frame():
+def test_agent_flight_is_sent_when_no_mission_and_no_manual():
     js = _load_server()
     port = FAKE_PX4_PORT + 22
     px4 = mavutil.mavlink_connection(f"udpin:127.0.0.1:{port}")
@@ -273,11 +273,14 @@ def test_agent_world_velocity_uses_the_local_ned_frame():
         loop = js.SetpointLoop(conn, offboard.CommandState(2.0, 1.0),
                                rate_hz=20.0, agent_control=ac)
         loop.start()
-        ac.set_velocity_world(north=3.0, east=0.0, up=0.0, yaw_rate=0.0)
+        ac.set_flight(0, 0, 0, 1.0, speed_fwd=5.0, speed_right=5.0,
+                      speed_up=5.0, yaw_rate_dps=45.0)
 
         seen = _collect(px4, 1.0)
-        assert seen[-1].coordinate_frame == offboard.MAV_FRAME_LOCAL_NED
-        assert abs(seen[-1].vx - 3.0) < 1e-6
+        assert len(seen) >= 10
+        last = seen[-1]
+        assert last.coordinate_frame == offboard.MAV_FRAME_BODY_NED
+        assert abs(last.vx - 5.0) < 1e-6
     finally:
         px4.close()
 

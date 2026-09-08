@@ -494,10 +494,9 @@ Design / plan: `docs/superpowers/specs/2026-08-27-website-agent-upload-design.md
 
 ### Step 1 — pick or upload a script
 
-`examples/` ships one script per flight primitive: `velocity.py`,
-`velocity_world.py`, `goto.py`, `route.py`, `hold.py`, `camera.py`, plus
-`full_sortie.py` (every primitive in one flight: climb to 50 m, forward 50 m,
-yaw 360, west 50 m, land). Upload one
+`examples/` ships `flight.py` (the one flight primitive), `route.py`,
+`camera.py`, plus `full_sortie.py` (everything in one flight: climb to 50 m,
+forward 50 m, yaw 360, west 50 m, land). Upload one
 (or your own `.py`) with **upload** — it is stored under `logs/agents/` and
 selected in the dropdown.
 
@@ -533,8 +532,8 @@ restart it from the top. **STOP** does the same without needing to fly.
    ~0.5 s, the route stops, manual works.
 3. Upload a file whose `on_tick` does `raise RuntimeError("boom")`: the drone
    hovers, the log shows the traceback, state is `error`.
-4. RUN `examples/hold.py`, close the browser tab, reopen it: telemetry shows
-   the agent still `running`.
+4. RUN `examples/flight.py`, close the browser tab, reopen it: telemetry
+   shows the agent still `running`.
 
 ---
 

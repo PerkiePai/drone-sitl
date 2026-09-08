@@ -1,13 +1,15 @@
 """The flight and camera commands an Agent returns from its callbacks.
 
 Mirrors docs/competition-api.md section 2 for the subset this sandbox
-implements: Velocity (body + world), Goto, Route, Hold. Inspect and the
-perception helpers are out of scope -- see
-docs/superpowers/specs/2026-08-27-website-agent-upload-design.md.
+implements: flight() and Route. Inspect and the perception helpers are out
+of scope -- see docs/superpowers/specs/2026-08-27-website-agent-upload-design.md.
+`flight()` replaced Velocity/VelocityWorld/Goto/Hold -- see
+docs/superpowers/specs/2026-09-07-competition-flight-primitive-design.md.
 
 Every command is a frozen dataclass validated on construction. UNITS: metres,
-m/s, degrees, deg/s. `up` is POSITIVE UP in both frames; the NED sign flip
-happens once, server-side, in streaming/agent_control.py.
+degrees. `flight()`'s four axes are normalized floats in [-1, 1]; the
+translation to an actual m/s velocity happens once, server-side, in
+streaming/agent_control.py.
 """
 from dataclasses import dataclass
 
@@ -22,48 +24,39 @@ def _check_numbers(obj, names):
                 f"{type(obj).__name__}.{name} must be a number, got {v!r}")
 
 
-@dataclass(frozen=True)
-class Velocity:
-    """Body-frame velocity. `forward` tracks the nose. Stateless: re-issue it
-    every tick to hold it (the server watchdog decays it to hover otherwise)."""
-    forward: float = 0.0
-    right: float = 0.0
-    up: float = 0.0
-    yaw_rate: float = 0.0
-
-    def __post_init__(self):
-        _check_numbers(self, ("forward", "right", "up", "yaw_rate"))
+def _check_unit_range(obj, names):
+    for name in names:
+        v = getattr(obj, name)
+        if not -1.0 <= v <= 1.0:
+            raise ValueError(
+                f"{type(obj).__name__}.{name} must be in [-1, 1], got {v!r}")
 
 
 @dataclass(frozen=True)
-class VelocityWorld:
-    """World-frame velocity. north/east instead of forward/right; heading is
-    irrelevant. Stateless, same as Velocity."""
-    north: float = 0.0
-    east: float = 0.0
-    up: float = 0.0
-    yaw_rate: float = 0.0
+class flight:
+    """The one flight primitive: two virtual joysticks, body-frame,
+    normalized. Stateless: re-issue it every tick to hold it (the server
+    watchdog decays it to hover otherwise), exactly like Velocity did.
+
+        flight(left_x, left_y, right_x, right_y)   # each in [-1, 1]
+            left_y  = thrust   (+1 = full climb)
+            left_x  = yaw       (+1 = full right / clockwise)
+            right_y = pitch      (+1 = full forward)
+            right_x = roll        (+1 = full right / strafe)
+
+    Full deflection on a translation axis = 5 m/s. See
+    docs/superpowers/specs/2026-09-07-competition-flight-primitive-design.md
+    Decisions 3-5 for the full rationale.
+    """
+    left_x: float = 0.0
+    left_y: float = 0.0
+    right_x: float = 0.0
+    right_y: float = 0.0
 
     def __post_init__(self):
-        _check_numbers(self, ("north", "east", "up", "yaw_rate"))
-
-
-@dataclass(frozen=True)
-class Goto:
-    """Fly to one point; altitude is metres above the launch point. Stateful:
-    survives a silent script. Completion arrives as on_arrival."""
-    lat: float
-    lon: float
-    alt: float
-    speed: float | None = None
-
-    def __post_init__(self):
-        _check_numbers(self, ("lat", "lon", "alt"))
-        if self.speed is not None and (isinstance(self.speed, bool)
-                                       or not isinstance(self.speed, _NUM)
-                                       or self.speed <= 0):
-            raise ValueError(f"Goto speed must be a positive number, "
-                             f"got {self.speed!r}")
+        names = ("left_x", "left_y", "right_x", "right_y")
+        _check_numbers(self, names)
+        _check_unit_range(self, names)
 
 
 @dataclass(frozen=True)
@@ -91,12 +84,7 @@ class Route:
                              f"got {self.speed!r}")
 
 
-@dataclass(frozen=True)
-class Hold:
-    """Station-keep at the current position. Stateful and safe."""
-
-
-FLIGHT_TYPES = (Velocity, VelocityWorld, Goto, Route, Hold)
+FLIGHT_TYPES = (flight, Route)
 CAMERAS = ("nadir", "oblique")
 
 

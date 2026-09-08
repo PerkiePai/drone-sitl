@@ -19,11 +19,6 @@ import time
 # regardless of attitude.
 MAV_FRAME_BODY_NED = 8
 
-# World-frame velocity setpoints, for the agent API's VelocityWorld. Unlike
-# BODY_NED, PX4 applies no yaw rotation -- vx/vy are world north/east and vz is
-# world-down (mavlink_receiver.cpp:970-991).
-MAV_FRAME_LOCAL_NED = 1
-
 # type_mask: ignore position (bits 0-2), ignore acceleration (bits 6-8),
 # ignore yaw (bit 10). USE velocity (bits 3-5) and yaw_rate (bit 11 clear).
 # yaw_rate = 0 holds the heading; non-zero turns. PX4 applies yawspeed outside
@@ -240,21 +235,6 @@ class OffboardLink:
             0.0, 0.0, 0.0,                      # afx, afy, afz -- masked off
             0.0,                                # yaw        -- masked off
             yaw_rate)                           # rad/s; 0 holds heading
-
-    def send_velocity_world(self, vn, ve, vd, yaw_rate=0.0):
-        """World-frame velocity: vn north, ve east, vd DOWN (NED). The caller
-        has already flipped the API's +up to vd -- see agent_control.py. Same
-        setpoint-thread-only contract as send_velocity."""
-        self.conn.mav.set_position_target_local_ned_send(
-            0,                                  # time_boot_ms (PX4 ignores)
-            self.target_system, self.target_component,
-            MAV_FRAME_LOCAL_NED,
-            VEL_YAWRATE_TYPE_MASK,
-            0.0, 0.0, 0.0,                      # x, y, z    -- masked off
-            vn, ve, vd,
-            0.0, 0.0, 0.0,                      # afx, afy, afz -- masked off
-            0.0,                                # yaw        -- masked off
-            yaw_rate)                           # rad/s
 
     def send_position_global(self, lat, lon, rel_alt_m, yaw_deg):
         """Fly to a lat/lon at an altitude relative to home, nose on yaw_deg.

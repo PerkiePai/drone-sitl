@@ -11,7 +11,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
-from competition import Agent, Command, Goto, Hold, Route, Velocity, VelocityWorld  # noqa: E402
+from competition import Agent, Command, Route, flight  # noqa: E402
 from competition.harness import Harness  # noqa: E402
 from competition.state import Arena  # noqa: E402
 
@@ -89,14 +89,14 @@ def _run_for(harness, clock, seconds):
 def test_on_start_result_is_sent_first():
     class A(Agent):
         def on_start(self, arena):
-            return Command(flight=Velocity(forward=5.0))
+            return Command(flight=flight(0, 0, 0, 1.0))
 
     ch, clock = FakeChannel(), VirtualClock()
     h = Harness(A(), ch, FakeFrames(), Arena.around(0, 0, 500, None),
                 now=clock.now, sleep=clock.sleep, log=lambda *a: None)
     _run_for(h, clock, 0.01)
-    assert ch.sent[0] == {"type": "velocity", "forward": 5.0, "right": 0.0,
-                          "up": 0.0, "yaw_rate": 0.0}
+    assert ch.sent[0] == {"type": "flight", "left_x": 0.0, "left_y": 0.0,
+                          "right_x": 0.0, "right_y": 1.0}
 
 
 def test_on_tick_runs_at_20hz_and_on_frame_at_5hz():
@@ -127,12 +127,12 @@ def test_a_callback_that_overruns_its_budget_is_abandoned():
             self.calls = 0
 
         def on_start(self, arena):
-            return Command(flight=Velocity(forward=1.0))
+            return Command(flight=flight(0, 0, 0, 0.2))
 
         def on_tick(self, state):
             self.calls += 1
             time.sleep(0.5)                       # >> BUDGET_TICK_S
-            return Command(flight=Velocity(forward=99.0))  # must be dropped
+            return Command(flight=flight(0, 0, 0, 1.0))  # must be dropped
 
     ch = FakeChannel()
     agent = A()
@@ -143,9 +143,9 @@ def test_a_callback_that_overruns_its_budget_is_abandoned():
     time.sleep(0.4)
     h.stop()
     th.join(timeout=2.0)
-    forwards = [m["forward"] for m in ch.sent if m["type"] == "velocity"]
-    assert forwards, "nothing sent"
-    assert all(f == 1.0 for f in forwards), f"a 99.0 leaked through: {forwards}"
+    right_ys = [m["right_y"] for m in ch.sent if m["type"] == "flight"]
+    assert right_ys, "nothing sent"
+    assert all(v == 0.2 for v in right_ys), f"a 1.0 leaked through: {right_ys}"
 
 
 def test_none_return_sends_nothing():
@@ -217,12 +217,12 @@ def test_route_waypoint_and_completion_events_fire_from_mission_telemetry():
     assert ("done", None) in seen
 
 
-def test_single_point_goto_completion_is_on_arrival_not_route_complete():
+def test_single_point_route_completion_is_on_arrival_not_route_complete():
     seen = []
 
     class A(Agent):
         def on_start(self, arena):
-            return Command(flight=Goto(1.0, 2.0, 30.0))
+            return Command(flight=Route(waypoints=[(1.0, 2.0)], alt=30.0))
 
         def on_arrival(self, state):
             seen.append("arrived")
@@ -245,24 +245,26 @@ def test_single_point_goto_completion_is_on_arrival_not_route_complete():
     assert seen == ["arrived"]
 
 
-def test_velocity_world_up_is_passed_through_positive():
-    """The NED flip is server-side. The harness must send +up verbatim."""
+def test_flight_fields_pass_through_verbatim():
+    """The axis-to-velocity translation is server-side (AgentControl), not
+    here -- the harness just relays the four stick values as given."""
     class A(Agent):
         def on_start(self, arena):
-            return Command(flight=VelocityWorld(north=2.0, up=1.0))
+            return Command(flight=flight(-0.5, 0.25, 1.0, -1.0))
 
     ch, clock = FakeChannel(), VirtualClock()
     h = Harness(A(), ch, FakeFrames(), Arena.around(0, 0, 500, None),
                 now=clock.now, sleep=clock.sleep, log=lambda *a: None)
     _run_for(h, clock, 0.01)
-    msg = next(m for m in ch.sent if m["type"] == "velocity_world")
-    assert msg["north"] == 2.0 and msg["up"] == 1.0
+    msg = next(m for m in ch.sent if m["type"] == "flight")
+    assert (msg["left_x"], msg["left_y"], msg["right_x"], msg["right_y"]) \
+        == (-0.5, 0.25, 1.0, -1.0)
 
 
 def test_time_limit_ends_the_run_with_a_hold():
     class A(Agent):
         def on_tick(self, state):
-            return Command(flight=Velocity(forward=1.0))
+            return Command(flight=flight(0, 0, 0, 1.0))
 
     ch, clock = FakeChannel(), VirtualClock()
     h = Harness(A(), ch, FakeFrames(), Arena.around(0, 0, 500, 0.3),

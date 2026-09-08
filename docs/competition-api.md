@@ -3,8 +3,11 @@
 Everything your submission can call, and exactly what it does.
 
 **Design rationale lives elsewhere** — see
-`docs/superpowers/specs/2026-08-09-competition-control-api-design.md` for *why*
-the API is shaped this way. This document is the surface only.
+`docs/2026-08-09-ONLY-design-competition-control-api-design.md` for the
+original *why*, and
+`docs/superpowers/specs/2026-09-07-competition-flight-primitive-design.md`
+for why `Velocity`/`VelocityWorld`/`Goto`/`Hold` became the single
+`flight()` primitive below. This document is the surface only.
 
 > **Status:** draft. Signatures are settled in shape but not frozen; the values
 > marked ⚙ are still being tuned.
@@ -18,7 +21,7 @@ Every call must return promptly — a call that overruns its budget is abandoned
 and the aircraft carries on with its previous command.
 
 ```python
-from competition import Agent, Command, Velocity, Route, Goto, Inspect, Hold
+from competition import Agent, Command, flight, Route, Inspect
 
 class MyAgent(Agent):
 
@@ -32,7 +35,7 @@ class MyAgent(Agent):
         """~20 Hz. No image — cheap steering only."""
 
     def on_arrival(self, state) -> Command | None:
-        """A Goto or Inspect finished."""
+        """A single-waypoint Route, or Inspect, finished."""
 
     def on_waypoint(self, index, state) -> Command | None:
         """A Route waypoint was reached."""
@@ -72,54 +75,55 @@ touching the flight path.
 ### 2.1 Flight
 
 ```python
-Velocity(forward=0.0, right=0.0, up=0.0, yaw_rate=0.0)        # body frame
-VelocityWorld(north=0.0, east=0.0, up=0.0, yaw_rate=0.0)      # world frame
-Goto(lat, lon, alt, speed=None)                               # fly to a point
-Route(waypoints, alt, speed=None)                             # autonomous sweep
-Inspect(lat, lon)                                             # position to view a point
-Hold()                                                        # station-keep
+flight(left_x, left_y, right_x, right_y)                      # the one primitive
+Route(waypoints, alt, speed=None)                              # autonomous sweep
+Inspect(lat, lon)                                              # position to view a point
 ```
 
-#### `Velocity` — body frame
+#### `flight()` — the one flight primitive
 
-Continuous, in m/s and deg/s. Not buttons: state the number you want.
+Two virtual joysticks, each axis continuous in `[-1, 1]`. Not buttons: state
+the deflection you want.
 
-| Field | Unit | Positive means |
+```python
+flight(left_x, left_y, right_x, right_y)
+```
+
+| Stick | Axis | Meaning |
 |---|---|---|
-| `forward` | m/s | direction the nose points |
-| `right` | m/s | strafe right (no yaw change) |
-| `up` | m/s | climb |
-| `yaw_rate` | deg/s | rotate clockwise seen from above |
+| left | `left_y` | thrust — `+1` = full climb |
+| left | `left_x` | yaw — `+1` = full right / clockwise |
+| right | `right_y` | pitch — `+1` = full forward |
+| right | `right_x` | roll — `+1` = full right / strafe |
+
+Full deflection on a translation axis (thrust, pitch, roll) is ⚙ 5 m/s. Yaw's
+full-deflection rate is ⚙ 45°/s.
 
 ```python
-return Command(flight=Velocity(forward=15.0))            # 15 m/s straight ahead
-return Command(flight=Velocity(forward=8.0, right=3.0))  # diagonal, nose unchanged
-return Command(flight=Velocity(yaw_rate=30.0))           # spin in place
+return Command(flight=flight(0, 0, 0, 1.0))       # full speed straight ahead
+return Command(flight=flight(0, 0, 0.4, 0.8))     # forward + a little strafe right
+return Command(flight=flight(0.6, 0, 0, 0))       # spin right in place
 ```
 
-**`Velocity` is stateless and watchdogged.** If no new `Velocity` arrives within
-⚙ 0.5 s it decays to a hover. A stuck velocity is a hazard, so it is not allowed
-to persist through a silent script. Re-issue it every tick if you want it held.
+**`flight()` is stateless and watchdogged.** If no new `flight()` arrives
+within ⚙ 0.5 s it decays to a hover. A stuck velocity is a hazard, so it is
+not allowed to persist through a silent script. Re-issue it every tick if you
+want it held — `flight(0, 0, 0, 0)` re-issued every tick is how you hold in
+place deliberately, same as any other setpoint.
 
-#### `VelocityWorld` — world frame
-
-Same units. `forward`/`right` become `north`/`east`; heading is irrelevant.
-
-> **Note — positive `up`, not NED.** Aviation convention would use *down*
-> positive. This API uses **up positive in both frames** because the sign flip is
-> a reliable source of bugs. There is no `down` field anywhere in this API.
-
-Usually the better choice for autonomous code: your detections are in map
-coordinates, so your commands may as well be.
-
-#### `Goto` — single point
+**Body frame, not world frame.** `flight()` is nose-relative — there is no
+`VelocityWorld` counterpart. Steering toward a lat/lon target means rotating
+the world bearing into this frame yourself:
 
 ```python
-Goto(lat, lon, alt, speed=None)     # alt in metres AGL; speed m/s, default ⚙ 15
+h = math.radians(state.heading)
+right_x = north * math.sin(h) + east * math.cos(h)
+right_y = north * math.cos(h) - east * math.sin(h)
 ```
 
-Returns immediately; you get `on_arrival` when it completes. Stateful — it
-survives a silent script.
+where `north`/`east` is the unit direction (or a speed-scaled vector) toward
+your target. Four lines, and your detections are already in map coordinates
+so this is the only translation you ever need.
 
 #### `Route` — autonomous sweep
 
@@ -131,9 +135,9 @@ Flies the list in order. One altitude for the whole route. You get `on_waypoint`
 per waypoint and `on_route_complete` at the end.
 
 **Runs entirely on the simulator host**, closed-loop at the flight controller's
-full rate — network jitter never touches it. This makes it meaningfully smoother
-and faster than hand-flying the same path with `Velocity`, which crosses the
-network every tick. Use `Route` for the sweep.
+full rate (250 Hz–1 kHz) — a hand-rolled `flight()` loop only updates as fast
+as `on_tick` fires (~20 Hz), visibly choppier over a long sweep. Use `Route`
+for the sweep.
 
 **Interrupting a route:** just return a different flight command. The route
 pauses and keeps its place; `resume_route()` continues from the waypoint it was
@@ -162,10 +166,6 @@ manoeuvre, and doing it by hand means writing the same triangle every other team
 is writing.
 
 You get `on_arrival` when the aircraft is settled and pointed.
-
-#### `Hold`
-
-Station-keeps at the current position. Stateful and safe; holds against wind.
 
 ### 2.2 Camera
 
@@ -342,12 +342,12 @@ class MyAgent(Agent):
 
 | | Why |
 |---|---|
-| Attitude / rate / motor control | The stabilisation loop cannot cross a network. A 20 ms hiccup would put the aircraft in the ground. Velocity is the floor. |
+| Attitude / rate / motor control | The stabilisation loop cannot cross a network. A 20 ms hiccup would put the aircraft in the ground. `flight()` is the floor. |
 | Acceleration setpoints | A stale acceleration diverges quadratically, not linearly. |
 | Blocking calls (`goto_and_wait`) | The harness owns the loop; a blocking call would stall your own tick. Everything returns immediately, completion arrives as an event. |
 | Gimbal / zoom | The cameras are rigidly mounted. Change magnification by changing cameras, aim by flying. |
 | Direct simulator access | Out of bounds. |
-| Discrete direction commands | You have no fingers. State the velocity you want. |
+| Discrete direction commands | You have no fingers. State the deflection you want. |
 
 ---
 
@@ -357,11 +357,12 @@ class MyAgent(Agent):
 2. **Leaving the camera on `oblique`.** 20° FOV finds nothing. Sweep on `nadir`.
 3. **Reading while accelerating.** The camera is rigid; the airframe tilts to
    accelerate. Check `state.pitch`, or use `Inspect`, which settles for you.
-4. **Hand-flying the sweep with `Velocity`.** It crosses the network every tick.
-   `Route` runs on the simulator host and flies a cleaner, faster line.
-5. **Expecting `Velocity` to persist.** It decays to hover after ⚙ 0.5 s.
-   Re-issue it, or use a stateful command.
-6. **Assuming NED.** `up` is positive here, in both frames.
+4. **Hand-flying the sweep with `flight()`.** It only updates as fast as
+   `on_tick` fires (~20 Hz). `Route` runs on the simulator host at the flight
+   controller's full rate and flies a cleaner, faster line.
+5. **Expecting `flight()` to persist.** It decays to hover after ⚙ 0.5 s.
+   Re-issue it every tick, or use `Route`/`Inspect`.
+6. **Assuming NED.** `left_y`/thrust is positive-up (`+1` climbs), not down.
 7. **Blocking in `on_frame`.** Over budget means the call is abandoned; the
    aircraft flies on with the last command.
 
@@ -371,12 +372,11 @@ class MyAgent(Agent):
 
 ```python
 # flight
-Velocity(forward, right, up, yaw_rate)          # body,  m/s + deg/s, stateless
-VelocityWorld(north, east, up, yaw_rate)        # world, m/s + deg/s, stateless
-Goto(lat, lon, alt, speed)                      # stateful -> on_arrival
+flight(left_x, left_y, right_x, right_y)        # each in [-1,1], stateless
+                                                 #   left_y=thrust left_x=yaw
+                                                 #   right_y=pitch right_x=roll
 Route(waypoints, alt, speed)                    # stateful -> on_waypoint / on_route_complete
 Inspect(lat, lon)                               # stateful -> on_arrival, solves standoff
-Hold()                                          # stateful
 
 # camera
 Command(camera="nadir")      # 113° wide, search
@@ -398,6 +398,6 @@ self.submit(text)
 |---|---|
 | Angles | degrees; heading 0 = north, positive clockwise |
 | Altitude | metres AGL unless stated |
-| Velocity | m/s, **positive up in both frames** |
+| `flight()` axes | normalized `[-1, 1]`, **positive-up thrust**, body frame |
 | Return `None` | "keep doing what you were doing" |
 | Simulation | real time — it does not wait for you |

@@ -42,5 +42,5 @@ def test_example_callbacks_do_not_raise(fname):
 
 
 def test_examples_are_the_expected_set():
-    assert set(FILES) == {"velocity.py", "velocity_world.py", "goto.py",
-                          "route.py", "hold.py", "camera.py", "full_sortie.py"}
+    assert set(FILES) == {"flight.py", "route.py", "camera.py",
+                          "full_sortie.py"}

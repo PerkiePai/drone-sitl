@@ -3,7 +3,7 @@
 Route runs closed-loop on the simulator host. on_waypoint fires per corner,
 on_route_complete at the end -- then this holds the last point.
 """
-from competition import Agent, Command, Hold, Route
+from competition import Agent, Command, Route, flight
 
 
 class BoxSurvey(Agent):
@@ -21,4 +21,4 @@ class BoxSurvey(Agent):
 
     def on_route_complete(self, state):
         print("route complete -- holding")
-        return Command(flight=Hold())
+        return Command(flight=flight(0, 0, 0, 0))

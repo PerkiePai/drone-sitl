@@ -22,7 +22,7 @@ class Agent:
         return None
 
     def on_arrival(self, state):
-        """A Goto finished."""
+        """A single-waypoint Route finished."""
         return None
 
     def on_waypoint(self, index, state):

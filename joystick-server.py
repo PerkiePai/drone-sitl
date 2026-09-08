@@ -40,6 +40,11 @@ AGENT_UPLOAD_DIR = os.path.join(ROOT, "logs", "agents")
 AGENT_MAX_BYTES = 256 * 1024
 ARENA_RADIUS_M = 500.0
 AGENT_TIME_LIMIT_S = None
+# flight()'s full-deflection speed on a translation axis -- see
+# docs/superpowers/specs/2026-09-07-competition-flight-primitive-design.md
+# Decision 4. Yaw reuses the same default the human joystick UI uses.
+AGENT_FLIGHT_SPEED = 5.0
+AGENT_FLIGHT_YAW_RATE_DPS = offboard.DEFAULT_YAW_RATE_DPS
 os.makedirs(AGENT_UPLOAD_DIR, exist_ok=True)
 
 # sim/hil_tap.py (a separate, optional diagnostic process -- see
@@ -280,15 +285,12 @@ class SetpointLoop(threading.Thread):
                 self.link.send_position_global(wp_lat, wp_lon, wp_alt, wp_yaw)
                 vx, yaw_rate = 0.0, 0.0
             elif (agent_cmd := self.agent_control.command()) is not None:
-                # An uploaded script has the aircraft: its Velocity /
-                # VelocityWorld, or a zeroed hover once its watchdog expires.
-                # Wins over the manual pad -- a manual press kills the agent
-                # up in the /ws handler, so this branch is the backstop.
-                akind, a0, a1, a2, yaw_rate = agent_cmd
-                if akind == "world":
-                    self.link.send_velocity_world(a0, a1, a2, yaw_rate)
-                else:
-                    self.link.send_velocity(a0, a1, a2, yaw_rate)
+                # An uploaded script has the aircraft: its flight(), or a
+                # zeroed hover once its watchdog expires. Wins over the
+                # manual pad -- a manual press kills the agent up in the
+                # /ws handler, so this branch is the backstop.
+                _akind, a0, a1, a2, yaw_rate = agent_cmd
+                self.link.send_velocity(a0, a1, a2, yaw_rate)
                 vx = math.hypot(a0, a1)
             else:
                 vx, vy, vz, yaw_rate = self.state.command()
@@ -609,18 +611,13 @@ def build_app(loop_thread, state, video_port, mission_speed, agent_run):
             while True:
                 msg = json.loads(await sock.receive_text())
                 kind = msg.get("type")
-                if kind == "velocity":
-                    ac.set_velocity_body(msg["forward"], msg["right"],
-                                         msg["up"], msg["yaw_rate"])
-                elif kind == "velocity_world":
-                    ac.set_velocity_world(msg["north"], msg["east"],
-                                          msg["up"], msg["yaw_rate"])
-                elif kind == "goto":
-                    # `speed` is accepted but the server clamps MPC_XY_VEL_MAX
-                    # to --mission-speed at startup; per-leg speed is not wired.
-                    loop_thread.load_mission([[msg["lat"], msg["lon"]]],
-                                             msg["alt"])
-                    loop_thread.submit("mission_fly")
+                if kind == "flight":
+                    ac.set_flight(msg["left_x"], msg["left_y"],
+                                  msg["right_x"], msg["right_y"],
+                                  speed_fwd=AGENT_FLIGHT_SPEED,
+                                  speed_right=AGENT_FLIGHT_SPEED,
+                                  speed_up=AGENT_FLIGHT_SPEED,
+                                  yaw_rate_dps=AGENT_FLIGHT_YAW_RATE_DPS)
                 elif kind == "route":
                     loop_thread.load_mission(msg["points"], msg["alt"])
                     loop_thread.submit("mission_fly")

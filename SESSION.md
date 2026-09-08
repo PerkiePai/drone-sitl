@@ -15,11 +15,11 @@ The agent runs as a child process (`agent_runner.py`) that talks to the server
 over `/agent/control`; it never touches MAVLink. RUN auto-sequences
 ARM -> TAKEOFF -> OFFBOARD; the first manual pad/key input kills it.
 
-`examples/` has one uploadable script per flight primitive (velocity,
-velocity_world, goto, route, hold, camera).
+`examples/` has `flight.py` (the one flight primitive), `route.py`,
+`camera.py`, `full_sortie.py`.
 
 Tests: `conda run -n drone python -m pytest competition/ streaming/tests/ -q`
-(167 pass as of 2026-08-27).
+(168 pass as of 2026-09-08).
 
 ---
 

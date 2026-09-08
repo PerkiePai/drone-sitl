@@ -262,7 +262,7 @@ def test_agent_upload_rejects_an_oversize_body(server):
 
 # --- /agent/control socket ---------------------------------------------
 
-def test_agent_control_socket_sends_arena_then_applies_a_velocity(server):
+def test_agent_control_socket_sends_arena_then_applies_a_flight(server):
     websockets = pytest.importorskip("websockets")
 
     async def exercise():
@@ -272,9 +272,9 @@ def test_agent_control_socket_sends_arena_then_applies_a_velocity(server):
             assert first["type"] == "arena"
             assert "radius_m" in first and "time_limit" in first
 
-            await ws.send(json.dumps({"type": "velocity", "forward": 3.0,
-                                      "right": 0.0, "up": 1.0,
-                                      "yaw_rate": 0.0}))
+            await ws.send(json.dumps({"type": "flight", "left_x": 0.0,
+                                      "left_y": 0.0, "right_x": 0.0,
+                                      "right_y": 1.0}))
             for _ in range(10):
                 t = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
                 if t.get("type") != "arena":

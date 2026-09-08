@@ -4,6 +4,14 @@ Given an Agent, a control channel and a frame source, this calls the Agent's
 callbacks at the right rates, turns each returned Command into a channel
 message, and synthesizes arrival events from mission telemetry.
 
+Flight commands are flight() (the four-axis joystick primitive) or Route
+(the autonomous sweep) -- see
+docs/superpowers/specs/2026-09-07-competition-flight-primitive-design.md.
+The `{"type": "hold"}` message the time-limit safety stop below sends is
+independent of the old Hold() command type (removed): it's the harness's
+own "stop everything" message, and AgentControl still knows how to handle
+it (see streaming/agent_control.py).
+
 A callback that overruns its budget is abandoned -- run on a worker thread,
 joined with a timeout; the previous command stays in force. That is the
 contract in docs/competition-api.md section 1. A genuinely wedged callback
@@ -13,9 +21,7 @@ backstop for that.
 import threading
 import time
 
-from competition.commands import (
-    Command, Goto, Hold, Route, Velocity, VelocityWorld,
-)
+from competition.commands import Command, Route, flight
 from competition.state import State
 
 TICK_HZ = 20.0
@@ -80,23 +86,14 @@ class Harness:
             self.frames.select(cmd.camera)
             self.channel.send({"type": "camera", "camera": cmd.camera})
         f = cmd.flight
-        if isinstance(f, Velocity):
-            self.channel.send({"type": "velocity", "forward": f.forward,
-                               "right": f.right, "up": f.up,
-                               "yaw_rate": f.yaw_rate})
-        elif isinstance(f, VelocityWorld):
-            self.channel.send({"type": "velocity_world", "north": f.north,
-                               "east": f.east, "up": f.up,
-                               "yaw_rate": f.yaw_rate})
-        elif isinstance(f, Goto):
-            self.channel.send({"type": "goto", "lat": f.lat, "lon": f.lon,
-                               "alt": f.alt, "speed": f.speed})
+        if isinstance(f, flight):
+            self.channel.send({"type": "flight", "left_x": f.left_x,
+                               "left_y": f.left_y, "right_x": f.right_x,
+                               "right_y": f.right_y})
         elif isinstance(f, Route):
             self.channel.send({"type": "route",
                                "points": [[a, b] for a, b in f.waypoints],
                                "alt": f.alt, "speed": f.speed})
-        elif isinstance(f, Hold):
-            self.channel.send({"type": "hold"})
 
     # -- dispatch ----------------------------------------------------------
 

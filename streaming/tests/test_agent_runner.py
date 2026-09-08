@@ -19,10 +19,10 @@ def _write(tmp_path, body):
 
 def test_loads_the_single_agent_subclass(tmp_path):
     path = _write(tmp_path, """
-        from competition import Agent, Command, Velocity
+        from competition import Agent, Command, flight
         class Mine(Agent):
             def on_tick(self, state):
-                return Command(flight=Velocity(forward=1.0))
+                return Command(flight=flight(0, 0, 0, 1.0))
     """)
     cls = agent_runner.load_agent(path)
     assert cls.__name__ == "Mine"

@@ -11,38 +11,31 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
-from competition import (  # noqa: E402
-    Agent, Command, Velocity, VelocityWorld, Goto, Route, Hold,
-)
+from competition import Agent, Command, Route, flight  # noqa: E402
 
 
-def test_velocity_defaults_to_all_zero_hover():
-    v = Velocity()
-    assert (v.forward, v.right, v.up, v.yaw_rate) == (0.0, 0.0, 0.0, 0.0)
+def test_flight_defaults_to_all_zero_hover():
+    f = flight(0, 0, 0, 0)
+    assert (f.left_x, f.left_y, f.right_x, f.right_y) == (0.0, 0.0, 0.0, 0.0)
 
 
-def test_velocity_is_frozen():
-    v = Velocity(forward=1.0)
+def test_flight_is_frozen():
+    f = flight(0, 0, 0, 0)
     with pytest.raises(Exception):
-        v.forward = 2.0
+        f.left_x = 1.0
 
 
-def test_velocity_rejects_non_numeric():
+def test_flight_rejects_non_numeric():
     with pytest.raises(TypeError):
-        Velocity(forward="fast")
+        flight("fast", 0, 0, 0)
 
 
-def test_velocity_world_has_north_east_not_forward_right():
-    v = VelocityWorld(north=2.0, east=-1.0)
-    assert v.north == 2.0 and v.east == -1.0
-    assert not hasattr(v, "forward")
-
-
-def test_goto_speed_must_be_positive_when_given():
-    Goto(1.0, 2.0, 30.0)              # None speed is fine
-    Goto(1.0, 2.0, 30.0, speed=5.0)
+def test_flight_rejects_out_of_range():
+    flight(1.0, -1.0, 1.0, -1.0)          # full deflection either way is fine
     with pytest.raises(ValueError):
-        Goto(1.0, 2.0, 30.0, speed=0.0)
+        flight(1.1, 0, 0, 0)
+    with pytest.raises(ValueError):
+        flight(0, 0, 0, -1.1)
 
 
 def test_route_needs_at_least_one_waypoint():
@@ -55,14 +48,15 @@ def test_route_normalizes_waypoints_to_tuple_of_float_pairs():
     assert r.waypoints == ((1.0, 2.0), (3.0, 4.0))
 
 
-def test_hold_takes_no_fields():
-    Hold()
-
-
 def test_command_accepts_a_flight_command():
-    c = Command(flight=Velocity(forward=3.0))
-    assert isinstance(c.flight, Velocity)
+    c = Command(flight=flight(0, 0, 1.0, 0))
+    assert isinstance(c.flight, flight)
     assert c.camera is None
+
+
+def test_command_accepts_a_route_command():
+    c = Command(flight=Route(waypoints=[(1, 2)], alt=30.0))
+    assert isinstance(c.flight, Route)
 
 
 def test_command_accepts_camera_only():

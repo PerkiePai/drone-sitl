@@ -20,6 +20,7 @@ import json
 import math
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -446,8 +447,15 @@ class AgentRun:
     def _spawn(self):
         if self.kind == "docker":
             self._container_name = f"submission-run-{time.strftime('%Y%m%d-%H%M%S')}"
+            # `docker info` can list an "nvidia" runtime purely from
+            # /etc/docker/daemon.json with no nvidia-container-toolkit
+            # actually installed -- --gpus all then fails the whole run
+            # with "could not select device driver" (caught live on this
+            # box). shutil.which is what --gpus actually needs present.
+            gpu_flags = (["--gpus", "all"]
+                        if shutil.which("nvidia-container-runtime") else [])
             self._proc = subprocess.Popen(
-                ["docker", "run", "--rm", "--network", "host", "--gpus", "all",
+                ["docker", "run", "--rm", "--network", "host", *gpu_flags,
                  "--name", self._container_name, self.file],
                 cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1)

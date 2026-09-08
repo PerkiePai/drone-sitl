@@ -378,6 +378,9 @@ def test_agent_run_docker_spawns_docker_run_with_network_host_and_name(monkeypat
             return None
 
     monkeypatch.setattr(js.subprocess, "Popen", FakePopen)
+    # nvidia-container-runtime present -> --gpus all is safe to pass.
+    monkeypatch.setattr(js.shutil, "which",
+                        lambda name: "/usr/bin/nvidia-container-runtime")
 
     run = js.AgentRun(_FakeLoopThread(), "python", "127.0.0.1", 8090, 8080)
     run.run("docker", "submission-foo-20260908-120000")
@@ -388,6 +391,35 @@ def test_agent_run_docker_spawns_docker_run_with_network_host_and_name(monkeypat
     assert argv[:6] == ["docker", "run", "--rm", "--network", "host", "--gpus"]
     assert "submission-foo-20260908-120000" in argv
     assert "--name" in argv
+    assert run.state == "running"
+
+
+def test_agent_run_docker_omits_gpus_flag_when_toolkit_unavailable(monkeypatch):
+    """Caught live: docker info can list an "nvidia" runtime in
+    /etc/docker/daemon.json with no nvidia-container-toolkit actually
+    installed -- `--gpus all` then fails the whole run with
+    "could not select device driver". Degrade to CPU instead of failing."""
+    js = _load_server()
+    calls = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            calls.append(argv)
+            self.stdout = iter([])
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(js.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(js.shutil, "which", lambda name: None)
+
+    run = js.AgentRun(_FakeLoopThread(), "python", "127.0.0.1", 8090, 8080)
+    run.run("docker", "submission-foo-20260908-120000")
+    _fly_to_offboard(run)
+
+    assert calls, "docker run was never spawned"
+    argv = calls[0]
+    assert "--gpus" not in argv
+    assert argv[:5] == ["docker", "run", "--rm", "--network", "host"]
     assert run.state == "running"
 
 

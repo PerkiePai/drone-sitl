@@ -69,6 +69,21 @@ async function uploadDocker(file) {
   await refreshDockerList(image_tag);
 }
 
+async function pullDocker(ref) {
+  el('a-build-log').textContent = 'pulling...';
+  const r = await fetch(`/agent/pull-docker?ref=${encodeURIComponent(ref)}`,
+    { method: 'POST' });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    el('a-state').textContent = `pull failed: ${body.detail || r.statusText}`;
+    if (body.log) el('a-build-log').textContent = body.log.join('\n');
+    return;
+  }
+  const { image_tag } = await r.json();
+  activeKind = 'docker';
+  await refreshDockerList(image_tag);
+}
+
 export function initAgent() {
   refreshList();
   refreshDockerList();
@@ -79,6 +94,10 @@ export function initAgent() {
   el('a-docker-upload').addEventListener('change', e => {
     if (e.target.files[0]) uploadDocker(e.target.files[0]);
     e.target.value = '';
+  });
+  el('a-docker-pull').addEventListener('click', () => {
+    const ref = el('a-docker-ref').value.trim();
+    if (ref) pullDocker(ref);
   });
   el('a-file').addEventListener('change', () => { activeKind = 'script'; });
   el('a-docker-image').addEventListener('change', () => { activeKind = 'docker'; });

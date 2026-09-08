@@ -61,6 +61,10 @@
       <label class="a-file-btn">upload bundle<input id="a-docker-upload" type="file" accept=".tar"></label>
     </div>
     <div class="a-row">
+      <input id="a-docker-ref" type="text" placeholder="ghcr.io/user/image:tag">
+      <button id="a-docker-pull">pull</button>
+    </div>
+    <div class="a-row">
       <button id="a-run" disabled>RUN</button>
       <button id="a-stop" disabled>STOP</button>
       <span id="a-state">idle</span>

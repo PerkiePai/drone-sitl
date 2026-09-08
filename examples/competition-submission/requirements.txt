@@ -1,0 +1,4 @@
+# Extra dependencies full_flight_agent.py needs on top of competition-base.
+# single_flight.py needs none of these (no detection, no camera).
+torch>=2.1
+ultralytics>=8.1

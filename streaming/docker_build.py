@@ -87,6 +87,55 @@ class DockerBuild:
         finally:
             shutil.rmtree(ctx, ignore_errors=True)
 
+    async def pull(self, image_ref, stem):
+        """docker pull image_ref, then tag it submission-<stem>-<ts> so
+        it's indistinguishable from a locally-built image everywhere
+        downstream (list_images(), AgentRun, the docker-image dropdown).
+        Returns (ok, image_tag | None)."""
+        self.state = "building"
+        self._log.clear()
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        image_tag = f"{IMAGE_PREFIX}{stem}-{ts}"
+        try:
+            self._note(f"pulling {image_ref} ...")
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "pull", image_ref,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+            async for line in proc.stdout:
+                self._note(line.decode(errors="replace").rstrip())
+            code = await proc.wait()
+            if code != 0:
+                self.state = "error"
+                self._note(f"docker pull exited {code}")
+                return False, None
+
+            self._note(f"tagging as {image_tag}")
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "tag", image_ref, image_tag,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+            async for line in proc.stdout:
+                self._note(line.decode(errors="replace").rstrip())
+            code = await proc.wait()
+            if code != 0:
+                self.state = "error"
+                self._note(f"docker tag exited {code}")
+                return False, None
+
+            self.state = "built"
+            self.image_tag = image_tag
+            self._note(f"pulled and tagged {image_tag}")
+            return True, image_tag
+        except FileNotFoundError:
+            self.state = "error"
+            self._note("docker not found -- is it installed on this host?")
+            return False, None
+        except Exception as exc:                      # noqa: BLE001
+            self.state = "error"
+            self._note(f"pull failed: {exc!r}")
+            return False, None
+
 
 async def list_images():
     """Built submission images, newest first: [{"tag":..., "created_at":...}]."""

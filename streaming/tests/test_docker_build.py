@@ -166,3 +166,66 @@ def test_list_images_parses_docker_output(monkeypatch):
         assert images[1]["tag"] == "submission-a-1:latest"
 
     asyncio.run(run())
+
+
+def test_pull_succeeds_tags_and_sets_state_built(monkeypatch):
+    calls = []
+
+    async def fake_exec(*args, **kwargs):
+        calls.append(args)
+        if args[1] == "pull":
+            return FakeProc(["latest: Pulling from user/image", "Status: Downloaded"], 0)
+        return FakeProc([], 0)   # docker tag
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    async def run():
+        db = docker_build.DockerBuild()
+        ok, image_tag = await db.pull("ghcr.io/user/image:latest", "myagent")
+        assert ok is True
+        assert image_tag.startswith("submission-myagent-")
+        assert db.state == "built"
+        assert db.image_tag == image_tag
+        assert calls[0] == ("docker", "pull", "ghcr.io/user/image:latest")
+        assert calls[1] == ("docker", "tag", "ghcr.io/user/image:latest", image_tag)
+
+    asyncio.run(run())
+
+
+def test_pull_failure_sets_state_error_and_does_not_tag(monkeypatch):
+    calls = []
+
+    async def fake_exec(*args, **kwargs):
+        calls.append(args)
+        return FakeProc(["Error response from daemon: pull access denied"], 1)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    async def run():
+        db = docker_build.DockerBuild()
+        ok, image_tag = await db.pull("ghcr.io/user/private:latest", "myagent")
+        assert ok is False
+        assert image_tag is None
+        assert db.state == "error"
+        assert len(calls) == 1, "must not attempt docker tag after a failed pull"
+        assert any("exited 1" in line for line in db.snapshot()["log"])
+
+    asyncio.run(run())
+
+
+def test_pull_tag_failure_sets_state_error(monkeypatch):
+    async def fake_exec(*args, **kwargs):
+        if args[1] == "pull":
+            return FakeProc(["Status: Downloaded"], 0)
+        return FakeProc(["Error: No such image"], 1)   # docker tag fails
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    async def run():
+        db = docker_build.DockerBuild()
+        ok, image_tag = await db.pull("ghcr.io/user/image:latest", "myagent")
+        assert ok is False
+        assert image_tag is None
+        assert db.state == "error"
+
+    asyncio.run(run())

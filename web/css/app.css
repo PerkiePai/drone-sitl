@@ -83,7 +83,7 @@ button:active:not(:disabled) { transform:translateY(1px); filter:brightness(1.5)
                 background:#222; color:#eee; font-size:13px; }
 #agent button:disabled { opacity:.35; }
 #agent #a-state { color:#9cf; }
-#a-log { margin-top:6px; height:9em; overflow-y:auto; white-space:pre-wrap;
+#a-log, #a-build-log { margin-top:6px; height:9em; overflow-y:auto; white-space:pre-wrap;
          background:#111; color:#cde; padding:6px; border-radius:6px;
          font:12px/1.35 ui-monospace, Menlo, monospace; }
-#a-log:empty { display:none; }
+#a-log:empty, #a-build-log:empty { display:none; }

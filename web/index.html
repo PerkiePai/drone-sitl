@@ -55,10 +55,17 @@
     <div class="a-row">
       <select id="a-file" title="uploaded scripts"></select>
       <label class="a-file-btn">upload<input id="a-upload" type="file" accept=".py"></label>
-      <button id="a-run" disabled>RUN SCRIPT</button>
+    </div>
+    <div class="a-row">
+      <select id="a-docker-image" title="built docker images"></select>
+      <label class="a-file-btn">upload bundle<input id="a-docker-upload" type="file" accept=".tar"></label>
+    </div>
+    <div class="a-row">
+      <button id="a-run" disabled>RUN</button>
       <button id="a-stop" disabled>STOP</button>
       <span id="a-state">idle</span>
     </div>
+    <pre id="a-build-log"></pre>
     <pre id="a-log"></pre>
   </div>
 <script src="/vendor/leaflet.js"></script>

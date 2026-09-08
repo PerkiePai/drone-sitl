@@ -400,8 +400,16 @@ class AgentRun:
             return
         self._note(f"stop: {why}")
         if self._container_name:
-            subprocess.run(["docker", "stop", self._container_name],
-                           capture_output=True, timeout=5)
+            # -t 3: don't wait out docker's default 10s SIGTERM grace period
+            # -- agent_runner.py has no SIGTERM handler, so it's always
+            # killed anyway. A stop() that raises here must still reach
+            # state = "stopped" below, or tick() later mistakes the
+            # eventual SIGKILL exit for a real error (caught live).
+            try:
+                subprocess.run(["docker", "stop", "-t", "3", self._container_name],
+                               capture_output=True, timeout=8)
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                self._note(f"docker stop did not confirm in time: {exc!r}")
         p = self._proc
         if p and p.poll() is None:
             p.terminate()

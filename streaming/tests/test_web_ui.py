@@ -456,6 +456,38 @@ def test_agent_run_stop_issues_docker_stop_for_docker_kind(monkeypatch):
     assert run.state == "stopped"
 
 
+def test_agent_run_stop_reaches_stopped_even_if_docker_stop_times_out(monkeypatch):
+    """Caught live: docker stop's default 10s grace period can outlast a
+    short subprocess.run timeout, raising TimeoutExpired -- that must not
+    crash stop() before it reaches state = "stopped", or tick() later
+    mistakes the eventual SIGKILL exit for a real error."""
+    js = _load_server()
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            self.stdout = iter([])
+        def poll(self):
+            return None
+        def terminate(self):
+            pass
+        def wait(self, timeout=None):
+            pass
+
+    def fake_run(argv, **kwargs):
+        raise js.subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(js.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(js.subprocess, "run", fake_run)
+
+    run = js.AgentRun(_FakeLoopThread(), "python", "127.0.0.1", 8090, 8080)
+    run.run("docker", "submission-foo-20260908-120000")
+    _fly_to_offboard(run)
+
+    run.stop("test")
+
+    assert run.state == "stopped"
+
+
 # --- /agent/control socket ---------------------------------------------
 
 def test_agent_control_socket_sends_arena_then_applies_a_flight(server):

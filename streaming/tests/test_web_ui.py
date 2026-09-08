@@ -321,6 +321,109 @@ def test_agent_docker_list_returns_json_list(server):
     assert "images" in body and isinstance(body["images"], list)
 
 
+# --- AgentRun kind=docker (unit-level, no live server) -------------------
+
+def _load_server():
+    spec = importlib.util.spec_from_file_location(
+        "joystick_server", os.path.join(ROOT, "joystick-server.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class _FakeAgentControl:
+    def clear(self):
+        pass
+
+
+class _FakeLoopThread:
+    """Just enough of SetpointLoop's surface for AgentRun's preflight state
+    machine: .telemetry()/.submit(), plus .agent_control/.agent_camera."""
+    def __init__(self):
+        self._telem = {"connected": True, "armed": False, "alt_m": 0.0,
+                       "vz": 9.0, "ready_for_offboard": False, "mode": None}
+        self.submitted = []
+        self.agent_control = _FakeAgentControl()
+        self.agent_camera = None
+
+    def telemetry(self):
+        return dict(self._telem)
+
+    def submit(self, name):
+        self.submitted.append(name)
+
+
+def _fly_to_offboard(run):
+    """Drive AgentRun's arm->takeoff->offboard preflight to completion by
+    ticking it and advancing the fake telemetry, same sequence
+    _advance_preflight checks for."""
+    run.tick()
+    run.loop_thread._telem["armed"] = True
+    run.tick()
+    run.loop_thread._telem.update(alt_m=5.0, vz=0.0, ready_for_offboard=True)
+    run.tick()
+    run.loop_thread._telem["mode"] = "OFFBOARD"
+    run.tick()
+
+
+def test_agent_run_docker_spawns_docker_run_with_network_host_and_name(monkeypatch):
+    js = _load_server()
+    calls = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            calls.append(argv)
+            self.stdout = iter([])
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(js.subprocess, "Popen", FakePopen)
+
+    run = js.AgentRun(_FakeLoopThread(), "python", "127.0.0.1", 8090, 8080)
+    run.run("docker", "submission-foo-20260908-120000")
+    _fly_to_offboard(run)
+
+    assert calls, "docker run was never spawned"
+    argv = calls[0]
+    assert argv[:6] == ["docker", "run", "--rm", "--network", "host", "--gpus"]
+    assert "submission-foo-20260908-120000" in argv
+    assert "--name" in argv
+    assert run.state == "running"
+
+
+def test_agent_run_stop_issues_docker_stop_for_docker_kind(monkeypatch):
+    js = _load_server()
+    stop_calls = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            self.stdout = iter([])
+        def poll(self):
+            return None
+        def terminate(self):
+            pass
+        def wait(self, timeout=None):
+            pass
+
+    def fake_run(argv, **kwargs):
+        stop_calls.append(argv)
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(js.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(js.subprocess, "run", fake_run)
+
+    run = js.AgentRun(_FakeLoopThread(), "python", "127.0.0.1", 8090, 8080)
+    run.run("docker", "submission-foo-20260908-120000")
+    _fly_to_offboard(run)
+
+    run.stop("test")
+
+    assert any(a[:2] == ["docker", "stop"] for a in stop_calls)
+    assert run.state == "stopped"
+
+
 # --- /agent/control socket ---------------------------------------------
 
 def test_agent_control_socket_sends_arena_then_applies_a_flight(server):
@@ -387,7 +490,7 @@ def test_ws_telemetry_carries_an_agent_block_from_the_start(server):
     async def exercise():
         async with websockets.connect(f"ws://127.0.0.1:{WEB_PORT}/ws") as ws:
             t = await _telem_where(ws, lambda t: "agent" in t)
-            assert t["agent"] == {"state": "idle", "file": None,
+            assert t["agent"] == {"state": "idle", "kind": None, "file": None,
                                   "camera": None, "log": []}
 
     asyncio.run(exercise())

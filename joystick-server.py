@@ -349,8 +349,10 @@ class AgentRun:
         self.python_exe = python_exe
         self.host, self.port, self.video_port = host, port, video_port
         self.state = "idle"        # idle | arming | running | stopped | error
+        self.kind = None           # script | docker
         self.file = None
         self._proc = None
+        self._container_name = None
         self._phase = None         # arm | takeoff | offboard  (while arming)
         self._log = collections.deque(maxlen=40)
         self._lock = threading.Lock()
@@ -358,12 +360,11 @@ class AgentRun:
     def snapshot(self):
         with self._lock:
             running = self.state in ("arming", "running")
-            return {"state": self.state, "file": self.file,
+            return {"state": self.state, "kind": self.kind, "file": self.file,
                     "camera": self.loop_thread.agent_camera if running else None,
                     "log": list(self._log)}
 
-    def run(self, filename):
-        path = os.path.join(AGENT_UPLOAD_DIR, os.path.basename(filename or ""))
+    def run(self, kind, identifier):
         if not self.loop_thread.telemetry().get("connected"):
             self._note("RUN refused: no MAVLink link")
             self.state = "error"
@@ -371,20 +372,35 @@ class AgentRun:
         if self.state in ("arming", "running"):
             self._note("RUN refused: an agent is already running -- STOP first")
             return
-        if not filename or not os.path.isfile(path):
-            self._note(f"RUN refused: {filename!r} not found")
+        if kind == "script":
+            path = os.path.join(AGENT_UPLOAD_DIR, os.path.basename(identifier or ""))
+            if not identifier or not os.path.isfile(path):
+                self._note(f"RUN refused: {identifier!r} not found")
+                self.state = "error"
+                return
+        elif kind == "docker":
+            if not identifier:
+                self._note("RUN refused: no docker image selected")
+                self.state = "error"
+                return
+        else:
+            self._note(f"RUN refused: unknown kind {kind!r}")
             self.state = "error"
             return
-        self.file = filename
+        self.kind = kind
+        self.file = identifier
         self.state = "arming"
         self._phase = "arm"
-        self._note(f"arming for {filename}")
+        self._note(f"arming for {identifier}")
         self.loop_thread.submit("arm")
 
     def stop(self, why="stopped"):
         if self.state not in ("arming", "running"):
             return
         self._note(f"stop: {why}")
+        if self._container_name:
+            subprocess.run(["docker", "stop", self._container_name],
+                           capture_output=True, timeout=5)
         p = self._proc
         if p and p.poll() is None:
             p.terminate()
@@ -393,6 +409,7 @@ class AgentRun:
             except subprocess.TimeoutExpired:
                 p.kill()
         self._proc = None
+        self._container_name = None
         self.loop_thread.submit("mission_clear")
         self.loop_thread.agent_control.clear()
         self.state = "stopped"
@@ -427,13 +444,22 @@ class AgentRun:
             self._spawn()
 
     def _spawn(self):
-        path = os.path.join(AGENT_UPLOAD_DIR, os.path.basename(self.file))
-        self._proc = subprocess.Popen(
-            [self.python_exe, "-u", os.path.join(ROOT, "agent_runner.py"),
-             "--file", path, "--host", self.host, "--port", str(self.port),
-             "--video-port", str(self.video_port)],
-            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1)
+        if self.kind == "docker":
+            self._container_name = f"submission-run-{time.strftime('%Y%m%d-%H%M%S')}"
+            self._proc = subprocess.Popen(
+                ["docker", "run", "--rm", "--network", "host", "--gpus", "all",
+                 "--name", self._container_name, self.file],
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1)
+        else:
+            self._container_name = None
+            path = os.path.join(AGENT_UPLOAD_DIR, os.path.basename(self.file))
+            self._proc = subprocess.Popen(
+                [self.python_exe, "-u", os.path.join(ROOT, "agent_runner.py"),
+                 "--file", path, "--host", self.host, "--port", str(self.port),
+                 "--video-port", str(self.video_port)],
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1)
         threading.Thread(target=self._drain_child, daemon=True).start()
         self.state = "running"
         self._note("agent running")
@@ -616,7 +642,8 @@ def build_app(loop_thread, state, video_port, mission_speed, agent_run,
                 elif kind == "agent":
                     action = msg.get("action")
                     if action == "run":
-                        agent_run.run(msg.get("file", ""))
+                        agent_run.run(msg.get("kind", "script"),
+                                      msg.get("identifier", ""))
                     elif action == "stop":
                         agent_run.stop("stop button")
                 elif kind == "cmd":

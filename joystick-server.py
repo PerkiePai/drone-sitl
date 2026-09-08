@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.join(ROOT, "streaming"))
 import offboard  # noqa: E402
 import waypoints  # noqa: E402
 import agent_control as agentctl  # noqa: E402
+import docker_build  # noqa: E402
 
 # Uploaded control scripts land here; agent_runner.py is spawned against them.
 # A module constant, not a flag -- the server still runs with a bare
@@ -47,6 +48,12 @@ AGENT_FLIGHT_SPEED = 5.0
 AGENT_FLIGHT_YAW_RATE_DPS = offboard.DEFAULT_YAW_RATE_DPS
 os.makedirs(AGENT_UPLOAD_DIR, exist_ok=True)
 
+# Docker bundle uploads -- see
+# docs/superpowers/specs/2026-09-08-docker-submission-website-integration-design.md
+AGENT_DOCKER_UPLOAD_DIR = os.path.join(ROOT, "logs", "docker-agents")
+AGENT_DOCKER_MAX_BYTES = 200 * 1024 * 1024
+os.makedirs(AGENT_DOCKER_UPLOAD_DIR, exist_ok=True)
+
 # sim/hil_tap.py (a separate, optional diagnostic process -- see
 # sim/HIL_TAP.md) polls this file for freeze/thaw. It is NOT this server's
 # job to run the tap or know whether it is up; a write here is a no-op if
@@ -61,6 +68,16 @@ HIL_STATUS_STALE_S = 3.0   # > a few --interval ticks; a genuine freeze holds ts
 def _safe_agent_name(name):
     """A base filename ending .py with no path parts, or None."""
     if not name or not name.endswith(".py"):
+        return None
+    if name != os.path.basename(name) or "/" in name or "\\" in name \
+            or ".." in name:
+        return None
+    return name
+
+
+def _safe_docker_bundle_name(name):
+    """A base filename ending .tar with no path parts, or None."""
+    if not name or not name.endswith(".tar"):
         return None
     if name != os.path.basename(name) or "/" in name or "\\" in name \
             or ".." in name:
@@ -431,7 +448,8 @@ class AgentRun:
         print(f">>> agent: {msg}")
 
 
-async def _push_telemetry(sock, loop_thread, agent_run=None, hz=5.0):
+async def _push_telemetry(sock, loop_thread, agent_run=None,
+                          agent_docker_build=None, hz=5.0):
     try:
         while True:
             t = loop_thread.telemetry()
@@ -441,13 +459,16 @@ async def _push_telemetry(sock, loop_thread, agent_run=None, hz=5.0):
                 # pusher passes agent_run=None.
                 agent_run.tick()
                 t["agent"] = agent_run.snapshot()
+            if agent_docker_build is not None:
+                t["docker_build"] = agent_docker_build.snapshot()
             await sock.send_text(json.dumps(t))
             await asyncio.sleep(1.0 / hz)
     except Exception:
         pass          # socket closed; the /ws handler cleans up
 
 
-def build_app(loop_thread, state, video_port, mission_speed, agent_run):
+def build_app(loop_thread, state, video_port, mission_speed, agent_run,
+              agent_docker_build):
     from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
     from fastapi.responses import JSONResponse
     from fastapi.staticfiles import StaticFiles
@@ -538,12 +559,42 @@ def build_app(loop_thread, state, video_port, mission_speed, agent_run):
         entries.sort(key=lambda e: e.stat().st_mtime, reverse=True)
         return JSONResponse({"files": [e.name for e in entries]})
 
+    @app.post("/agent/upload-docker")
+    async def agent_upload_docker(request: Request):
+        # Raw body, not multipart -- same reasoning as /agent/upload.
+        name = request.query_params.get("name", "")
+        safe = _safe_docker_bundle_name(name)
+        if safe is None:
+            return JSONResponse({"detail": "name must be a bare *.tar filename"},
+                                status_code=400)
+        body = await request.body()
+        if len(body) > AGENT_DOCKER_MAX_BYTES:
+            return JSONResponse(
+                {"detail": f"bundle over {AGENT_DOCKER_MAX_BYTES} bytes"},
+                status_code=400)
+        stem = safe[:-4]
+        stored = f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}.tar"
+        tar_path = os.path.join(AGENT_DOCKER_UPLOAD_DIR, stored)
+        with open(tar_path, "wb") as fh:
+            fh.write(body)
+        ok, image_tag = await agent_docker_build.build(tar_path, stem)
+        if not ok:
+            return JSONResponse(
+                {"detail": "build failed", "log": agent_docker_build.snapshot()["log"]},
+                status_code=400)
+        return JSONResponse({"stored": stored, "image_tag": image_tag})
+
+    @app.get("/agent/docker-list")
+    async def agent_docker_list():
+        images = await docker_build.list_images()
+        return JSONResponse({"images": images})
+
     @app.websocket("/ws")
     async def ws(sock: WebSocket):
         await sock.accept()
         state.clear()
         pusher = asyncio.create_task(
-            _push_telemetry(sock, loop_thread, agent_run))
+            _push_telemetry(sock, loop_thread, agent_run, agent_docker_build))
         try:
             while True:
                 msg = json.loads(await sock.receive_text())
@@ -681,6 +732,7 @@ def main():
 
     agent_run = AgentRun(loop_thread, sys.executable, "127.0.0.1", args.port,
                          args.video_port)
+    agent_docker_build = docker_build.DockerBuild()
 
     print(f">>> MAVLink offboard link: {args.mavlink}")
     print(f">>> setpoint loop at {args.rate:.0f} Hz "
@@ -688,7 +740,7 @@ def main():
           f"{args.yaw_rate:.0f} deg/s turn)")
     print(f">>> open http://<box-ip>:{args.port}/")
     uvicorn.run(build_app(loop_thread, state, args.video_port,
-                          args.mission_speed, agent_run),
+                          args.mission_speed, agent_run, agent_docker_build),
                 host="0.0.0.0", port=args.port, log_level="warning")
 
 

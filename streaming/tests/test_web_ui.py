@@ -260,6 +260,67 @@ def test_agent_upload_rejects_an_oversize_body(server):
         assert e.code == 400
 
 
+# --- docker upload / list -----------------------------------------------
+
+def _make_tar_bytes(with_dockerfile=True):
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        if with_dockerfile:
+            data = b"FROM busybox\n"
+            info = tarfile.TarInfo(name="Dockerfile")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def test_docker_upload_rejects_non_tar_name(server):
+    import urllib.request
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{WEB_PORT}/agent/upload-docker?name=bundle.zip",
+        data=_make_tar_bytes(), method="POST")
+    try:
+        urllib.request.urlopen(req)
+        assert False, "expected 400"
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+
+
+def test_docker_upload_rejects_oversize_body(server):
+    import urllib.request
+    big = b"x" * (200 * 1024 * 1024 + 10)   # over AGENT_DOCKER_MAX_BYTES
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{WEB_PORT}/agent/upload-docker?name=bundle.tar",
+        data=big, method="POST")
+    try:
+        urllib.request.urlopen(req)
+        assert False, "expected 400"
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+
+
+def test_docker_upload_without_dockerfile_in_bundle_fails(server):
+    import urllib.request
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{WEB_PORT}/agent/upload-docker?name=bundle.tar",
+        data=_make_tar_bytes(with_dockerfile=False), method="POST")
+    try:
+        urllib.request.urlopen(req)
+        assert False, "expected 400"
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+        body = json.loads(e.read())
+        assert "Dockerfile" in body["detail"] or "log" in body
+
+
+def test_agent_docker_list_returns_json_list(server):
+    import urllib.request
+    with urllib.request.urlopen(f"http://127.0.0.1:{WEB_PORT}/agent/docker-list") as r:
+        body = json.loads(r.read())
+    assert "images" in body and isinstance(body["images"], list)
+
+
 # --- /agent/control socket ---------------------------------------------
 
 def test_agent_control_socket_sends_arena_then_applies_a_flight(server):

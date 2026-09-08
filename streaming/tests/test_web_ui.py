@@ -321,6 +321,32 @@ def test_agent_docker_list_returns_json_list(server):
     assert "images" in body and isinstance(body["images"], list)
 
 
+def test_pull_docker_rejects_empty_ref(server):
+    import urllib.request
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{WEB_PORT}/agent/pull-docker?ref=",
+        data=b"", method="POST")
+    try:
+        urllib.request.urlopen(req)
+        assert False, "expected 400"
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+
+
+def test_pull_docker_rejects_ref_with_whitespace(server):
+    import urllib.parse
+    import urllib.request
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{WEB_PORT}/agent/pull-docker?ref="
+        + urllib.parse.quote("ghcr.io/user/image with spaces:latest"),
+        data=b"", method="POST")
+    try:
+        urllib.request.urlopen(req)
+        assert False, "expected 400"
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+
+
 # --- AgentRun kind=docker (unit-level, no live server) -------------------
 
 def _load_server():

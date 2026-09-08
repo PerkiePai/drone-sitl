@@ -86,6 +86,18 @@ def _safe_docker_bundle_name(name):
     return name
 
 
+def _safe_image_ref(ref):
+    """A non-empty, single-line, reasonably-sized image reference, or
+    None. Not a full Docker reference-spec validator -- Docker itself
+    rejects a genuinely malformed ref; this just guards the obviously-bad
+    cases (empty, pasted whitespace) before spawning a subprocess."""
+    if not ref or len(ref) > 512:
+        return None
+    if ref != ref.strip() or any(c.isspace() for c in ref):
+        return None
+    return ref
+
+
 class SetpointLoop(threading.Thread):
     """Sole owner of the MAVLink connection.
 
@@ -630,6 +642,23 @@ def build_app(loop_thread, state, video_port, mission_speed, agent_run,
     async def agent_docker_list():
         images = await docker_build.list_images()
         return JSONResponse({"images": images})
+
+    @app.post("/agent/pull-docker")
+    async def agent_pull_docker(request: Request):
+        ref = request.query_params.get("ref", "")
+        safe = _safe_image_ref(ref)
+        if safe is None:
+            return JSONResponse({"detail": "ref must be a non-empty, single-line image reference"},
+                                status_code=400)
+        # Same stem-from-name shape /agent/upload-docker uses, just derived
+        # from the last path segment of the ref instead of a filename.
+        stem = safe.rsplit("/", 1)[-1].split(":")[0].split("@")[0] or "pulled"
+        ok, image_tag = await agent_docker_build.pull(safe, stem)
+        if not ok:
+            return JSONResponse(
+                {"detail": "pull failed", "log": agent_docker_build.snapshot()["log"]},
+                status_code=400)
+        return JSONResponse({"image_tag": image_tag})
 
     @app.websocket("/ws")
     async def ws(sock: WebSocket):

@@ -1,6 +1,7 @@
-"""full_flight_agent.py -- REFERENCE EXAMPLE, not runnable against this
-repo's sandbox today (see single_flight.py's docstring for why). Flies a
-toy lawnmower sweep entirely on flight() -- deliberately not Route, which
+"""full_flight_agent.py -- runs against competition/ as it stands, but
+unlike single_flight.py it also needs detection.py's deps (torch,
+ultralytics) and your own weights.pt; that is what the Dockerfile is for.
+Flies a toy lawnmower sweep entirely on flight() -- deliberately not Route, which
 is still unresolved, see
 docs/superpowers/specs/2026-09-07-competition-flight-primitive-design.md's
 open Route-vs-ATE question. Integrates a detection pipeline: nadir camera

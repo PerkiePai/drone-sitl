@@ -1,8 +1,7 @@
-"""single_flight.py -- REFERENCE EXAMPLE, not runnable against this repo's
-sandbox today (flight() isn't implemented in competition/commands.py yet
--- see the design doc's caveat). Shows the smallest possible flight()
-script: hover while acquiring position, fly to a fixed offset waypoint,
-then spin 360 in place.
+"""single_flight.py -- the smallest possible flight() script: hover while
+acquiring position, fly to a fixed offset waypoint, then spin 360 in
+place. Runs against competition/ as it stands; needs no deps beyond the
+package itself.
 
 flight(left_x, left_y, right_x, right_y), each in [-1, 1]:
     left_y  = thrust   (+1 = full climb)

@@ -1,10 +1,17 @@
 # Competitor submission examples
 
-**Status: reference material, not runnable today.** `flight()` isn't
-implemented in this repo's `competition` package yet — these examples are
-written against the *target* design in
+**Status: these run against the `competition` package today.** `flight()`,
+`Route`, `Command` and the `Agent` callbacks are all implemented — see
+`competition/commands.py` and `competition/__init__.py`. `single_flight.py`
+needs nothing beyond the package; `full_flight_agent.py` additionally needs
+`detection.py`'s deps (`torch`, `ultralytics`) and your own `weights.pt`,
+which is what the Dockerfile is for.
+
+Still open: the *design* in
 `docs/superpowers/specs/2026-09-07-competition-flight-primitive-design.md`
-(currently **PAUSED**, see its ⚠ section). Full packaging rationale is in
+is **PAUSED** on the Route-vs-ATE conflict (see its ⚠ section), so `Route`'s
+role may still change. `flight()` itself is settled. Full packaging
+rationale is in
 `docs/superpowers/specs/2026-09-08-competitor-submission-docker-design.md`.
 This repo is a sandbox; the real competition runs a separate, custom FC —
 see the project memory `uav-competition-vs-sitl-repo`.

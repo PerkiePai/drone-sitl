@@ -1,0 +1,608 @@
+{
+  "agent_runner.py": {
+    "mtime": 1787900495.1168823,
+    "seen": 1789025179.9049282,
+    "ast_hash": "06e4dc8607d52896446b1a157b27d3ed",
+    "semantic_hash": "06e4dc8607d52896446b1a157b27d3ed"
+  },
+  "autopilot_poc.py": {
+    "mtime": 1787900495.1169395,
+    "seen": 1789025179.904931,
+    "ast_hash": "84390c35489657a98a2e3b88dc9479e9",
+    "semantic_hash": "84390c35489657a98a2e3b88dc9479e9"
+  },
+  "competition/__init__.py": {
+    "mtime": 1788862291.0994015,
+    "seen": 1789025179.9049323,
+    "ast_hash": "0088966af6dddd2d57c833956a31b558",
+    "semantic_hash": "0088966af6dddd2d57c833956a31b558"
+  },
+  "competition/agent.py": {
+    "mtime": 1788862292.1791089,
+    "seen": 1789025179.9049332,
+    "ast_hash": "fee97ccb43b6574503660066feb0b309",
+    "semantic_hash": "fee97ccb43b6574503660066feb0b309"
+  },
+  "competition/commands.py": {
+    "mtime": 1788862287.0053709,
+    "seen": 1789025179.9049337,
+    "ast_hash": "000faa420fd29df7f42843a79992e9e6",
+    "semantic_hash": "000faa420fd29df7f42843a79992e9e6"
+  },
+  "competition/frames.py": {
+    "mtime": 1787900495.1170983,
+    "seen": 1789025179.904934,
+    "ast_hash": "709f4eb5a4e589d318fd1cebd296d9ce",
+    "semantic_hash": "709f4eb5a4e589d318fd1cebd296d9ce"
+  },
+  "competition/harness.py": {
+    "mtime": 1788862340.3760135,
+    "seen": 1789025179.9049346,
+    "ast_hash": "782da44de85468f90a28cbf06828ccd9",
+    "semantic_hash": "782da44de85468f90a28cbf06828ccd9"
+  },
+  "competition/state.py": {
+    "mtime": 1787900495.1171885,
+    "seen": 1789025179.904935,
+    "ast_hash": "3248d24b3c70519697ee745f58a0435e",
+    "semantic_hash": "3248d24b3c70519697ee745f58a0435e"
+  },
+  "competition/tests/__init__.py": {
+    "mtime": 1787900495.1171885,
+    "seen": 1789025179.9049351,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "competition/tests/test_commands.py": {
+    "mtime": 1788862267.0427468,
+    "seen": 1789025179.9049356,
+    "ast_hash": "9d4531ad415e311c287cf3d9b9035e71",
+    "semantic_hash": "9d4531ad415e311c287cf3d9b9035e71"
+  },
+  "competition/tests/test_examples.py": {
+    "mtime": 1788862555.5130618,
+    "seen": 1789025179.9049358,
+    "ast_hash": "e49ce24fc90964279c152d691b57ce5e",
+    "semantic_hash": "e49ce24fc90964279c152d691b57ce5e"
+  },
+  "competition/tests/test_frames.py": {
+    "mtime": 1787900495.117335,
+    "seen": 1789025179.9049366,
+    "ast_hash": "ed51bbf12a1cc8d2e1c7204475955d3f",
+    "semantic_hash": "ed51bbf12a1cc8d2e1c7204475955d3f"
+  },
+  "competition/tests/test_harness.py": {
+    "mtime": 1788862325.3264859,
+    "seen": 1789025179.904937,
+    "ast_hash": "b46f0b3aa1a40cd61f3c011bd02a0e4c",
+    "semantic_hash": "b46f0b3aa1a40cd61f3c011bd02a0e4c"
+  },
+  "competition/tests/test_state.py": {
+    "mtime": 1787900495.1174304,
+    "seen": 1789025179.9049373,
+    "ast_hash": "047e5230921343c23a160fde4574075a",
+    "semantic_hash": "047e5230921343c23a160fde4574075a"
+  },
+  "docker/mock-detection-competitor/detection.py": {
+    "mtime": 1788863849.8142464,
+    "seen": 1789025179.9049375,
+    "ast_hash": "76f0b99d2ae1b55c9548563450d5be51",
+    "semantic_hash": "76f0b99d2ae1b55c9548563450d5be51"
+  },
+  "drone_setup_px4_cesium.py": {
+    "mtime": 1788787941.7480223,
+    "seen": 1789025179.904938,
+    "ast_hash": "358d91548cd28e55e1731cb6b36a4697",
+    "semantic_hash": "358d91548cd28e55e1731cb6b36a4697"
+  },
+  "examples/camera.py": {
+    "mtime": 1788862539.099163,
+    "seen": 1789025179.9049382,
+    "ast_hash": "1488720cbded7f7a044d1a8929f7572b",
+    "semantic_hash": "1488720cbded7f7a044d1a8929f7572b"
+  },
+  "examples/competition-submission/detection.py": {
+    "mtime": 1788861366.2305202,
+    "seen": 1789025179.9049387,
+    "ast_hash": "5db7e4fa41eb34e7a8bde5e6cf510056",
+    "semantic_hash": "5db7e4fa41eb34e7a8bde5e6cf510056"
+  },
+  "examples/competition-submission/full_flight_agent.py": {
+    "mtime": 1788861394.6044762,
+    "seen": 1789025179.904939,
+    "ast_hash": "0491326d1d9ad5c021a1077746748865",
+    "semantic_hash": "0491326d1d9ad5c021a1077746748865"
+  },
+  "examples/competition-submission/single_flight.py": {
+    "mtime": 1788861379.8259475,
+    "seen": 1789025179.9049392,
+    "ast_hash": "25488fa802d78087a5c058002fab2532",
+    "semantic_hash": "25488fa802d78087a5c058002fab2532"
+  },
+  "examples/flight.py": {
+    "mtime": 1788862534.9434998,
+    "seen": 1789025179.9049394,
+    "ast_hash": "73bcf7311089f2c47d9c7a5c5b41d695",
+    "semantic_hash": "73bcf7311089f2c47d9c7a5c5b41d695"
+  },
+  "examples/full_sortie.py": {
+    "mtime": 1788862552.5699008,
+    "seen": 1789025179.9049401,
+    "ast_hash": "26c0b89315561c8fc23b3c1e06615753",
+    "semantic_hash": "26c0b89315561c8fc23b3c1e06615753"
+  },
+  "examples/route.py": {
+    "mtime": 1788862537.3770688,
+    "seen": 1789025179.9049406,
+    "ast_hash": "8f92a228c07d2f99f4398818541214e7",
+    "semantic_hash": "8f92a228c07d2f99f4398818541214e7"
+  },
+  "flow_odometry.py": {
+    "mtime": 1787900495.118972,
+    "seen": 1789025179.9049408,
+    "ast_hash": "2b585f2c0cf808362e965a608624e7dc",
+    "semantic_hash": "2b585f2c0cf808362e965a608624e7dc"
+  },
+  "joystick-server-descriptive.py": {
+    "mtime": 1788862475.725641,
+    "seen": 1789025179.904941,
+    "ast_hash": "30d97432808d639cf11ebffd3fbf4776",
+    "semantic_hash": "30d97432808d639cf11ebffd3fbf4776"
+  },
+  "joystick-server.py": {
+    "mtime": 1788871597.3935966,
+    "seen": 1789025179.9049416,
+    "ast_hash": "052f1233f70118c7b8d069d3e01aa5af",
+    "semantic_hash": "052f1233f70118c7b8d069d3e01aa5af"
+  },
+  "pipeline.py": {
+    "mtime": 1783933728.7786615,
+    "seen": 1789025179.9049418,
+    "ast_hash": "76cd51ee2658e17c752417f784d3caa5",
+    "semantic_hash": "76cd51ee2658e17c752417f784d3caa5"
+  },
+  "sim/bootstrap.py": {
+    "mtime": 1787900495.1192257,
+    "seen": 1789025179.904942,
+    "ast_hash": "a70bcf905dcb2c015da035a65cfecfea",
+    "semantic_hash": "a70bcf905dcb2c015da035a65cfecfea"
+  },
+  "sim/hil_tap.py": {
+    "mtime": 1788794309.4826784,
+    "seen": 1789025179.9049425,
+    "ast_hash": "e6e6c2c44740a353c788ab82661ac866",
+    "semantic_hash": "e6e6c2c44740a353c788ab82661ac866"
+  },
+  "sim/launch-sitl.sh": {
+    "mtime": 1788785983.718397,
+    "seen": 1789025179.9049428,
+    "ast_hash": "8376a45b32e388853f0cf3d2b01e7ec1",
+    "semantic_hash": "8376a45b32e388853f0cf3d2b01e7ec1"
+  },
+  "sim/run-website.sh": {
+    "mtime": 1788786198.1855588,
+    "seen": 1789025179.904943,
+    "ast_hash": "3e310127de63d893ae879308fc01c23c",
+    "semantic_hash": "3e310127de63d893ae879308fc01c23c"
+  },
+  "sim/sites.py": {
+    "mtime": 1787139452.631137,
+    "seen": 1789025179.9049437,
+    "ast_hash": "d2bccf1aaab3e777c1a8ad43159ad6c2",
+    "semantic_hash": "d2bccf1aaab3e777c1a8ad43159ad6c2"
+  },
+  "sim/stage_builder.py": {
+    "mtime": 1787139452.6295352,
+    "seen": 1789025179.904944,
+    "ast_hash": "9001a18ba538cc44a3a9fb0aaf99ef36",
+    "semantic_hash": "9001a18ba538cc44a3a9fb0aaf99ef36"
+  },
+  "sim/stop-website.sh": {
+    "mtime": 1788403597.0953681,
+    "seen": 1789025179.9049442,
+    "ast_hash": "e254eae50860b7c978a59b2c2c924f99",
+    "semantic_hash": "e254eae50860b7c978a59b2c2c924f99"
+  },
+  "sim/tests/test_sites.py": {
+    "mtime": 1787139452.6117396,
+    "seen": 1789025179.9049444,
+    "ast_hash": "2aa2581ba5397aa08a608e1efe3be8f1",
+    "semantic_hash": "2aa2581ba5397aa08a608e1efe3be8f1"
+  },
+  "streaming/agent_control.py": {
+    "mtime": 1788862380.643318,
+    "seen": 1789025179.904945,
+    "ast_hash": "549ddb63915f3d8bea0dd67b07a72197",
+    "semantic_hash": "549ddb63915f3d8bea0dd67b07a72197"
+  },
+  "streaming/docker_build.py": {
+    "mtime": 1788871551.2782645,
+    "seen": 1789025179.9049451,
+    "ast_hash": "65574c4cc13ea8c7e2f11b0a625b28ca",
+    "semantic_hash": "65574c4cc13ea8c7e2f11b0a625b28ca"
+  },
+  "streaming/offboard.py": {
+    "mtime": 1788862400.4794438,
+    "seen": 1789025179.9049454,
+    "ast_hash": "cd4ad4daa23cfee6e3c1f460dbb5602d",
+    "semantic_hash": "cd4ad4daa23cfee6e3c1f460dbb5602d"
+  },
+  "streaming/tests/test_agent_control.py": {
+    "mtime": 1788862359.915135,
+    "seen": 1789025179.9049459,
+    "ast_hash": "75e54c535b3025a4ea7b762695c37121",
+    "semantic_hash": "75e54c535b3025a4ea7b762695c37121"
+  },
+  "streaming/tests/test_agent_runner.py": {
+    "mtime": 1788862494.5064025,
+    "seen": 1789025179.904946,
+    "ast_hash": "3e4f160e8d0742123896d50374150c3f",
+    "semantic_hash": "3e4f160e8d0742123896d50374150c3f"
+  },
+  "streaming/tests/test_docker_build.py": {
+    "mtime": 1788871537.4616113,
+    "seen": 1789025179.9049468,
+    "ast_hash": "03b092f444ade4ef1f0e1f6f9b493724",
+    "semantic_hash": "03b092f444ade4ef1f0e1f6f9b493724"
+  },
+  "streaming/tests/test_offboard.py": {
+    "mtime": 1788862409.216938,
+    "seen": 1789025179.904947,
+    "ast_hash": "938645541c6e6ebf28f30b98d76f1de7",
+    "semantic_hash": "938645541c6e6ebf28f30b98d76f1de7"
+  },
+  "streaming/tests/test_offboard_loop.py": {
+    "mtime": 1788862420.994078,
+    "seen": 1789025179.9049473,
+    "ast_hash": "4ab8a4eaad62d2795176c59165e63256",
+    "semantic_hash": "4ab8a4eaad62d2795176c59165e63256"
+  },
+  "streaming/tests/test_waypoints.py": {
+    "mtime": 1787139452.5908215,
+    "seen": 1789025179.9049482,
+    "ast_hash": "3153b86e0f2cb1842f70a855b22192dd",
+    "semantic_hash": "3153b86e0f2cb1842f70a855b22192dd"
+  },
+  "streaming/tests/test_web_ui.py": {
+    "mtime": 1788871571.9081724,
+    "seen": 1789025179.9049485,
+    "ast_hash": "14c47d6198d372a1bd2e23845c9c721d",
+    "semantic_hash": "14c47d6198d372a1bd2e23845c9c721d"
+  },
+  "streaming/tests/test_web_ui_descriptive.py": {
+    "mtime": 1788406147.2572815,
+    "seen": 1789025179.904949,
+    "ast_hash": "fb6e467724f4c2e920f7cba8cc64a85a",
+    "semantic_hash": "fb6e467724f4c2e920f7cba8cc64a85a"
+  },
+  "streaming/waypoints.py": {
+    "mtime": 1787139452.5908766,
+    "seen": 1789025179.9049492,
+    "ast_hash": "945953181062acc931723d6982e99539",
+    "semantic_hash": "945953181062acc931723d6982e99539"
+  },
+  "vio-recorder-pai.py": {
+    "mtime": 1787900495.1199868,
+    "seen": 1789025179.9049497,
+    "ast_hash": "125a5bc015be1c5fe3feb607700c8503",
+    "semantic_hash": "125a5bc015be1c5fe3feb607700c8503"
+  },
+  "web-v2/js/agent.js": {
+    "mtime": 1788406849.8451934,
+    "seen": 1789025179.90495,
+    "ast_hash": "b8629f882dd3d8493cd1690a3f568f29",
+    "semantic_hash": "b8629f882dd3d8493cd1690a3f568f29"
+  },
+  "web-v2/js/controls.js": {
+    "mtime": 1788771126.641229,
+    "seen": 1789025179.9049504,
+    "ast_hash": "992f4c4d17d935c2a1826fe200abb950",
+    "semantic_hash": "992f4c4d17d935c2a1826fe200abb950"
+  },
+  "web-v2/js/main.js": {
+    "mtime": 1788771131.653718,
+    "seen": 1789025179.9049509,
+    "ast_hash": "75a70a4731844e161482fa61a8af3990",
+    "semantic_hash": "75a70a4731844e161482fa61a8af3990"
+  },
+  "web-v2/js/map.js": {
+    "mtime": 1788402879.99216,
+    "seen": 1789025179.904951,
+    "ast_hash": "f83884485bd7faec0c3866117dba1950",
+    "semantic_hash": "f83884485bd7faec0c3866117dba1950"
+  },
+  "web-v2/js/route.js": {
+    "mtime": 1788402350.530312,
+    "seen": 1789025179.9049513,
+    "ast_hash": "593ed59a53d76f17077e3bb547417c29",
+    "semantic_hash": "593ed59a53d76f17077e3bb547417c29"
+  },
+  "web-v2/js/telemetry.js": {
+    "mtime": 1788402407.2436092,
+    "seen": 1789025179.9049516,
+    "ast_hash": "24d9c1eb3e3ecaae07191ae00bf00afb",
+    "semantic_hash": "24d9c1eb3e3ecaae07191ae00bf00afb"
+  },
+  "web-v2/js/ws.js": {
+    "mtime": 1788402350.5305002,
+    "seen": 1789025179.904952,
+    "ast_hash": "d0e995ffbcbadb2b9dc418229877bd6b",
+    "semantic_hash": "d0e995ffbcbadb2b9dc418229877bd6b"
+  },
+  "web-v2/vendor/leaflet.js": {
+    "mtime": 1788402350.5297096,
+    "seen": 1789025179.9049523,
+    "ast_hash": "35b48eb991f383702f153452506e07b2",
+    "semantic_hash": "35b48eb991f383702f153452506e07b2"
+  },
+  "web/js/agent.js": {
+    "mtime": 1788871639.6426647,
+    "seen": 1789025179.9049528,
+    "ast_hash": "d1182acc4831f293f1ddf621e36d32a5",
+    "semantic_hash": "d1182acc4831f293f1ddf621e36d32a5"
+  },
+  "web/js/controls.js": {
+    "mtime": 1788771177.6340945,
+    "seen": 1789025179.904953,
+    "ast_hash": "992f4c4d17d935c2a1826fe200abb950",
+    "semantic_hash": "992f4c4d17d935c2a1826fe200abb950"
+  },
+  "web/js/hil.js": {
+    "mtime": 1788794388.4301426,
+    "seen": 1789025179.9049532,
+    "ast_hash": "f1f853e09168dd637c253ec34244b730",
+    "semantic_hash": "f1f853e09168dd637c253ec34244b730"
+  },
+  "web/js/main.js": {
+    "mtime": 1788791260.1952693,
+    "seen": 1789025179.904954,
+    "ast_hash": "b13ba26c7186847731f1dbe975fa0517",
+    "semantic_hash": "b13ba26c7186847731f1dbe975fa0517"
+  },
+  "web/js/map.js": {
+    "mtime": 1787900495.1202407,
+    "seen": 1789025179.9049542,
+    "ast_hash": "9104cc745851aa717bb1bf2ff24bf3cc",
+    "semantic_hash": "9104cc745851aa717bb1bf2ff24bf3cc"
+  },
+  "web/js/route.js": {
+    "mtime": 1787139452.6424327,
+    "seen": 1789025179.9049547,
+    "ast_hash": "593ed59a53d76f17077e3bb547417c29",
+    "semantic_hash": "593ed59a53d76f17077e3bb547417c29"
+  },
+  "web/js/telemetry.js": {
+    "mtime": 1787900495.1203003,
+    "seen": 1789025179.904955,
+    "ast_hash": "8cd523bf6591eecf830a90879b9e2061",
+    "semantic_hash": "8cd523bf6591eecf830a90879b9e2061"
+  },
+  "web/js/ws.js": {
+    "mtime": 1787139452.6424901,
+    "seen": 1789025179.9049551,
+    "ast_hash": "d0e995ffbcbadb2b9dc418229877bd6b",
+    "semantic_hash": "d0e995ffbcbadb2b9dc418229877bd6b"
+  },
+  "web/vendor/leaflet.js": {
+    "mtime": 1787139452.5861874,
+    "seen": 1789025179.9049556,
+    "ast_hash": "35b48eb991f383702f153452506e07b2",
+    "semantic_hash": "35b48eb991f383702f153452506e07b2"
+  },
+  ".claude/skills/run-website/SKILL.md": {
+    "mtime": 1788404454.0213127,
+    "seen": 1789025179.9049559,
+    "ast_hash": "b1494e8cdd46e21fb2df90ab1f1e062e",
+    "semantic_hash": "b1494e8cdd46e21fb2df90ab1f1e062e"
+  },
+  ".claude/skills/stop-website/SKILL.md": {
+    "mtime": 1788403625.4249856,
+    "seen": 1789025179.9049563,
+    "ast_hash": "d33165d37a585bd334b3acdaface202e",
+    "semantic_hash": "d33165d37a585bd334b3acdaface202e"
+  },
+  "RUN-WEBSITE.md": {
+    "mtime": 1788862693.702106,
+    "seen": 1789025179.9049566,
+    "ast_hash": "f112e1b66b1d06320325d2f93fdf9f96",
+    "semantic_hash": "f112e1b66b1d06320325d2f93fdf9f96"
+  },
+  "SESSION.md": {
+    "mtime": 1788862695.0435917,
+    "seen": 1789025179.9049568,
+    "ast_hash": "33b01f44028f7cac39fe02801b23cc87",
+    "semantic_hash": "33b01f44028f7cac39fe02801b23cc87"
+  },
+  "docs/2026-08-09-ONLY-design-competition-control-api-design.md": {
+    "mtime": 1787900495.1175733,
+    "seen": 1789025179.9049575,
+    "ast_hash": "980e12f26b4f0f818a6ba2aad0e06972",
+    "semantic_hash": "980e12f26b4f0f818a6ba2aad0e06972"
+  },
+  "docs/competition-api.md": {
+    "mtime": 1788862677.9126768,
+    "seen": 1789025179.9049578,
+    "ast_hash": "521aedb6d4409981fb5462007da791b0",
+    "semantic_hash": "521aedb6d4409981fb5462007da791b0"
+  },
+  "docs/docker-submission-quickstart.md": {
+    "mtime": 1788870624.4271786,
+    "seen": 1789025179.904958,
+    "ast_hash": "31e3fab8f0409802b35822394370228e",
+    "semantic_hash": "31e3fab8f0409802b35822394370228e"
+  },
+  "docs/superpowers/plans/2026-07-13-pipeline-streaming.md": {
+    "mtime": 1787139452.6362078,
+    "seen": 1789025179.9049585,
+    "ast_hash": "0113f4e70d05e22960c570c3996e223e",
+    "semantic_hash": "0113f4e70d05e22960c570c3996e223e"
+  },
+  "docs/superpowers/plans/2026-07-14-roadmap.md": {
+    "mtime": 1784098239.8828747,
+    "seen": 1789025179.9049587,
+    "ast_hash": "b2f8f89fd6773b035352e309c9882652",
+    "semantic_hash": "b2f8f89fd6773b035352e309c9882652"
+  },
+  "docs/superpowers/plans/2026-07-30-joystick-offboard.md": {
+    "mtime": 1785431323.8640654,
+    "seen": 1789025179.904959,
+    "ast_hash": "f8b6ef9e347dbe031328a86e36b5ba60",
+    "semantic_hash": "f8b6ef9e347dbe031328a86e36b5ba60"
+  },
+  "docs/superpowers/plans/2026-07-31-map-waypoints.md": {
+    "mtime": 1787139452.604797,
+    "seen": 1789025179.9049594,
+    "ast_hash": "bb3b2881ba151e718799092ef5094963",
+    "semantic_hash": "bb3b2881ba151e718799092ef5094963"
+  },
+  "docs/superpowers/plans/2026-07-31-sitl-stage-from-config.md": {
+    "mtime": 1787139452.6099439,
+    "seen": 1789025179.9049597,
+    "ast_hash": "e76995386d5002dc6b6038ade1d96ba0",
+    "semantic_hash": "e76995386d5002dc6b6038ade1d96ba0"
+  },
+  "docs/superpowers/plans/2026-08-07-web-recorder.md": {
+    "mtime": 1787139452.6405191,
+    "seen": 1789025179.90496,
+    "ast_hash": "6ddb399090217250a2d45db0d677ba98",
+    "semantic_hash": "6ddb399090217250a2d45db0d677ba98"
+  },
+  "docs/superpowers/plans/2026-08-27-website-agent-upload.md": {
+    "mtime": 1787900495.1181386,
+    "seen": 1789025179.9049604,
+    "ast_hash": "ed4f031ddaf8f36b30a5d412ecddd231",
+    "semantic_hash": "ed4f031ddaf8f36b30a5d412ecddd231"
+  },
+  "docs/superpowers/plans/2026-09-07-joystick-analog-sticks.md": {
+    "mtime": 1788766238.0273995,
+    "seen": 1789025179.9049609,
+    "ast_hash": "9840bdec38df6d9ec4117b1117262169",
+    "semantic_hash": "9840bdec38df6d9ec4117b1117262169"
+  },
+  "docs/superpowers/plans/2026-09-08-docker-submission-registry-pull.md": {
+    "mtime": 1788871509.6797574,
+    "seen": 1789025179.904961,
+    "ast_hash": "ca626000b0a7a46a68555c92246972d1",
+    "semantic_hash": "ca626000b0a7a46a68555c92246972d1"
+  },
+  "docs/superpowers/plans/2026-09-08-docker-submission-website-integration.md": {
+    "mtime": 1788869070.3798974,
+    "seen": 1789025179.9049613,
+    "ast_hash": "094103b71b90c7d7f4e7a90725a7ff09",
+    "semantic_hash": "094103b71b90c7d7f4e7a90725a7ff09"
+  },
+  "docs/superpowers/specs/2026-07-13-pipeline-streaming-design.md": {
+    "mtime": 1787139452.6362872,
+    "seen": 1789025179.9049618,
+    "ast_hash": "f62d9e3fe8217d4cf8bf565cbbe95615",
+    "semantic_hash": "f62d9e3fe8217d4cf8bf565cbbe95615"
+  },
+  "docs/superpowers/specs/2026-07-14-project-structure.md": {
+    "mtime": 1784098239.883022,
+    "seen": 1789025179.904962,
+    "ast_hash": "9f0012d67cc456f362d8102047485db5",
+    "semantic_hash": "9f0012d67cc456f362d8102047485db5"
+  },
+  "docs/superpowers/specs/2026-07-30-joystick-offboard-design.md": {
+    "mtime": 1787139445.2206864,
+    "seen": 1789025179.9049625,
+    "ast_hash": "3836238aa603b811ca7dd5cc94909009",
+    "semantic_hash": "3836238aa603b811ca7dd5cc94909009"
+  },
+  "docs/superpowers/specs/2026-07-31-map-waypoints-design.md": {
+    "mtime": 1787139452.6049159,
+    "seen": 1789025179.9049628,
+    "ast_hash": "4dde3c70f685d5b19bb39696712d015c",
+    "semantic_hash": "4dde3c70f685d5b19bb39696712d015c"
+  },
+  "docs/superpowers/specs/2026-07-31-sitl-stage-from-config-design.md": {
+    "mtime": 1787900495.1181386,
+    "seen": 1789025179.9049635,
+    "ast_hash": "bbdd5b07dc7bd211c0bc4a58e4f1ea2b",
+    "semantic_hash": "bbdd5b07dc7bd211c0bc4a58e4f1ea2b"
+  },
+  "docs/superpowers/specs/2026-08-07-web-recorder-design.md": {
+    "mtime": 1787900495.1184053,
+    "seen": 1789025179.9049642,
+    "ast_hash": "887b5a4f9f0049434fcb6ac7e2662c59",
+    "semantic_hash": "887b5a4f9f0049434fcb6ac7e2662c59"
+  },
+  "docs/superpowers/specs/2026-08-27-website-agent-upload-design.md": {
+    "mtime": 1787900495.1185546,
+    "seen": 1789025179.9049644,
+    "ast_hash": "e4338f4027215edfa63cc9aee5b92faa",
+    "semantic_hash": "e4338f4027215edfa63cc9aee5b92faa"
+  },
+  "docs/superpowers/specs/2026-09-07-competition-flight-primitive-design.md": {
+    "mtime": 1788798811.834236,
+    "seen": 1789025179.9049647,
+    "ast_hash": "c7aa1949e7c31c3f3295c47524623957",
+    "semantic_hash": "c7aa1949e7c31c3f3295c47524623957"
+  },
+  "docs/superpowers/specs/2026-09-07-joystick-analog-sticks-design.md": {
+    "mtime": 1788765800.8535857,
+    "seen": 1789025179.9049652,
+    "ast_hash": "096d9ca99310cddb7e0852152a17f27e",
+    "semantic_hash": "096d9ca99310cddb7e0852152a17f27e"
+  },
+  "docs/superpowers/specs/2026-09-08-competitor-submission-docker-design.md": {
+    "mtime": 1788863828.4072547,
+    "seen": 1789025179.9049654,
+    "ast_hash": "e0d523b7bb235dad6aa2310ca2cdca8d",
+    "semantic_hash": "e0d523b7bb235dad6aa2310ca2cdca8d"
+  },
+  "docs/superpowers/specs/2026-09-08-docker-submission-registry-pull-design.md": {
+    "mtime": 1788871418.8705761,
+    "seen": 1789025179.9049656,
+    "ast_hash": "d983f6d1f44af998c1debea75d0fb04e",
+    "semantic_hash": "d983f6d1f44af998c1debea75d0fb04e"
+  },
+  "docs/superpowers/specs/2026-09-08-docker-submission-website-integration-design.md": {
+    "mtime": 1788868720.3606622,
+    "seen": 1789025179.9049659,
+    "ast_hash": "ba0c474f2bcf8d85ce29365e1732f530",
+    "semantic_hash": "ba0c474f2bcf8d85ce29365e1732f530"
+  },
+  "drone-sitl-brief.artifact.html": {
+    "mtime": 1788872948.7637448,
+    "seen": 1789025179.9049664,
+    "ast_hash": "a04010e91dca3e9a4ce4dbc97dece954",
+    "semantic_hash": "a04010e91dca3e9a4ce4dbc97dece954"
+  },
+  "drone-sitl-brief.html": {
+    "mtime": 1788872567.4356587,
+    "seen": 1789025179.9049666,
+    "ast_hash": "df20d9a8511c5d23e3a72f013a64a57c",
+    "semantic_hash": "df20d9a8511c5d23e3a72f013a64a57c"
+  },
+  "examples/competition-submission/README.md": {
+    "mtime": 1788861411.1781638,
+    "seen": 1789025179.904967,
+    "ast_hash": "78c40d6abd28153e031e7e8f147236ab",
+    "semantic_hash": "78c40d6abd28153e031e7e8f147236ab"
+  },
+  "examples/competition-submission/requirements.txt": {
+    "mtime": 1788861400.816112,
+    "seen": 1789025179.9049673,
+    "ast_hash": "186f5047ac17db0e1cef0ec871a8fcc1",
+    "semantic_hash": "186f5047ac17db0e1cef0ec871a8fcc1"
+  },
+  "sim/HIL_TAP.md": {
+    "mtime": 1788794531.766294,
+    "seen": 1789025179.9049678,
+    "ast_hash": "58408c1176d8f53230beff78a5858126",
+    "semantic_hash": "58408c1176d8f53230beff78a5858126"
+  },
+  "web-v2/index.html": {
+    "mtime": 1788771108.0583954,
+    "seen": 1789025179.904968,
+    "ast_hash": "7fd98fa911ce9fbe4dea6edf25d94bbc",
+    "semantic_hash": "7fd98fa911ce9fbe4dea6edf25d94bbc"
+  },
+  "web/index.html": {
+    "mtime": 1788871632.794168,
+    "seen": 1789025179.9049685,
+    "ast_hash": "1b5ea62dabaded6252d5026025585f1d",
+    "semantic_hash": "1b5ea62dabaded6252d5026025585f1d"
+  }
+}

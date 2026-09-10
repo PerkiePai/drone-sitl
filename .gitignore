@@ -16,3 +16,11 @@ logs/
 # Private Cesium tile cache (sim/launch-sitl.sh --/app/tokens/omni_global_cache).
 # Keeps our runs off the shared, contention-prone ~/.cache/ov; grows large.
 .cache/
+
+# graphify's rebuild cache: content-hashed per-file extractions, keyed to the
+# installed graphify version. Local and disposable — the graph itself
+# (graph.json/graph.html/GRAPH_REPORT.md) and manifest.json are tracked.
+graphify-out/cache/
+# Absolute paths to this machine's interpreter and checkout — wrong anywhere else.
+graphify-out/.graphify_python
+graphify-out/.graphify_root

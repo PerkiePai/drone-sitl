@@ -96,6 +96,19 @@ export function paint(t) {
   el('t-gs').textContent = t.gs.toFixed(1);
   el('t-cmd').textContent = Math.abs(t.cmd_vx).toFixed(1);
 
+  // Horizontal gap between PX4's fused position and simulator ground truth,
+  // in metres -- the estimator error, shown numerically alongside the two
+  // map markers. Blank when the sim is not publishing truth.
+  if (t.lat_gt !== null && t.lat_gt !== undefined && t.lat !== null) {
+    const mlat = 111320;
+    const mlon = 111320 * Math.cos(t.lat * Math.PI / 180);
+    const dn = (t.lat_gt - t.lat) * mlat;
+    const de = (t.lon_gt - t.lon) * mlon;
+    el('t-gterr').textContent = Math.hypot(dn, de).toFixed(1) + ' m';
+  } else {
+    el('t-gterr').textContent = '--';
+  }
+
   // Sim time vs wall clock. Below ~0.8 the drone will look sluggish no matter
   // how correct the commands are, because physics itself is running slow.
   if (t.sim_rate > 0) {

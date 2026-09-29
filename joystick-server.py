@@ -66,6 +66,12 @@ HIL_STATUS_FILE = os.path.join(ROOT, "logs", "hil_tap.status.json")
 HIL_STATUS_STALE_S = 3.0   # > a few --interval ticks; a genuine freeze holds ts fresh
 
 
+# Simulator ground truth, written ~10 Hz by drone_setup_px4_cesium.py.
+# DRONE_TRUTH_FILE overrides the path (both sides read it).
+TRUTH_FILE = os.environ.get("DRONE_TRUTH_FILE", "/tmp/drone_truth.json")
+TRUTH_MAX_AGE_S = 2.0
+
+
 def _safe_agent_name(name):
     """A base filename ending .py with no path parts, or None."""
     if not name or not name.endswith(".py"):
@@ -150,6 +156,11 @@ class SetpointLoop(threading.Thread):
             # can say "waiting for position" instead of centring on 0,0.
             "lat": None,
             "lon": None,
+            # Simulator ground truth (TRUTH_FILE). None whenever the sim is not
+            # publishing it.
+            "lat_gt": None,
+            "lon_gt": None,
+            "heading_gt": 0.0,
             # PX4 needs a valid home altitude to accept GLOBAL_RELATIVE_ALT
             # setpoints and returns SILENTLY without one
             # (mavlink_receiver.cpp:1107-1110). FLY is gated on this.
@@ -174,6 +185,7 @@ class SetpointLoop(threading.Thread):
         self._stream_start = None
         self._params_sent = False
         self._sim_ref = None          # (px4_boot_ms, wall_monotonic) baseline
+        self._truth_next = 0.0        # monotonic time of next TRUTH_FILE poll
 
     def telemetry(self):
         with self._telem_lock:
@@ -197,6 +209,25 @@ class SetpointLoop(threading.Thread):
             # the last good heading rather than reporting 655 degrees.
             if msg.hdg != 65535:
                 self._telem["heading_deg"] = msg.hdg / 100.0
+
+    def _read_truth(self):
+        """Poll TRUTH_FILE (~5 Hz) for simulator ground truth. Any problem --
+        missing, mid-write, stale, malformed -- just clears the fields so the
+        page drops the marker rather than freezing it at the last value."""
+        lat = lon = None
+        hdg = 0.0
+        try:
+            if time.time() - os.path.getmtime(TRUTH_FILE) <= TRUTH_MAX_AGE_S:
+                with open(TRUTH_FILE) as f:
+                    d = json.load(f)
+                lat, lon = float(d["lat"]), float(d["lon"])
+                hdg = float(d.get("heading_deg", 0.0))
+        except (OSError, ValueError, KeyError, TypeError):
+            lat = lon = None
+        with self._telem_lock:
+            self._telem["lat_gt"] = lat
+            self._telem["lon_gt"] = lon
+            self._telem["heading_gt"] = hdg
 
     def _handle_attitude(self, msg):
         """ATTITUDE carries radians; the agent API and any UI want degrees."""
@@ -299,6 +330,10 @@ class SetpointLoop(threading.Thread):
         next_tick = time.monotonic()
         while True:
             self._drain_mavlink()
+            now = time.monotonic()
+            if now >= self._truth_next:
+                self._read_truth()
+                self._truth_next = now + 0.2
             while True:
                 try:
                     self._run_command(self.commands.get_nowait())

@@ -5,7 +5,7 @@ body { margin:0; background:#111; color:#ddd; font:14px system-ui,sans-serif;
        -webkit-user-select:none; }
 #panels { display:flex; gap:10px; flex-wrap:wrap; justify-content:center;
           width:100%; }
-#video, #video-chase { width:min(92vw,640px); aspect-ratio:16/10; background:#000;
+#video, #video-chase { width:100%; aspect-ratio:16/10; background:#000;
          border:1px solid #333; object-fit:cover; }
 /* Detection debug view: mirrors #video's current src (see js/detections.js)
    and draws it to canvas with the agent's live bounding boxes on top. The
@@ -15,11 +15,24 @@ body { margin:0; background:#111; color:#ddd; font:14px system-ui,sans-serif;
    that stretch, so they stay aligned even if the aspect ratio doesn't match
    16/10 (unlike #video/#video-chase's object-fit:cover, which would crop
    the image but not the (separately-drawn) boxes). */
-#detview { width:min(92vw,640px); aspect-ratio:16/10; background:#000;
+#detview { width:100%; aspect-ratio:16/10; background:#000;
            border:1px solid #333; position:relative; }
 #det-canvas { width:100%; height:100%; }
-#mapwrap { width:min(92vw,640px); display:flex; flex-direction:column;
-           gap:6px; }
+/* Labelled panel: header naming the view, the view, an optional footnote. */
+.panel { width:min(92vw,640px); display:flex; flex-direction:column; gap:6px;
+         margin:0; }
+.panel-hd { display:flex; justify-content:space-between; align-items:baseline;
+            gap:8px; font-size:12px; line-height:1.2; }
+.panel-hd b { letter-spacing:.6px; color:#eee; }
+.panel-hd span { color:#8a8a8a; text-align:right; }
+.panel-ft { font-size:11px; color:#777; }
+#mapwrap { gap:6px; }
+/* Which marker is which. Colours match the markers drawn in map.js. */
+#maplegend { display:flex; gap:12px; flex-wrap:wrap; font-size:11px;
+             color:#9a9a9a; font-variant-numeric:tabular-nums; }
+#maplegend .lg-est { color:#6f6; }
+#maplegend .lg-gt  { color:#6cf; }
+#maplegend .lg-wp  { color:#fc6; }
 #map { width:100%; aspect-ratio:16/10; background:#000;
        border:1px solid #333; }
 /* Leaflet ships light-themed controls that glare on a dark flight page. */
@@ -32,6 +45,12 @@ body { margin:0; background:#111; color:#ddd; font:14px system-ui,sans-serif;
 .drone-arrow { width:0; height:0; border-left:9px solid transparent;
                border-right:9px solid transparent; border-bottom:22px solid #6f6;
                filter:drop-shadow(0 0 3px #000); transform-origin:50% 65%; }
+/* Ground truth: larger, translucent cyan, drawn UNDER the green estimate --
+   the gap between the two IS the estimator error. */
+.gt-arrow { width:0; height:0; border-left:12px solid transparent;
+            border-right:12px solid transparent; border-bottom:28px solid #6cf;
+            filter:drop-shadow(0 0 3px #000); transform-origin:50% 65%;
+            opacity:.5; }
 .wp-icon { display:flex; align-items:center; justify-content:center;
            width:22px; height:22px; border-radius:50%; background:#fc6;
            color:#111; font:bold 12px system-ui,sans-serif;

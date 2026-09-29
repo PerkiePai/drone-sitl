@@ -24,3 +24,7 @@ graphify-out/cache/
 # Absolute paths to this machine's interpreter and checkout — wrong anywhere else.
 graphify-out/.graphify_python
 graphify-out/.graphify_root
+
+# Trained model weights — bring your own, don't commit (100MB+ checkpoints).
+# The Dockerfile COPYs this at build time; it just needs to be present on disk.
+examples/competition-submission/weights.pt

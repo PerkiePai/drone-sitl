@@ -7,6 +7,17 @@ body { margin:0; background:#111; color:#ddd; font:14px system-ui,sans-serif;
           width:100%; }
 #video, #video-chase { width:min(92vw,640px); aspect-ratio:16/10; background:#000;
          border:1px solid #333; object-fit:cover; }
+/* Detection debug view: mirrors #video's current src (see js/detections.js)
+   and draws it to canvas with the agent's live bounding boxes on top. The
+   canvas's pixel buffer is sized to det-img's naturalWidth/Height in JS, the
+   same pixel space the boxes are in -- CSS then just stretches that bitmap
+   to fill the box below. Image and boxes are baked into one bitmap before
+   that stretch, so they stay aligned even if the aspect ratio doesn't match
+   16/10 (unlike #video/#video-chase's object-fit:cover, which would crop
+   the image but not the (separately-drawn) boxes). */
+#detview { width:min(92vw,640px); aspect-ratio:16/10; background:#000;
+           border:1px solid #333; position:relative; }
+#det-canvas { width:100%; height:100%; }
 #mapwrap { width:min(92vw,640px); display:flex; flex-direction:column;
            gap:6px; }
 #map { width:100%; aspect-ratio:16/10; background:#000;

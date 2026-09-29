@@ -4,7 +4,7 @@
 `Route`, `Command` and the `Agent` callbacks are all implemented — see
 `competition/commands.py` and `competition/__init__.py`. `single_flight.py`
 needs nothing beyond the package; `full_flight_agent.py` additionally needs
-`detection.py`'s deps (`torch`, `ultralytics`) and your own `weights.pt`,
+`detection.py`'s deps (`torch`, `rfdetr`) and your own `weights.pt`,
 which is what the Dockerfile is for.
 
 Still open: the *design* in
@@ -22,12 +22,14 @@ see the project memory `uav-competition-vs-sitl-repo`.
 |---|---|
 | `single_flight.py` | Smallest possible script: hover → fly to a waypoint → spin. `flight()` only, no camera, no detection. |
 | `full_flight_agent.py` | Lawnmower sweep flown on `flight()`, `on_frame` runs a detector, confident hit → switch to the oblique camera and orbit, then resume the sweep. |
-| `detection.py` | `Detector`/`Detection` — everything about the model, nothing about flying. Assumes an ultralytics-style `.pt` checkpoint; swap `_load()`/`detect()` for your own model format. |
+| `detection.py` | `Detector`/`Detection` — everything about the model, nothing about flying. Wraps an RF-DETR checkpoint (`rfdetr.from_checkpoint`); swap `_load()`/`detect()` for your own model format. |
 | `Dockerfile` | Builds a submission image on top of an organizer-published `competition-base:latest`. |
-| `requirements.txt` | `full_flight_agent.py`'s extra deps (`torch`, `ultralytics`) on top of what `competition-base` already provides. |
+| `requirements.txt` | `full_flight_agent.py`'s extra deps (`torch`, `rfdetr`) on top of what `competition-base` already provides. |
 
-`weights.pt` is not included — supply your own trained checkpoint at
-build time; the Dockerfile's `COPY` expects it next to `detection.py`.
+`weights.pt` is not committed to git (see `.gitignore` — 100MB+ checkpoint)
+but must be present on disk next to `detection.py` before you build; the
+Dockerfile's `COPY` expects it there. It's an RF-DETR Medium checkpoint
+trained on a single `Truck` class.
 
 ## More than one weight file?
 

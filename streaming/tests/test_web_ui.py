@@ -392,6 +392,30 @@ def _fly_to_offboard(run):
     run.tick()
 
 
+def test_run_clears_a_stale_detection_left_by_the_previous_run(monkeypatch):
+    """Caught live: /agent/control's "detections" message lands whenever a
+    connected agent_runner.py sends one, independent of AgentRun.state. A
+    box left over from a previous run must not flash back the instant the
+    running-gate in snapshot() opens for the *next* run, before that run's
+    own agent has sent anything."""
+    js = _load_server()
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            self.stdout = iter([])
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(js.subprocess, "Popen", FakePopen)
+
+    run = js.AgentRun(_FakeLoopThread(), "python", "127.0.0.1", 8090, 8080)
+    run.set_detections([{"class_name": "Truck", "confidence": 0.9,
+                         "bbox": [1, 2, 3, 4]}])
+
+    run.run("docker", "submission-foo-20260908-120000")
+    assert run.snapshot()["detections"] == []
+
+
 def test_agent_run_docker_spawns_docker_run_with_network_host_and_name(monkeypatch):
     js = _load_server()
     calls = []
@@ -538,6 +562,28 @@ def test_agent_control_socket_sends_arena_then_applies_a_flight(server):
     asyncio.run(exercise())
 
 
+def test_agent_control_detections_message_is_accepted(server):
+    """Gated behind agent_run.state (arming|running) in snapshot(), same as
+    "camera" above -- neither is exercised end-to-end here since that needs a
+    real armed flight (see test_ws_agent_run_is_refused_when_link_is_down).
+    This just confirms the socket doesn't choke on the message and telemetry
+    keeps flowing -- unit coverage for the gate itself lives in
+    joystick-server.py's own AgentRun.set_detections/.snapshot()."""
+    websockets = pytest.importorskip("websockets")
+
+    async def exercise():
+        async with websockets.connect(
+                f"ws://127.0.0.1:{WEB_PORT}/agent/control") as ws:
+            await asyncio.wait_for(ws.recv(), timeout=10)   # arena
+            await ws.send(json.dumps({"type": "detections", "boxes": [
+                {"class_name": "Truck", "confidence": 0.87,
+                 "bbox": [1.0, 2.0, 3.0, 4.0]}]}))
+            t = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            assert "streaming_s" in t
+
+    asyncio.run(exercise())
+
+
 def test_agent_control_route_message_loads_and_flies_a_mission(server):
     websockets = pytest.importorskip("websockets")
 
@@ -581,7 +627,7 @@ def test_ws_telemetry_carries_an_agent_block_from_the_start(server):
         async with websockets.connect(f"ws://127.0.0.1:{WEB_PORT}/ws") as ws:
             t = await _telem_where(ws, lambda t: "agent" in t)
             assert t["agent"] == {"state": "idle", "kind": None, "file": None,
-                                  "camera": None, "log": []}
+                                  "camera": None, "log": [], "detections": []}
 
     asyncio.run(exercise())
 

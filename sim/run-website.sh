@@ -13,8 +13,9 @@
 # the script behind "run website" -- the full operator handbook is RUN-WEBSITE.md.
 #
 # Flags (consumed here; everything else is passed through to launch-sitl.sh):
-#   --descriptive   run joystick-server-descriptive.py on :8091 instead --
-#                   labelled camera/map panels + a sim-truth marker on the map.
+#   (default)       runs joystick-server-descriptive.py on :8091 -- labelled
+#                   camera/map panels + a sim-truth marker on the map.
+#   --classic       run the plain joystick-server.py on :8090 instead.
 #                   The two servers can run side by side (8090 and 8091); Isaac
 #                   is shared. See memory descriptive-web-ui-fork.md.
 #
@@ -36,16 +37,19 @@ ISAAC_WAIT_S="${ISAAC_WAIT_S:-360}"
 
 say() { echo "run-website: $*"; }
 
-# --- which web server: default, or the --descriptive fork ------------------
-SERVER_SCRIPT="joystick-server.py"
-WEB_PORT=8090
-SERVER_LOG="logs/joystick-server.console"
+# --- which web server: descriptive (default), or --classic -----------------
+SERVER_SCRIPT="joystick-server-descriptive.py"
+WEB_PORT=8091
+SERVER_LOG="logs/joystick-server-descriptive.console"
 SIM_ARGS=()
 for arg in "$@"; do
-    if [[ "$arg" == "--descriptive" ]]; then
-        SERVER_SCRIPT="joystick-server-descriptive.py"
-        WEB_PORT=8091
-        SERVER_LOG="logs/joystick-server-descriptive.console"
+    if [[ "$arg" == "--classic" || "$arg" == "--descriptive" ]]; then
+        if [[ "$arg" == "--classic" ]]; then
+            SERVER_SCRIPT="joystick-server.py"
+            WEB_PORT=8090
+            SERVER_LOG="logs/joystick-server.console"
+        fi
+        # --descriptive is still accepted as a no-op for backwards compat.
     else
         SIM_ARGS+=("$arg")
     fi

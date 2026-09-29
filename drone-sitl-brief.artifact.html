@@ -1,0 +1,1408 @@
+<title>Drone SITL &amp; flight()</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+/* ===========================================================================
+   THEME  —  "Ground Control"  (dark avionics HUD)
+   Change these to retune the whole deck.
+   =========================================================================== */
+:root{
+  --void:#080d15;          /* deepest background            */
+  --void-2:#0b121d;        /* panel base                    */
+  --panel:rgba(15,25,40,.66);
+  --phos:#63dcd2;          /* phosphor cyan  — primary accent */
+  --phos-dim:#3f8f8a;
+  --amber:#f0a53d;         /* caution amber  — secondary / emphasis */
+  --danger:#e5674d;        /* "not available" rows          */
+  --text:#d0e4e6;
+  --dim:#7b959b;
+  --line:rgba(99,220,210,.22);
+  --line-soft:rgba(99,220,210,.12);
+
+  --font-display:'Rajdhani',sans-serif;
+  --font-body:'IBM Plex Mono',monospace;
+
+  --ease:cubic-bezier(.16,1,.3,1);
+  --dur:.6s;
+
+  --stage-bg:#05080d;
+  --slide-bg:var(--void);
+}
+
+*{margin:0;padding:0;box-sizing:border-box;}
+
+/* ===========================================================================
+   FIXED 16:9 STAGE — MANDATORY BASE STYLES (verbatim viewport-base.css)
+   =========================================================================== */
+html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#05080d;color-scheme:dark;}
+.deck-viewport{position:fixed;inset:0;overflow:hidden;background:var(--stage-bg,#000);}
+.deck-stage{position:absolute;left:0;top:0;width:1920px;height:1080px;overflow:hidden;
+  transform-origin:0 0;background:var(--slide-bg,#fff);}
+.slide{position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden;display:block;
+  visibility:hidden;opacity:0;pointer-events:none;background:var(--slide-bg,#fff);}
+.slide.active,.slide.visible{visibility:visible;opacity:1;pointer-events:auto;z-index:1;}
+img,video,canvas,svg{max-width:100%;max-height:100%;}
+.deck-controls{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:1000;}
+@media print{
+  html,body{width:1920px;height:auto;overflow:visible;background:#fff;}
+  .deck-viewport{position:static;overflow:visible;background:#fff;}
+  .deck-stage{position:static;width:auto;height:auto;transform:none!important;background:none;}
+  .slide{position:relative;display:block!important;visibility:visible!important;opacity:1!important;
+    pointer-events:auto!important;width:1920px;height:1080px;break-after:page;page-break-after:always;}
+  .slide:last-child{break-after:auto;page-break-after:auto;}
+  .deck-controls{display:none!important;}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;transition-duration:.2s!important;}
+}
+
+/* ===========================================================================
+   SLIDE SHELL
+   =========================================================================== */
+.slide{font-family:var(--font-body);color:var(--text);
+  background:
+    radial-gradient(120% 80% at 78% 6%,rgba(99,220,210,.09),transparent 55%),
+    radial-gradient(90% 80% at 6% 100%,rgba(240,165,61,.06),transparent 60%),
+    var(--void);}
+
+/* faint instrument grid + scanlines on every slide */
+.slide::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:0;
+  background-image:
+    linear-gradient(to right,var(--line-soft) 1px,transparent 1px),
+    linear-gradient(to bottom,var(--line-soft) 1px,transparent 1px);
+  background-size:120px 120px;}
+.slide::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:6;
+  background:repeating-linear-gradient(to bottom,rgba(0,0,0,0) 0 3px,rgba(0,0,0,.13) 3px 4px);
+  mix-blend-mode:multiply;}
+
+.inner{position:absolute;inset:0;z-index:2;padding:104px 132px 96px;display:flex;flex-direction:column;}
+
+/* corner brackets — the recurring HUD frame */
+.cnr{position:absolute;width:52px;height:52px;border:2px solid var(--phos);z-index:5;opacity:.65;}
+.cnr.tl{left:44px;top:44px;border-right:0;border-bottom:0;}
+.cnr.tr{right:44px;top:44px;border-left:0;border-bottom:0;}
+.cnr.bl{left:44px;bottom:44px;border-right:0;border-top:0;}
+.cnr.br{right:44px;bottom:44px;border-left:0;border-top:0;}
+
+/* top chrome line inside each content slide */
+.chrome{position:absolute;left:132px;right:132px;top:58px;z-index:4;display:flex;
+  justify-content:space-between;align-items:center;
+  font-size:15px;letter-spacing:.26em;text-transform:uppercase;color:var(--phos-dim);}
+.chrome .sec{color:var(--phos);}
+.chrome b{color:var(--amber);font-weight:500;}
+
+/* ===========================================================================
+   TYPOGRAPHY
+   =========================================================================== */
+h2.title{font-family:var(--font-display);font-weight:700;font-size:66px;line-height:1.02;
+  text-transform:uppercase;letter-spacing:.012em;color:#eafcfb;
+  padding-left:26px;border-left:5px solid var(--amber);margin-bottom:10px;}
+.kicker{font-size:16px;letter-spacing:.32em;text-transform:uppercase;color:var(--phos);
+  margin-bottom:30px;padding-left:26px;}
+p.lead{font-size:25px;line-height:1.6;color:var(--text);max-width:1360px;}
+.dim{color:var(--dim);}
+.amber{color:var(--amber);}
+.phos{color:var(--phos);}
+strong{color:#eafcfb;font-weight:600;}
+code,.mono{font-family:var(--font-body);}
+.inline-code{background:rgba(99,220,210,.10);border:1px solid var(--line-soft);
+  border-radius:4px;padding:1px 7px;color:var(--phos);font-size:.92em;}
+
+/* ===========================================================================
+   REUSABLE BLOCKS
+   =========================================================================== */
+.body{margin-top:38px;flex:1;min-height:0;}
+
+/* panel / card */
+.panel{position:relative;background:var(--panel);border:1px solid var(--line);
+  padding:26px 30px;}
+.panel::before{content:"";position:absolute;left:-1px;top:-1px;width:14px;height:14px;
+  border-left:2px solid var(--amber);border-top:2px solid var(--amber);}
+.panel h3{font-family:var(--font-display);font-weight:600;font-size:26px;letter-spacing:.04em;
+  text-transform:uppercase;color:var(--phos);margin-bottom:12px;}
+.panel p{font-size:19px;line-height:1.55;color:var(--text);}
+.panel .tag{font-size:13px;letter-spacing:.2em;text-transform:uppercase;color:var(--amber);
+  display:block;margin-bottom:8px;}
+
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:26px;}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:20px;}
+
+/* key/value or spec table */
+table.data{width:100%;border-collapse:collapse;font-size:19px;}
+table.data th{font-family:var(--font-display);font-weight:600;font-size:16px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--amber);text-align:left;padding:12px 18px;
+  border-bottom:1.5px solid var(--phos-dim);}
+table.data td{padding:13px 18px;border-bottom:1px solid var(--line-soft);vertical-align:top;
+  line-height:1.45;color:var(--text);}
+table.data tr:last-child td{border-bottom:0;}
+table.data td.k{color:var(--phos);white-space:nowrap;}
+table.data td.strike{color:var(--danger);}
+table.data td.strike .x{color:var(--danger);}
+
+/* bullet list */
+ul.hud{list-style:none;display:flex;flex-direction:column;gap:16px;}
+ul.hud li{position:relative;padding-left:34px;font-size:20px;line-height:1.5;color:var(--text);}
+ul.hud li::before{content:"";position:absolute;left:0;top:.55em;width:11px;height:11px;
+  background:var(--phos);box-shadow:0 0 10px var(--phos);}
+ul.hud li.warn::before{background:var(--amber);box-shadow:0 0 10px var(--amber);}
+ul.hud li.no::before{background:var(--danger);box-shadow:0 0 10px var(--danger);
+  clip-path:polygon(50% 0,100% 100%,0 100%);}
+
+/* code block */
+pre.code{background:#060a11;border:1px solid var(--line);border-left:3px solid var(--phos);
+  padding:22px 26px;font-size:18px;line-height:1.62;color:var(--text);overflow:hidden;
+  white-space:pre;}
+pre.code .k{color:var(--amber);}
+pre.code .s{color:var(--phos);}
+pre.code .c{color:var(--dim);}
+pre.code .n{color:#b6e3a8;}
+pre.code .f{color:#eafcfb;}
+
+/* call-out */
+.callout{border:1px solid var(--amber);background:rgba(240,165,61,.07);padding:22px 28px;
+  font-size:19px;line-height:1.55;}
+.callout .lbl{font-family:var(--font-display);font-weight:700;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--amber);display:block;margin-bottom:8px;font-size:15px;}
+
+/* pipeline rail */
+.rail{display:flex;flex-direction:column;gap:0;margin-top:8px;}
+.rail .step{position:relative;display:grid;grid-template-columns:280px 1fr;gap:28px;
+  padding:15px 0 15px 40px;border-left:2px solid var(--line);}
+.rail .step::before{content:"";position:absolute;left:-8px;top:22px;width:14px;height:14px;
+  background:var(--void);border:2px solid var(--phos);}
+.rail .step:last-child{border-left-color:transparent;}
+.rail .step .where{font-family:var(--font-display);font-weight:600;font-size:19px;
+  letter-spacing:.05em;text-transform:uppercase;color:var(--phos);}
+.rail .step .what{font-size:18px;line-height:1.45;color:var(--text);}
+.rail .step .what b{color:var(--amber);}
+
+/* ===========================================================================
+   TITLE SLIDE
+   =========================================================================== */
+.title-slide .adi{position:absolute;right:150px;top:50%;transform:translateY(-50%);
+  width:520px;height:520px;border-radius:50%;overflow:hidden;z-index:2;
+  border:2px solid rgba(99,220,210,.45);
+  box-shadow:0 0 60px rgba(99,220,210,.14),inset 0 0 60px rgba(0,0,0,.6);
+  opacity:0;animation:fade .9s .35s ease forwards;}
+.title-slide .adi .sky{position:absolute;left:-30%;right:-30%;top:-40%;height:80%;
+  background:linear-gradient(#0e2b3a,#12414c);transform-origin:bottom center;
+  animation:roll 9s ease-in-out infinite alternate;}
+.title-slide .adi .gnd{position:absolute;left:-30%;right:-30%;bottom:-40%;height:80%;
+  background:linear-gradient(#0a1a16,#0c231d);transform-origin:top center;
+  animation:roll 9s ease-in-out infinite alternate;}
+.title-slide .adi .horizon{position:absolute;left:6%;right:6%;top:50%;height:2px;
+  background:var(--phos);box-shadow:0 0 12px var(--phos);
+  animation:pitch 9s ease-in-out infinite alternate;}
+.title-slide .adi .fpm{position:absolute;left:50%;top:50%;width:46px;height:46px;
+  margin:-23px 0 0 -23px;border:2px solid var(--amber);border-radius:50%;
+  box-shadow:0 0 14px rgba(240,165,61,.5);}
+.title-slide .adi .fpm::before,.title-slide .adi .fpm::after{content:"";position:absolute;
+  background:var(--amber);top:50%;width:18px;height:2px;margin-top:-1px;}
+.title-slide .adi .fpm::before{left:-22px;}
+.title-slide .adi .fpm::after{right:-22px;}
+.title-slide .ladder i{position:absolute;left:50%;height:2px;background:rgba(207,228,230,.5);}
+
+.title-slide .status{position:absolute;left:132px;top:150px;z-index:3;display:flex;
+  align-items:center;gap:14px;font-size:18px;letter-spacing:.28em;text-transform:uppercase;
+  color:var(--phos);opacity:0;animation:rise .6s .25s ease forwards;}
+.title-slide .status .dot{width:12px;height:12px;border-radius:50%;background:var(--phos);
+  box-shadow:0 0 12px var(--phos);animation:blink 1.4s steps(1) infinite;}
+.title-slide h1{position:absolute;left:126px;top:352px;z-index:3;font-family:var(--font-display);
+  font-weight:700;font-size:148px;line-height:.92;text-transform:uppercase;color:#eafcfb;}
+.title-slide h1 span{display:block;opacity:0;animation:rise .8s var(--ease) forwards;}
+.title-slide h1 span:nth-child(1){animation-delay:.35s;}
+.title-slide h1 span:nth-child(2){animation-delay:.47s;}
+.title-slide h1 span b{color:var(--amber);font-weight:700;}
+.title-slide .sub{position:absolute;left:132px;top:660px;z-index:3;max-width:860px;
+  font-size:24px;line-height:1.55;color:var(--dim);opacity:0;animation:rise .8s .62s ease forwards;}
+.title-slide .readout{position:absolute;left:132px;bottom:118px;z-index:3;
+  border-left:2px solid var(--amber);padding-left:18px;font-size:16px;letter-spacing:.1em;
+  color:var(--phos);opacity:0;animation:fade 1s .9s ease forwards;}
+.title-slide .readout .d{color:var(--dim);}
+
+/* ===========================================================================
+   SECTION DIVIDER
+   =========================================================================== */
+.divider .inner{justify-content:center;}
+.divider .pnum{font-family:var(--font-display);font-weight:700;font-size:220px;line-height:1;
+  color:transparent;-webkit-text-stroke:2px var(--phos-dim);letter-spacing:.02em;}
+.divider h2{font-family:var(--font-display);font-weight:700;font-size:92px;line-height:1.02;
+  text-transform:uppercase;color:#eafcfb;margin:18px 0 22px;}
+.divider .note{font-size:21px;line-height:1.55;color:var(--dim);max-width:900px;}
+.divider .bar{width:120px;height:4px;background:var(--amber);margin:34px 0 0;}
+
+/* ===========================================================================
+   ENTRANCE ANIMATION
+   =========================================================================== */
+.reveal{opacity:0;transform:translateY(28px);
+  transition:opacity var(--dur) var(--ease),transform var(--dur) var(--ease);}
+.slide.visible .reveal{opacity:1;transform:none;}
+.slide.visible .reveal:nth-child(1){transition-delay:.06s;}
+.slide.visible .reveal:nth-child(2){transition-delay:.14s;}
+.slide.visible .reveal:nth-child(3){transition-delay:.22s;}
+.slide.visible .reveal:nth-child(4){transition-delay:.30s;}
+.slide.visible .reveal:nth-child(5){transition-delay:.38s;}
+.slide.visible .reveal:nth-child(6){transition-delay:.46s;}
+.slide.visible .reveal:nth-child(7){transition-delay:.54s;}
+.slide.visible .reveal:nth-child(8){transition-delay:.62s;}
+
+@keyframes roll{from{transform:rotate(-4deg);}to{transform:rotate(5deg);}}
+@keyframes pitch{from{transform:translateY(-14px) rotate(-4deg);}to{transform:translateY(16px) rotate(5deg);}}
+@keyframes fade{to{opacity:1;}}
+@keyframes rise{from{opacity:0;transform:translateY(26px);}to{opacity:1;transform:none;}}
+@keyframes blink{50%{opacity:.25;}}
+
+@media (prefers-reduced-motion:reduce){
+  .title-slide .adi .sky,.title-slide .adi .gnd,.title-slide .adi .horizon{animation:none;}
+  .title-slide .status .dot{animation:none;}
+}
+
+/* ===========================================================================
+   DECK CHROME (outside the stage)
+   =========================================================================== */
+.deck-hud{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:1000;
+  font-family:var(--font-body);font-size:12px;letter-spacing:.22em;text-transform:uppercase;
+  color:var(--phos-dim);display:flex;gap:18px;align-items:center;
+  background:rgba(6,10,17,.7);border:1px solid var(--line-soft);padding:7px 16px;}
+.deck-hud .n{color:var(--phos);}
+.deck-hud .dot{width:8px;height:8px;border-radius:50%;background:var(--phos);
+  box-shadow:0 0 8px var(--phos);}
+.deck-progress{position:fixed;left:0;top:0;height:3px;background:var(--amber);z-index:1000;
+  transition:width .35s var(--ease);box-shadow:0 0 10px var(--amber);}
+
+/* inline editor */
+.edit-hotzone{position:fixed;top:0;left:0;width:80px;height:80px;z-index:10000;cursor:pointer;}
+.edit-toggle{position:fixed;top:16px;left:16px;z-index:10001;width:44px;height:44px;
+  border:1px solid var(--line);background:rgba(6,10,17,.9);color:var(--phos);font-size:18px;
+  border-radius:6px;cursor:pointer;opacity:0;pointer-events:none;transition:opacity .3s ease;}
+.edit-toggle.show,.edit-toggle.active{opacity:1;pointer-events:auto;}
+.edit-toggle.active{background:var(--amber);color:#0a0a0a;border-color:var(--amber);}
+.edit-bar{position:fixed;top:16px;left:70px;z-index:10001;display:none;gap:8px;align-items:center;
+  font-family:var(--font-body);font-size:12px;letter-spacing:.1em;text-transform:uppercase;
+  background:rgba(6,10,17,.92);border:1px solid var(--line);padding:8px 12px;border-radius:6px;
+  color:var(--dim);}
+.edit-bar.show{display:flex;}
+.edit-bar button{font:inherit;background:var(--phos);color:#0a0a0a;border:0;padding:6px 12px;
+  border-radius:4px;cursor:pointer;letter-spacing:.1em;}
+[contenteditable="true"]{outline:2px dashed var(--phos);outline-offset:4px;border-radius:2px;}
+</style>
+<div class="deck-viewport">
+  <main class="deck-stage" id="deckStage">
+
+    <!-- ============================================================= 01 TITLE -->
+    <section class="slide title-slide active" data-sec="Ground Control">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="adi">
+        <div class="sky"></div><div class="gnd"></div><div class="horizon"></div>
+        <div class="ladder" id="ladder"></div><div class="fpm"></div>
+      </div>
+      <div class="status"><span class="dot"></span>SITL &middot; LOCKSTEP LOCKED &middot; INTERNAL BRIEF</div>
+      <h1><span>Drone SITL</span><span>&amp; <b>flight()</b></span></h1>
+      <p class="sub">PX4 and Isaac Sim flown as one clock. A browser cockpit for the pilot &mdash;
+        and four normalised stick axes for everyone else's code.</p>
+      <div class="readout">PX4&nbsp;SITL <span class="d">//</span> ISAAC&nbsp;SIM
+        <span class="d">//</span> LOCKSTEP&nbsp;250&ndash;1000&nbsp;HZ
+        <span class="d">//</span> flight(lx,&nbsp;ly,&nbsp;rx,&nbsp;ry)&nbsp;&isin;&nbsp;[&minus;1,&nbsp;1]
+        <span class="d">//</span> 2026&ndash;09&ndash;08</div>
+    </section>
+
+    <!-- ===================================================== 02 DIVIDER I -->
+    <section class="slide divider" data-sec="I &middot; The system">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="inner">
+        <div class="pnum reveal">I</div>
+        <h2 class="reveal">The system</h2>
+        <p class="note reveal">What this repo is, what runs inside it, and why PX4 and the
+          simulator have to march to the same clock.</p>
+        <div class="bar reveal"></div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 03 WHAT THIS IS -->
+    <section class="slide" data-sec="I &middot; The system">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">The system</span><span>Overview</span></div>
+      <div class="inner">
+        <div class="kicker reveal">What this is</div>
+        <h2 class="title reveal">A sandbox for a drone perception contest</h2>
+        <div class="body">
+          <p class="lead reveal">The repo is a <strong>practice rig</strong>, not the contest itself.
+            It stands up a full flight stack &mdash; autopilot, physics, photoreal camera, a web
+            control panel &mdash; so control code and perception code can be flown and broken
+            safely, long before they meet the real hardware.</p>
+          <div class="grid3" style="margin-top:40px;">
+            <div class="panel reveal">
+              <span class="tag">The task</span>
+              <p>Fly a survey pattern, spot vehicles from the air, read the text on them.
+                Scored on <span class="amber">detection</span> plus <span class="amber">ATE</span>
+                &mdash; how tightly the aircraft tracks the planned path.</p>
+            </div>
+            <div class="panel reveal">
+              <span class="tag">The real rig</span>
+              <p>A <strong>custom flight controller</strong>, not PX4. The competitor never
+                touches attitude or motors &mdash; they get a thin control API and a camera feed.</p>
+            </div>
+            <div class="panel reveal">
+              <span class="tag">This week</span>
+              <p>Two things landed: <span class="phos">proportional stick control</span> for the
+                human pilot, and <span class="phos">flight()</span> &mdash; the competitor
+                control primitive &mdash; implemented for real in the sandbox.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 04 THE STACK -->
+    <section class="slide" data-sec="I &middot; The system">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">The system</span><span>Components</span></div>
+      <div class="inner">
+        <div class="kicker reveal">The stack</div>
+        <h2 class="title reveal">Four processes, one aircraft</h2>
+        <div class="body">
+          <div class="grid4">
+            <div class="panel reveal">
+              <h3>PX4 SITL</h3>
+              <p>The autopilot, unmodified, running on the host. Estimator, controllers,
+                MAVLink &mdash; exactly the firmware, just no board.</p>
+            </div>
+            <div class="panel reveal">
+              <h3>Isaac Sim</h3>
+              <p>Rigid-body physics and the photoreal render. Owns the world and,
+                crucially, owns <span class="amber">time</span>.</p>
+            </div>
+            <div class="panel reveal">
+              <h3>Cesium terrain</h3>
+              <p>Real-world elevation and imagery tiles streamed in, so the camera sees
+                actual ground, not a grey plane.</p>
+            </div>
+            <div class="panel reveal">
+              <h3>Web flight deck</h3>
+              <p>A browser panel on <span class="inline-code">:8090</span> &mdash; joystick,
+                live telemetry, map, sim freeze, agent upload &amp; run.</p>
+            </div>
+          </div>
+          <p class="lead reveal" style="margin-top:40px;">
+            MAVLink carries commands and telemetry between PX4 and the bridge. A separate
+            HIL channel carries <strong>motor thrusts out</strong> and
+            <strong>sensor truth back</strong> between the bridge and Isaac. The web deck
+            talks to the bridge over WebSocket.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 05 LOCKSTEP -->
+    <section class="slide" data-sec="I &middot; The system">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">The system</span><span>Lockstep</span></div>
+      <div class="inner">
+        <div class="kicker reveal">The lockstep loop</div>
+        <h2 class="title reveal">The simulator is the clock master</h2>
+        <div class="body">
+          <div class="grid2">
+            <div class="reveal">
+              <ul class="hud">
+                <li>Isaac advances one physics step, then <strong>pauses</strong>.</li>
+                <li>It sends PX4 a fresh sensor frame stamped with sim time &mdash;
+                  IMU, baro, the pose the estimator needs.</li>
+                <li>PX4 runs one controller iteration and replies with
+                  <strong>per-rotor thrust, 0&ndash;1</strong>. Nothing else &mdash;
+                  no attitude, no rates.</li>
+                <li>Isaac applies those thrusts, steps again. Repeat at the FC's
+                  native rate.</li>
+              </ul>
+            </div>
+            <div class="reveal">
+              <div class="callout">
+                <span class="lbl">Why it matters</span>
+                Wall-clock and sim-clock drift apart the moment either side is busy.
+                In lockstep the estimator never sees a jittered dt, so SITL behaves
+                identically on a loaded box and an idle one &mdash; runs are reproducible.
+              </div>
+              <div class="panel" style="margin-top:24px;">
+                <span class="tag">The failure mode</span>
+                <p>Freeze the stream for more than ~30&nbsp;s, or restart the tap
+                  mid-run, and PX4 wedges &mdash; it needs a full restart. Covered on
+                  the freeze-tap slide.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 06 TWO WORKSTREAMS -->
+    <section class="slide" data-sec="I &middot; The system">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">The system</span><span>Scope</span></div>
+      <div class="inner">
+        <div class="kicker reveal">Two workstreams this week</div>
+        <h2 class="title reveal">Human pilot &nbsp;/&nbsp; competitor code</h2>
+        <div class="body">
+          <div class="grid2">
+            <div class="panel reveal">
+              <span class="tag">A &middot; Pilot in the loop</span>
+              <h3>Fly it by hand, well</h3>
+              <p style="margin-bottom:14px;">The web deck's discrete WASD / d-pad was
+                replaced with two <span class="phos">proportional analog sticks</span>.
+                A HIL <span class="phos">freeze tap</span> can pause the whole sim from
+                the page to inspect a moment.</p>
+              <p class="dim" style="font-size:17px;">web/ &nbsp;&middot;&nbsp; web-v2/ &nbsp;&middot;&nbsp;
+                streaming/offboard.py &nbsp;&middot;&nbsp; sim/hil_tap.py</p>
+            </div>
+            <div class="panel reveal">
+              <span class="tag">B &middot; Submission pipeline</span>
+              <h3>How competitor code flies &amp; ships</h3>
+              <p style="margin-bottom:14px;">The old four-command control vocabulary
+                collapsed to one primitive, <span class="phos">flight()</span>,
+                implemented in the sandbox. Docker submissions now upload, build and run
+                straight through the website.</p>
+              <p class="dim" style="font-size:17px;">competition/ &nbsp;&middot;&nbsp;
+                streaming/agent_control.py &nbsp;&middot;&nbsp; streaming/docker_build.py</p>
+            </div>
+          </div>
+          <p class="lead reveal" style="margin-top:38px;">
+            They share more than they look: <strong>flight() runs the exact same
+            axes&#8209;to&#8209;velocity math</strong> the human joystick does.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 07 DIVIDER II -->
+    <section class="slide divider" data-sec="II &middot; Pilot in the loop">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="inner">
+        <div class="pnum reveal">II</div>
+        <h2 class="reveal">Pilot in the loop</h2>
+        <p class="note reveal">Making the web deck fly like a real transmitter &mdash;
+          and being able to stop the world and look at it.</p>
+        <div class="bar reveal"></div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 08 DUAL STICK -->
+    <section class="slide" data-sec="II &middot; Pilot in the loop">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">Pilot in the loop</span><span>Control input</span></div>
+      <div class="inner">
+        <div class="kicker reveal">Dual-stick joystick control</div>
+        <h2 class="title reveal">From buttons to deflection</h2>
+        <div class="body">
+          <div class="grid2">
+            <div class="panel reveal">
+              <span class="tag">Before</span>
+              <p>WASD and a d-pad. Each key a <span class="danger">boolean held-set</span>:
+                pressed meant "full speed that way", released meant "stop". No in-between,
+                so no gentle corrections &mdash; every input was a lurch.</p>
+            </div>
+            <div class="panel reveal">
+              <span class="tag">After</span>
+              <p>Two on-screen sticks. Each axis is a continuous
+                <span class="phos">[&minus;1, 1]</span> deflection sent as a
+                <span class="inline-code">{type:"stick"}</span> message. Half stick is
+                half speed. <span class="inline-code">--speed-right</span> tunes the
+                translation stick independently.</p>
+            </div>
+          </div>
+          <div class="reveal" style="margin-top:30px;">
+            <p class="lead">One change, touching every layer:</p>
+            <ul class="hud" style="margin-top:18px;">
+              <li><strong>offboard</strong> &mdash; proportional setpoints replace the boolean held-set</li>
+              <li><strong>joystick-server</strong> &mdash; handles <span class="inline-code">{type:stick}</span> over WebSocket, adds <span class="inline-code">--speed-right</span></li>
+              <li><strong>web/ and web-v2/</strong> &mdash; the dual-stick widget replaces WASD / d-pad in both UIs</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 09 STICK -> VEL -->
+    <section class="slide" data-sec="II &middot; Pilot in the loop">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">Pilot in the loop</span><span>Input path</span></div>
+      <div class="inner">
+        <div class="kicker reveal">Stick &rarr; velocity</div>
+        <h2 class="title reveal">Where the numbers get flipped</h2>
+        <div class="body">
+          <div class="grid2" style="align-items:start;">
+            <div class="reveal">
+              <ul class="hud">
+                <li>The widget reports screen axes &mdash; <strong>y is DOM-down</strong>.
+                  The UI corrects that sign before anything else.</li>
+                <li><span class="inline-code">axes_to_body_velocity()</span> scales each
+                  axis by its speed constant into a <strong>body-NED</strong> setpoint.</li>
+                <li>NED means <strong>+z is down</strong>, so "climb" is negative vz.
+                  The <span class="amber">+up &rarr; NED flip</span> lives in exactly one
+                  place: <span class="inline-code">agent_control / CommandState</span>.</li>
+                <li>Stop sending and the setpoint <strong>decays to hover</strong> after
+                  the watchdog window &mdash; a stuck stick is a hazard.</li>
+              </ul>
+            </div>
+            <div class="reveal">
+<pre class="code"><span class="c"># offboard.axes_to_body_velocity</span>
+<span class="k">def</span> <span class="f">axes_to_body_velocity</span>(pitch, roll, thrust,
+        speed_fwd, speed_right, speed_up):
+    vx = pitch  * speed_fwd      <span class="c"># nose  +fwd</span>
+    vy = roll   * speed_right    <span class="c"># right +stbd</span>
+    vz = -thrust * speed_up      <span class="c"># NED: climb = -vz</span>
+    <span class="k">return</span> vx, vy, vz            <span class="c"># body frame, +down</span></pre>
+              <p class="dim" style="margin-top:16px;font-size:17px;">
+                The same function serves the human stick and, later,
+                <span class="phos">flight()</span>.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 10 FREEZE TAP -->
+    <section class="slide" data-sec="II &middot; Pilot in the loop">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">Pilot in the loop</span><span>HIL freeze tap</span></div>
+      <div class="inner">
+        <div class="kicker reveal">sim/hil_tap.py</div>
+        <h2 class="title reveal">Stop the world and look at it</h2>
+        <div class="body">
+          <div class="grid2">
+            <div class="reveal">
+              <ul class="hud">
+                <li>The tap sits <strong>inline on the PX4&harr;Isaac HIL stream</strong>,
+                  forwarding every packet.</li>
+                <li>Hit <span class="inline-code">FREEZE SIM</span> on the page and it
+                  stops forwarding &mdash; both sides block, sim time stops, the frame
+                  is held still for inspection.</li>
+                <li>A live readout and <span class="inline-code">/hil/status</span>
+                  expose what's flowing.</li>
+              </ul>
+              <div class="callout" style="margin-top:24px;">
+                <span class="lbl">Fixed along the way</span>
+                A 3&nbsp;s socket-timeout crash, and a thaw deadlock on unfreeze.
+                Static JS got a no-cache header after a stale browser cache silently
+                broke the button with zero errors in the console.
+              </div>
+            </div>
+            <div class="reveal">
+              <div class="panel">
+                <span class="tag">Hard limit</span>
+                <p>Freeze longer than <span class="amber">~30&nbsp;s</span>, or restart
+                  the tap while PX4 is up, and PX4 wedges. Lockstep has no notion of a
+                  30&nbsp;second gap. Recovery is a <strong>full restart</strong> &mdash;
+                  the freeze is a microscope, not a pause button for a coffee break.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 11 DIVIDER III -->
+    <section class="slide divider" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="inner">
+        <div class="pnum reveal">III</div>
+        <h2 class="reveal">flight() &mdash; the one primitive</h2>
+        <p class="note reveal">The whole competitor-facing control surface, and how a
+          single call travels from their code to a PX4 setpoint.</p>
+        <div class="bar reveal"></div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 12 THE COMPETITION -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>Context</span></div>
+      <div class="inner">
+        <div class="kicker reveal">The competition, briefly</div>
+        <h2 class="title reveal">Perception, not airmanship</h2>
+        <div class="body">
+          <p class="lead reveal">The founding premise: teams are scored on what they
+            <strong>see and read</strong>, not on how well they fly. That shapes every
+            API decision below.</p>
+          <div class="grid3" style="margin-top:38px;">
+            <div class="panel reveal">
+              <h3>Detection score</h3>
+              <p>Find the vehicles, read the text, submit an answer. The real contest.</p>
+            </div>
+            <div class="panel reveal">
+              <h3>ATE score</h3>
+              <p>Absolute trajectory error against the planned survey track. Leave the
+                track and ATE <span class="amber">pauses</span>; the detection-scoring
+                window opens.</p>
+            </div>
+            <div class="panel reveal">
+              <h3>Deployment</h3>
+              <p>The competitor's script runs as a <strong>local subprocess</strong> on
+                the organiser's box, against the local FC. No Jetson, no network hop.</p>
+            </div>
+          </div>
+          <div class="callout reveal" style="margin-top:34px;">
+            <span class="lbl">Unresolved tension</span>
+            An ATE score <em>is</em> scoring airmanship &mdash; it collides with the
+            premise. Held open deliberately; see the Route slide.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 13 SHAPE OF A SUBMISSION -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>Submission shape</span></div>
+      <div class="inner">
+        <div class="kicker reveal">Shape of a submission</div>
+        <h2 class="title reveal">You do not write the loop</h2>
+        <div class="body">
+          <div class="grid2" style="align-items:start;">
+            <div class="reveal">
+<pre class="code"><span class="k">class</span> <span class="f">MyAgent</span>(Agent):
+
+    <span class="k">def</span> <span class="f">on_start</span>(self, arena): ...   <span class="c"># once, models</span>
+
+    <span class="k">def</span> <span class="f">on_frame</span>(self, image, state):
+        <span class="c"># ~5 Hz  — heavy perception</span>
+
+    <span class="k">def</span> <span class="f">on_tick</span>(self, state):
+        <span class="c"># ~20 Hz — cheap steering, no image</span>
+
+    <span class="k">def</span> <span class="f">on_arrival</span>(self, state): ...
+    <span class="k">def</span> <span class="f">on_waypoint</span>(self, i, state): ...
+    <span class="k">def</span> <span class="f">on_route_complete</span>(self, state): ...</pre>
+            </div>
+            <div class="reveal">
+              <ul class="hud">
+                <li>The <strong>harness owns the loop</strong> and calls your methods at
+                  fixed rates.</li>
+                <li>Each callback returns a <span class="inline-code">Command</span>
+                  &mdash; a flight command, a camera switch, or both.</li>
+                <li>Return <span class="inline-code">None</span> and the aircraft
+                  <strong>keeps doing what it was doing</strong>. A slow detector never
+                  stalls the aircraft.</li>
+                <li>Events (<span class="inline-code">on_arrival</span>,
+                  <span class="inline-code">on_waypoint</span>&hellip;) are
+                  <strong>synthesised from mission telemetry</strong>, not polled.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 14 CALLBACKS & BUDGETS -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>Timing contract</span></div>
+      <div class="inner">
+        <div class="kicker reveal">Callbacks &amp; budgets</div>
+        <h2 class="title reveal">The sim does not wait for you</h2>
+        <div class="body">
+          <div class="reveal">
+            <table class="data">
+              <tr><th>Callback</th><th>Rate</th><th>Budget</th><th>If you overrun</th></tr>
+              <tr><td class="k">on_frame</td><td>~5 Hz</td><td>200 ms</td>
+                <td>call abandoned on a worker thread &mdash; previous command holds</td></tr>
+              <tr><td class="k">on_tick</td><td>~20 Hz</td><td>50 ms</td>
+                <td>call abandoned &mdash; previous command holds</td></tr>
+              <tr><td class="k">events</td><td>as they occur</td><td>200 ms</td>
+                <td>call abandoned</td></tr>
+            </table>
+          </div>
+          <div class="grid2 reveal" style="margin-top:34px;">
+            <div class="callout">
+              <span class="lbl">The rule</span>
+              A callback that overruns is joined with a timeout and dropped. A genuinely
+              wedged one leaves a parked daemon thread; killing the process is the backstop.
+            </div>
+            <div class="panel">
+              <span class="tag">Why real-time, not stepped</span>
+              <p>The simulation runs in wall time. A slow script is a drone that flew
+                blind while you were thinking &mdash; penalised by physics, not by a rule.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 15 FOUR -> ONE -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>Vocabulary change</span></div>
+      <div class="inner">
+        <div class="kicker reveal">Four commands &rarr; one primitive</div>
+        <h2 class="title reveal">What got removed, and why</h2>
+        <div class="body">
+          <div class="reveal">
+            <table class="data">
+              <tr><th>Command</th><th>Disposition</th><th>Reason</th></tr>
+              <tr><td class="k">Velocity</td><td class="strike">removed &rarr; flight()</td>
+                <td>the one-uniform-primitive goal driving the redesign</td></tr>
+              <tr><td class="k">VelocityWorld</td><td class="strike">removed &rarr; flight()</td>
+                <td>world-frame variant; competitor rotates the bearing themselves (~4 lines)</td></tr>
+              <tr><td class="k">Goto(lat, lon, alt)</td><td class="strike">removed</td>
+                <td>~15 lines on flight(), proven by spike; no server-side value</td></tr>
+              <tr><td class="k">Hold()</td><td class="strike">removed</td>
+                <td><span class="inline-code">flight(0,0,0,0)</span> &mdash; a bare zero isn't worth a type</td></tr>
+              <tr><td class="k">Route([...], alt, speed)</td><td class="phos">kept, unchanged</td>
+                <td>tick-rate smoothness + it is the scoring on/off signal</td></tr>
+              <tr><td class="k">Inspect(lat, lon)</td><td class="phos">kept, unchanged</td>
+                <td>solves the standoff triangle every team would re-derive</td></tr>
+            </table>
+          </div>
+          <p class="lead reveal" style="margin-top:28px;">
+            Landed in commit <span class="inline-code">7eede71</span> &mdash; old vocabulary
+            gone, <strong>168 tests green</strong>. Route kept as-is; the Route question is
+            still open.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 16 SIGNATURE -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>Signature</span></div>
+      <div class="inner">
+        <div class="kicker reveal">The one primitive</div>
+        <h2 class="title reveal">flight(left_x, left_y, right_x, right_y)</h2>
+        <div class="body">
+          <div class="reveal">
+<pre class="code"><span class="k">from</span> competition <span class="k">import</span> Agent, Command, flight
+
+<span class="k">return</span> Command(flight=flight(<span class="n">0</span>, <span class="n">0</span>, <span class="n">0</span>, <span class="n">1.0</span>))   <span class="c"># full speed straight ahead</span>
+<span class="k">return</span> Command(flight=flight(<span class="n">0</span>, <span class="n">0</span>, <span class="n">0.4</span>, <span class="n">0.8</span>)) <span class="c"># forward + a little strafe right</span>
+<span class="k">return</span> Command(flight=flight(<span class="n">0.6</span>, <span class="n">0</span>, <span class="n">0</span>, <span class="n">0</span>))   <span class="c"># spin right in place</span></pre>
+          </div>
+          <div class="grid3 reveal" style="margin-top:34px;">
+            <div class="panel">
+              <h3>Two sticks</h3>
+              <p>Left stick and right stick, like a real transmitter. Four axes total.</p>
+            </div>
+            <div class="panel">
+              <h3>Normalised</h3>
+              <p>Every axis is a continuous <span class="phos">[&minus;1, 1]</span>.
+                Full deflection on a translation axis = <span class="amber">5 m/s</span>.
+                Yaw full = <span class="amber">45&deg;/s</span>.</p>
+            </div>
+            <div class="panel">
+              <h3>A frozen dataclass</h3>
+              <p>Validated to range on construction. An out-of-range axis is a
+                <span class="inline-code">ValueError</span> at the call site, not a
+                silent clamp in flight.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 17 FOUR AXES -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>Axis map</span></div>
+      <div class="inner">
+        <div class="kicker reveal">The four axes</div>
+        <h2 class="title reveal">State the deflection you want</h2>
+        <div class="body">
+          <div class="reveal">
+            <table class="data">
+              <tr><th>Stick</th><th>Axis</th><th>Controls</th><th>+1 means</th></tr>
+              <tr><td class="k">left</td><td class="k">left_y</td><td>thrust</td><td>full climb</td></tr>
+              <tr><td class="k">left</td><td class="k">left_x</td><td>yaw</td><td>full right / clockwise</td></tr>
+              <tr><td class="k">right</td><td class="k">right_y</td><td>pitch</td><td>full forward</td></tr>
+              <tr><td class="k">right</td><td class="k">right_x</td><td>roll</td><td>full right / strafe</td></tr>
+            </table>
+          </div>
+          <div class="grid2 reveal" style="margin-top:32px;">
+            <div class="callout">
+              <span class="lbl">Not buttons</span>
+              There are no discrete direction commands. "You have no fingers" &mdash;
+              you state a vector, the aircraft holds that deflection.
+            </div>
+            <div class="callout">
+              <span class="lbl">Positive-up thrust</span>
+              <span class="inline-code">left_y = +1</span> climbs. This is
+              <em>not</em> NED &mdash; the one sign flip that trips people up. The
+              conversion to +down happens server-side, once.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 18 CARTESIAN -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>Design &middot; form</span></div>
+      <div class="inner">
+        <div class="kicker reveal">Cartesian, not polar</div>
+        <h2 class="title reveal">No angle, no magnitude</h2>
+        <div class="body">
+          <div class="grid2">
+            <div class="panel reveal">
+              <span class="tag">Rejected</span>
+              <p><span class="inline-code">flight(bearing_deg, push)</span> &mdash;
+                an angle 0&ndash;360 plus a push amount. Reads nicely in prose.</p>
+              <p style="margin-top:12px;">But a script never has an angle. It has a
+                <strong>direction vector</strong> &mdash; from a detection, a bearing
+                calc, a difference of positions.</p>
+            </div>
+            <div class="panel reveal">
+              <span class="tag">Chosen</span>
+              <p>Four Cartesian axes. The vector goes straight in. No
+                <span class="inline-code">atan2</span> to enter polar,
+                no <span class="inline-code">sin/cos</span> to leave it.</p>
+              <p style="margin-top:12px;">The validation spike wrote the polar version
+                first &mdash; it was <strong>pure overhead</strong>, rewritten to
+                Cartesian with zero round-trip.</p>
+            </div>
+          </div>
+          <p class="lead reveal" style="margin-top:36px;">
+            Same shape the human joystick UI already produces internally &mdash;
+            <span class="inline-code">(pitch, roll, yaw, thrust)</span>. flight() hands
+            it over directly.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 19 BODY FRAME -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>Design &middot; frame</span></div>
+      <div class="inner">
+        <div class="kicker reveal">Body frame, not world frame</div>
+        <h2 class="title reveal">Nose-relative, always</h2>
+        <div class="body">
+          <div class="grid2" style="align-items:start;">
+            <div class="reveal">
+              <ul class="hud">
+                <li><span class="inline-code">right_y = +1</span> is "forward from the
+                  <strong>nose</strong>", not "north". There is no
+                  <span class="inline-code">VelocityWorld</span> counterpart any more.</li>
+                <li>Steering toward a lat/lon target means rotating the world bearing
+                  into the body frame <strong>yourself</strong>.</li>
+                <li>Judged ~4 lines &mdash; not worth a
+                  <span class="inline-code">world_to_body()</span> helper, unlike the
+                  genuinely hard <span class="inline-code">pixel_to_ground()</span>
+                  camera math.</li>
+                <li><span class="inline-code">state.lat / lon / heading</span> arrive
+                  with every callback &mdash; no polling call needed.</li>
+              </ul>
+            </div>
+            <div class="reveal">
+<pre class="code"><span class="c"># world bearing (north, east)  ->  flight() body axes</span>
+h  = math.radians(state.heading)
+rx = north * math.sin(h) + east * math.cos(h)
+ry = north * math.cos(h) - east * math.sin(h)
+<span class="k">return</span> Command(flight=flight(<span class="n">0</span>, <span class="n">0</span>, rx, ry))</pre>
+              <p class="dim" style="margin-top:16px;font-size:17px;">
+                Detections come back in map coordinates, so this is the only coordinate
+                translation a competitor ever writes.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 20 STATELESS -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>Design &middot; lifetime</span></div>
+      <div class="inner">
+        <div class="kicker reveal">Stateless &amp; watchdogged</div>
+        <h2 class="title reveal">Re-issue it, or it decays</h2>
+        <div class="body">
+          <div class="grid2">
+            <div class="reveal">
+              <ul class="hud">
+                <li>flight() carries <strong>no state</strong>. It is a setpoint for
+                  <em>now</em>, not a command that latches.</li>
+                <li>No new flight() within <span class="amber">~0.5 s</span> and the
+                  server watchdog <strong>decays it to a hover</strong>.</li>
+                <li>To hold a heading, return the same flight() every
+                  <span class="inline-code">on_tick</span>. To hold position
+                  deliberately, return <span class="inline-code">flight(0,0,0,0)</span>
+                  every tick.</li>
+                <li>A silent script must not leave a velocity running &mdash; a stuck
+                  setpoint is the same hazard as a stuck stick.</li>
+              </ul>
+            </div>
+            <div class="reveal">
+              <div class="callout">
+                <span class="lbl">Same shape as the old Velocity</span>
+                Velocity was already stateless and watchdogged. flight() keeps that
+                contract exactly &mdash; only the axis layout changed, not the lifetime
+                model. Nothing to unlearn.
+              </div>
+              <div class="panel" style="margin-top:24px;">
+                <span class="tag">Common mistake</span>
+                <p>Expecting flight() to persist. It won't. Use
+                  <span class="inline-code">Route</span> or
+                  <span class="inline-code">Inspect</span> for anything you want the
+                  server to hold.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 21 END TO END -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>End-to-end path</span></div>
+      <div class="inner">
+        <div class="kicker reveal">One flight() call, all the way down</div>
+        <h2 class="title reveal">From your return statement to a rotor</h2>
+        <div class="body">
+          <div class="rail reveal">
+            <div class="step"><div class="where">Agent callback</div>
+              <div class="what">returns <b>Command(flight=flight(0, 0, 0, 1.0))</b></div></div>
+            <div class="step"><div class="where">Harness</div>
+              <div class="what">validates, serialises to a wire message
+                <b>{"type":"flight", "left_x":0, "left_y":0, "right_x":0, "right_y":1.0}</b></div></div>
+            <div class="step"><div class="where">joystick-server</div>
+              <div class="what"><b>/agent/control</b> dispatch routes <b>"flight"</b> to
+                <b>AgentControl.set_flight(&hellip;)</b></div></div>
+            <div class="step"><div class="where">agent_control</div>
+              <div class="what"><b>axes_to_body_velocity(right_y, right_x, left_y, &hellip;)</b> +
+                <b>yaw_rate = left_x &times; 45&deg;/s</b> &rarr; body-NED velocity</div></div>
+            <div class="step"><div class="where">AgentControl.command()</div>
+              <div class="what">read once per tick by the setpoint loop; watchdog zeroes it
+                if stale &gt; 0.5 s</div></div>
+            <div class="step"><div class="where">offboard &rarr; PX4</div>
+              <div class="what">MAVLink body-velocity setpoint; PX4's controllers do the rest
+                at native rate</div></div>
+          </div>
+          <p class="lead reveal" style="margin-top:26px;">
+            Route does <strong>not</strong> travel this path &mdash; it goes through
+            <span class="inline-code">waypoints.Mission</span>, exactly like the
+            operator's map route.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 22 ONE CONVERSION -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>Reuse</span></div>
+      <div class="inner">
+        <div class="kicker reveal">One conversion, two callers</div>
+        <h2 class="title reveal">flight() is the joystick, in code</h2>
+        <div class="body">
+          <p class="lead reveal">The human stick and flight() converge on the
+            <strong>same function</strong>. <span class="inline-code">set_flight()</span>
+            is a thin adapter &mdash; a coordinate-shape change, no new control logic.</p>
+          <div class="grid2 reveal" style="margin-top:34px;">
+            <div class="panel">
+              <span class="tag">Added</span>
+              <p><span class="inline-code">AgentControl.set_flight()</span> &mdash; reuses
+                <span class="inline-code">offboard.axes_to_body_velocity</span> and
+                <span class="inline-code">axes_to_yaw_rate</span>, the exact calls
+                <span class="inline-code">CommandState</span> makes for the web UI.</p>
+            </div>
+            <div class="panel">
+              <span class="tag">Deleted as now-dead code</span>
+              <p><span class="inline-code">set_velocity_world</span>,
+                <span class="inline-code">offboard.send_velocity_world</span>,
+                <span class="inline-code">MAV_FRAME_LOCAL_NED</span> &mdash; the
+                world-frame path had no caller once
+                <span class="inline-code">VelocityWorld</span> was gone.</p>
+            </div>
+          </div>
+          <div class="callout reveal" style="margin-top:32px;">
+            <span class="lbl">Payoff</span>
+            The competitor's straight-line flight and the pilot's stick input are now
+            the same code path &mdash; one place to tune, one place for a bug to hide.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 23 CAN'T DO -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>Boundaries</span></div>
+      <div class="inner">
+        <div class="kicker reveal">What flight() deliberately can't do</div>
+        <h2 class="title reveal">flight() is the floor</h2>
+        <div class="body">
+          <div class="reveal">
+            <table class="data">
+              <tr><th>Not available</th><th>Why</th></tr>
+              <tr><td class="strike">Attitude / rate / motor control</td>
+                <td>the stabilisation loop can't cross a process boundary &mdash; a
+                  hiccup puts it in the ground</td></tr>
+              <tr><td class="strike">Acceleration setpoints</td>
+                <td>a stale acceleration diverges quadratically, not linearly</td></tr>
+              <tr><td class="strike">Blocking calls (goto_and_wait)</td>
+                <td>the harness owns the loop; a blocking call stalls your own tick.
+                  Completion arrives as an event</td></tr>
+              <tr><td class="strike">Gimbal / zoom</td>
+                <td>cameras are rigidly bolted on &mdash; you aim by flying, magnify by
+                  switching lens</td></tr>
+              <tr><td class="strike">Discrete direction commands</td>
+                <td>state the deflection you want; there is no "nudge left"</td></tr>
+            </table>
+          </div>
+          <p class="lead reveal" style="margin-top:28px;">
+            Everything removed is either a <strong>safety hazard across a boundary</strong>
+            or <strong>trivially rebuildable</strong> on flight() itself.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 24 ROUTE & INSPECT -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>Route &amp; Inspect</span></div>
+      <div class="inner">
+        <div class="kicker reveal">The two that stayed</div>
+        <h2 class="title reveal">Route &amp; Inspect &mdash; and one open question</h2>
+        <div class="body">
+          <div class="grid2 reveal">
+            <div class="panel">
+              <h3>Route</h3>
+              <p>Interpolates the whole polyline on the sim host at the FC's native rate
+                (250&nbsp;Hz&ndash;1&nbsp;kHz). A hand-rolled flight() sweep only updates
+                at <span class="inline-code">on_tick</span> &mdash; visibly choppier over
+                a 24-minute survey. Its pause/resume state also <em>is</em> the
+                on-track / off-track signal for scoring.</p>
+            </div>
+            <div class="panel">
+              <h3>Inspect</h3>
+              <p>Solves the standoff triangle &mdash; distance, altitude, heading &mdash;
+                so the oblique camera ends up looking at the point you named. Inherently
+                an off-track manoeuvre, so it never competes with ATE.</p>
+            </div>
+          </div>
+          <div class="callout reveal" style="margin-top:30px;">
+            <span class="lbl">Open: Route vs ATE</span>
+            Route flies identically well for every team regardless of their code. If it's
+            usable during the ATE-scored track, ATE stops differentiating anyone. Leading
+            candidate: <strong>cut Route</strong>, fly the track by hand with flight(),
+            switch the ATE trigger to a geofence check. Not yet grilled &mdash; the
+            sandbox ships Route as-is until it is.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 25 VALIDATION -->
+    <section class="slide" data-sec="III &middot; flight()">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">flight()</span><span>Validation</span></div>
+      <div class="inner">
+        <div class="kicker reveal">Proven before it was written up</div>
+        <h2 class="title reveal">A 15-line guidance loop flew it</h2>
+        <div class="body">
+          <div class="grid3 reveal">
+            <div class="panel">
+              <h3>The test</h3>
+              <p>Throwaway spike against live Isaac Sim + PX4 SITL. A proportional
+                bearing/distance loop on flight(), decelerating on approach.</p>
+            </div>
+            <div class="panel">
+              <h3>Result</h3>
+              <p>Target <span class="amber">47 m</span> offset (40 N, 25 E). Arrived
+                within <span class="amber">2 m</span>, altitude held within
+                <span class="amber">0.1 m</span>, <strong>zero yaw</strong> &mdash; a
+                world target needs only the body rotation, no heading change.</p>
+            </div>
+            <div class="panel">
+              <h3>Bug caught</h3>
+              <p>Draining one MAVLink message per tick <strong>starves position
+                updates</strong> under load. Fix: drain all pending messages per tick,
+                like the joystick server already does.</p>
+            </div>
+          </div>
+          <p class="lead reveal" style="margin-top:34px;">
+            Conclusion: <strong>flight() alone is a sufficient floor primitive.</strong>
+            Route's smoothness claim is argued structurally, not yet measured.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 26 DOCKER -->
+    <section class="slide" data-sec="IV &middot; Submissions">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">Submissions</span><span>Docker pipeline</span></div>
+      <div class="inner">
+        <div class="kicker reveal">How competitor code actually ships</div>
+        <h2 class="title reveal">Upload &rarr; build &rarr; run, in the browser</h2>
+        <div class="body">
+          <div class="grid3 reveal">
+            <div class="panel">
+              <h3>Bundle</h3>
+              <p>A Docker image on <span class="inline-code">competition-base:latest</span>
+                &mdash; pymavlink, numpy, Pillow, the <span class="inline-code">competition</span>
+                package already solved. Upload a <span class="inline-code">.tar</span> to
+                <span class="inline-code">/agent/upload-docker</span>.</p>
+            </div>
+            <div class="panel">
+              <h3>Or pull</h3>
+              <p><span class="inline-code">POST /agent/pull-docker?ref=&hellip;</span>
+                &mdash; <span class="inline-code">docker pull</span> + re-tag into the
+                same <span class="inline-code">submission-*</span> namespace. Public
+                registries only, no credentials anywhere. Zero changes downstream.</p>
+            </div>
+            <div class="panel">
+              <h3>Run</h3>
+              <p><span class="inline-code">AgentRun</span> gained a
+                <span class="inline-code">kind</span> (<span class="inline-code">script</span>
+                | <span class="inline-code">docker</span>). Same RUN / STOP buttons,
+                same live log, plus a build-log pane.</p>
+            </div>
+          </div>
+          <div class="grid2 reveal" style="margin-top:30px;">
+            <div class="callout">
+              <span class="lbl">Verified live</span>
+              End-to-end through the real HTTP / WS pipeline: uploaded, built, listed,
+              armed, took off, OFFBOARD, flew forward, stopped clean, landed, disarmed.
+              <strong>187 tests green.</strong>
+            </div>
+            <div class="callout">
+              <span class="lbl">Two bugs it caught</span>
+              <span class="inline-code">--gpus all</span> fails with no
+              nvidia-container-toolkit &rarr; detect and omit, degrade to CPU.
+              <span class="inline-code">docker stop</span>'s 5 s timeout crashed
+              <span class="inline-code">stop()</span> before <span class="inline-code">"stopped"</span>
+              &rarr; <span class="inline-code">-t 3</span> + try/except.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================== 27 STATUS -->
+    <section class="slide" data-sec="IV &middot; Submissions">
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <div class="chrome"><span class="sec">Submissions</span><span>Status</span></div>
+      <div class="inner">
+        <div class="kicker reveal">Where it stands &mdash; 2026-09-08</div>
+        <h2 class="title reveal">Done, and still open</h2>
+        <div class="body">
+          <div class="grid2">
+            <div class="reveal">
+              <h3 style="font-family:var(--font-display);color:var(--phos);font-size:24px;
+                text-transform:uppercase;letter-spacing:.06em;margin-bottom:16px;">Landed</h3>
+              <ul class="hud">
+                <li>Proportional dual-stick control &mdash; both web UIs</li>
+                <li>HIL freeze tap on the page, with its crash + deadlock fixes</li>
+                <li><span class="inline-code">flight()</span> implemented in the sandbox
+                  &mdash; commit <span class="inline-code">7eede71</span>, old vocabulary removed</li>
+                <li>Docker submissions wired into the website &mdash; upload, build,
+                  registry pull, run</li>
+                <li>187 tests green &middot; branch
+                  <span class="inline-code">feat/joystick-autopilot-poc</span>, not merged / pushed</li>
+              </ul>
+            </div>
+            <div class="reveal">
+              <h3 style="font-family:var(--font-display);color:var(--amber);font-size:24px;
+                text-transform:uppercase;letter-spacing:.06em;margin-bottom:16px;">Open</h3>
+              <ul class="hud">
+                <li class="warn"><strong>Route vs ATE</strong> &mdash; needs a grill.
+                  If Route is cut, a follow-up pass touches commands, harness,
+                  agent_control, docs and two examples.</li>
+                <li class="warn">Yaw's full-deflection rate &mdash; defaulting to
+                  45&deg;/s, never explicitly decided</li>
+                <li class="warn">The ATE on/off trigger &mdash; Route-pause vs a
+                  geofence / distance-from-track check</li>
+                <li class="warn">Sandboxing untrusted competitor code &mdash; explicitly
+                  deferred</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- deck chrome, outside the stage -->
+<div class="deck-progress" id="deckProgress"></div>
+<div class="deck-hud"><span class="dot"></span><span>Frame <span class="n" id="hudNum">01</span> / <span id="hudTot">27</span></span><span id="hudSec">Ground Control</span></div>
+
+<!-- inline editor -->
+<div class="edit-hotzone" id="editHotzone"></div>
+<button class="edit-toggle" id="editToggle" title="Edit mode (E)">&#9998;</button>
+<div class="edit-bar" id="editBar"><span>Edit mode &mdash; click any text</span><button id="editSave">Save</button><button id="editReset">Reset</button></div>
+
+<script>
+/* ===========================================================================
+   PITCH-LADDER RUNGS on the title attitude indicator
+   =========================================================================== */
+(function(){
+  var L=document.getElementById('ladder');
+  if(!L) return;
+  for(var i=-4;i<=4;i++){
+    if(i===0) continue;
+    var w=(Math.abs(i)%2===0)?120:64;
+    var el=document.createElement('i');
+    el.style.width=w+'px';
+    el.style.marginLeft=(-w/2)+'px';
+    el.style.top=(i*42)+'px';
+    L.appendChild(el);
+  }
+})();
+
+/* ===========================================================================
+   SLIDE PRESENTATION CONTROLLER
+   - fixed 1920x1080 stage, scaled as a whole to the viewport
+   - keyboard / wheel / touch navigation
+   - HUD frame counter + progress bar
+   =========================================================================== */
+class SlidePresentation{
+  constructor(){
+    this.slides=Array.from(document.querySelectorAll('.slide'));
+    this.stage=document.getElementById('deckStage');
+    this.current=0;
+    this.hudNum=document.getElementById('hudNum');
+    this.hudSec=document.getElementById('hudSec');
+    this.progress=document.getElementById('deckProgress');
+    document.getElementById('hudTot').textContent=String(this.slides.length).padStart(2,'0');
+    this.setupScale();
+    this.setupKeys();
+    this.setupWheel();
+    this.setupTouch();
+    this.show(0);
+  }
+  setupScale(){
+    const scale=()=>{
+      const f=Math.min(window.innerWidth/1920,window.innerHeight/1080);
+      const x=(window.innerWidth-1920*f)/2;
+      const y=(window.innerHeight-1080*f)/2;
+      this.stage.style.transform=`translate(${x}px, ${y}px) scale(${f})`;
+    };
+    scale();
+    window.addEventListener('resize',scale);
+  }
+  setupKeys(){
+    document.addEventListener('keydown',e=>{
+      if(e.target.getAttribute && e.target.getAttribute('contenteditable')==='true') return;
+      if(['ArrowRight','ArrowDown','PageDown',' '].includes(e.key)){e.preventDefault();this.next();}
+      else if(['ArrowLeft','ArrowUp','PageUp'].includes(e.key)){e.preventDefault();this.prev();}
+      else if(e.key==='Home'){this.show(0);}
+      else if(e.key==='End'){this.show(this.slides.length-1);}
+    });
+  }
+  setupWheel(){
+    let lock=false;
+    window.addEventListener('wheel',e=>{
+      if(lock||Math.abs(e.deltaY)<24) return;
+      lock=true;setTimeout(()=>lock=false,480);
+      e.deltaY>0?this.next():this.prev();
+    },{passive:true});
+  }
+  setupTouch(){
+    let x0=null,y0=null;
+    window.addEventListener('touchstart',e=>{x0=e.touches[0].clientX;y0=e.touches[0].clientY;},{passive:true});
+    window.addEventListener('touchend',e=>{
+      if(x0===null) return;
+      const dx=e.changedTouches[0].clientX-x0, dy=e.changedTouches[0].clientY-y0;
+      if(Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)) dx<0?this.next():this.prev();
+      x0=y0=null;
+    },{passive:true});
+  }
+  next(){this.show(this.current+1);}
+  prev(){this.show(this.current-1);}
+  show(i){
+    this.current=Math.max(0,Math.min(i,this.slides.length-1));
+    this.slides.forEach((s,n)=>{
+      s.classList.toggle('active',n===this.current);
+      s.classList.toggle('visible',n===this.current);
+    });
+    const s=this.slides[this.current];
+    this.hudNum.textContent=String(this.current+1).padStart(2,'0');
+    this.hudSec.textContent=(s.dataset.sec||'').replace(/&middot;/g,'·');
+    this.progress.style.width=((this.current+1)/this.slides.length*100)+'%';
+  }
+}
+const deck=new SlidePresentation();
+
+/* ===========================================================================
+   INLINE EDITOR  —  hover top-left hotzone or press E; edits persist to localStorage
+   =========================================================================== */
+const editor={
+  isActive:false,
+  key:'drone-sitl-brief:edits',
+  sel:'h1,h2,h3,p,li,span,td,th,.what,.where,.tag,.lbl,.kicker,.note,pre',
+  toggle(){
+    this.isActive=!this.isActive;
+    document.getElementById('editToggle').classList.toggle('active',this.isActive);
+    document.getElementById('editBar').classList.toggle('show',this.isActive);
+    document.querySelectorAll(this.sel).forEach(el=>{
+      if(el.closest('.edit-bar')) return;
+      el.setAttribute('contenteditable',this.isActive?'true':'false');
+    });
+    if(!this.isActive) this.save();
+  },
+  save(){
+    const map={};
+    document.querySelectorAll('.slide').forEach((s,si)=>{
+      s.querySelectorAll(this.sel).forEach((el,ei)=>{ map[si+':'+ei]=el.innerHTML; });
+    });
+    try{localStorage.setItem(this.key,JSON.stringify(map));}catch(e){}
+  },
+  restore(){
+    let raw;try{raw=localStorage.getItem(this.key);}catch(e){return;}
+    if(!raw) return;
+    let map;try{map=JSON.parse(raw);}catch(e){return;}
+    document.querySelectorAll('.slide').forEach((s,si)=>{
+      s.querySelectorAll(this.sel).forEach((el,ei)=>{
+        const v=map[si+':'+ei];
+        if(typeof v==='string') el.innerHTML=v;
+      });
+    });
+  },
+  reset(){
+    try{localStorage.removeItem(this.key);}catch(e){}
+    location.reload();
+  }
+};
+editor.restore();
+
+(function(){
+  const hotzone=document.getElementById('editHotzone');
+  const toggle=document.getElementById('editToggle');
+  let hideT=null;
+  const showBtn=()=>{clearTimeout(hideT);toggle.classList.add('show');};
+  const hideBtn=()=>{hideT=setTimeout(()=>{if(!editor.isActive)toggle.classList.remove('show');},400);};
+  hotzone.addEventListener('mouseenter',showBtn);
+  hotzone.addEventListener('mouseleave',hideBtn);
+  toggle.addEventListener('mouseenter',()=>clearTimeout(hideT));
+  toggle.addEventListener('mouseleave',hideBtn);
+  toggle.addEventListener('click',()=>editor.toggle());
+  hotzone.addEventListener('click',()=>editor.toggle());
+  document.getElementById('editSave').addEventListener('click',()=>{editor.save();editor.toggle();});
+  document.getElementById('editReset').addEventListener('click',()=>editor.reset());
+  document.addEventListener('keydown',e=>{
+    if((e.key==='e'||e.key==='E')&&e.target.getAttribute('contenteditable')!=='true') editor.toggle();
+  });
+})();
+</script>

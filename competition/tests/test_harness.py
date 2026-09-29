@@ -261,6 +261,36 @@ def test_flight_fields_pass_through_verbatim():
         == (-0.5, 0.25, 1.0, -1.0)
 
 
+def test_on_frame_publishes_last_detections_if_the_agent_sets_it():
+    from types import SimpleNamespace
+
+    class A(Agent):
+        def on_frame(self, image, state):
+            self.last_detections = [
+                SimpleNamespace(class_name="Truck", confidence=0.87,
+                                bbox=(1.0, 2.0, 3.0, 4.0))]
+
+    ch, clock = FakeChannel(), VirtualClock()
+    h = Harness(A(), ch, FakeFrames(), Arena.around(0, 0, 500, None),
+                now=clock.now, sleep=clock.sleep, log=lambda *a: None)
+    _run_for(h, clock, 0.25)
+    msg = next(m for m in ch.sent if m["type"] == "detections")
+    assert msg == {"type": "detections", "boxes": [
+        {"class_name": "Truck", "confidence": 0.87, "bbox": [1.0, 2.0, 3.0, 4.0]}]}
+
+
+def test_no_detections_message_when_the_agent_never_sets_last_detections():
+    class A(Agent):
+        def on_frame(self, image, state):
+            return None
+
+    ch, clock = FakeChannel(), VirtualClock()
+    h = Harness(A(), ch, FakeFrames(), Arena.around(0, 0, 500, None),
+                now=clock.now, sleep=clock.sleep, log=lambda *a: None)
+    _run_for(h, clock, 0.5)
+    assert "detections" not in ch.types()
+
+
 def test_time_limit_ends_the_run_with_a_hold():
     class A(Agent):
         def on_tick(self, state):

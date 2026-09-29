@@ -1,6 +1,6 @@
 """full_flight_agent.py -- runs against competition/ as it stands, but
-unlike single_flight.py it also needs detection.py's deps (torch,
-ultralytics) and your own weights.pt; that is what the Dockerfile is for.
+unlike single_flight.py it also needs detection.py's deps (torch, rfdetr)
+and your own weights.pt; that is what the Dockerfile is for.
 Flies a toy lawnmower sweep entirely on flight() -- deliberately not Route, which
 is still unresolved, see
 docs/superpowers/specs/2026-09-07-competition-flight-primitive-design.md's
@@ -13,6 +13,11 @@ detection.py owns everything about the model; this file owns everything
 about flying. See ../../docs/superpowers/specs/
 2026-09-08-competitor-submission-docker-design.md for the Docker
 packaging this pairs with.
+
+Sets self.last_detections each sweep frame -- an optional, duck-typed
+convention competition/harness.py looks for to forward a live detection
+overlay to the operator's website. Not part of the Command/flight() API;
+an agent that never sets it behaves exactly as before.
 """
 import math
 
@@ -100,8 +105,9 @@ class FullFlightAgent(Agent):
     def on_frame(self, image, state):
         if image is None or self.phase != "sweep":
             return None
-        hits = [d for d in self.detector.detect(image)
-                if d.confidence >= DETECT_CONFIDENCE]
+        dets = self.detector.detect(image)
+        self.last_detections = dets    # picked up by harness -- see its docstring
+        hits = [d for d in dets if d.confidence >= DETECT_CONFIDENCE]
         if not hits:
             return None
         self.phase = "orbit"

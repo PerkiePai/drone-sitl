@@ -17,6 +17,15 @@ joined with a timeout; the previous command stays in force. That is the
 contract in docs/competition-api.md section 1. A genuinely wedged callback
 leaves a daemon thread parked forever; Stop (killing the process) is the
 backstop for that.
+
+After each on_frame call, an agent MAY expose agent.last_detections: an
+iterable of objects with .class_name/.confidence/.bbox (bbox = (x1,y1,x2,y2)
+pixels in the frame just processed -- see examples/competition-submission/
+detection.py's Detection). If present, it's forwarded as a
+{"type": "detections", "boxes": [...]} channel message so the operator's
+website can draw a live overlay. Purely additive: it is not part of the
+Command/flight() contract, and an agent that never sets the attribute is
+unaffected.
 """
 import threading
 import time
@@ -95,6 +104,15 @@ class Harness:
                                "points": [[a, b] for a, b in f.waypoints],
                                "alt": f.alt, "speed": f.speed})
 
+    def _emit_detections(self):
+        dets = getattr(self.agent, "last_detections", None)
+        if dets is None:
+            return
+        self.channel.send({"type": "detections", "boxes": [
+            {"class_name": d.class_name, "confidence": d.confidence,
+             "bbox": list(d.bbox)}
+            for d in dets]})
+
     # -- dispatch ----------------------------------------------------------
 
     def _dispatch(self, fn, budget, *args):
@@ -161,6 +179,7 @@ class Harness:
                 self._last_frame_at = now
                 self._emit(self._dispatch(self.agent.on_frame, BUDGET_FRAME_S,
                                           self.frames.latest(), state))
+                self._emit_detections()
             else:
                 self._emit(self._dispatch(self.agent.on_tick, BUDGET_TICK_S,
                                           state))

@@ -94,6 +94,8 @@ RECORD_KEY         = "R"               # press R (focus a viewport) to start/sto
 REC_W, REC_H       = 1280, 800         # recording resolution (per camera) — higher than the stream
 REC_FPS            = 30                # recording frame rate
 REC_DIR            = "~/flight_recordings"   # MP4s saved here, timestamped per camera
+REC_QUEUE_FRAMES   = 4                 # per-camera buffer between Isaac's main thread and the ffmpeg writer;
+                                       # full queue drops the frame instead of blocking the sim thread
 
 # Manual fallback if the Cesium georeference can't be read off the stage:
 FALLBACK_LAT, FALLBACK_LON, FALLBACK_ALT = 40.7128, -74.0060, 10.0
@@ -463,7 +465,7 @@ def start_camera_streams(cam_paths):
     HTTP. View in any LAN browser at http://<box-ip>:STREAM_PORT/.
     Frame grab + JPEG encode happen on Isaac's main thread (app-update callback);
     HTTP worker threads only read the latest encoded bytes."""
-    import threading, time, io, os, subprocess
+    import threading, time, io, os, subprocess, queue
     import numpy as np
     import omni.kit.app, omni.appwindow
     import carb, carb.input
@@ -498,7 +500,29 @@ def start_camera_streams(cam_paths):
 
     # --- MP4 recording (separate, higher-res render products; lazy-created) ----
     rec_dir = os.path.expanduser(REC_DIR)
-    rec = {"on": False, "procs": {}, "annots": {}, "paths": {}}
+    rec = {"on": False, "procs": {}, "annots": {}, "paths": {},
+           "queues": {}, "stop_evts": {}, "writers": {}}
+
+    def _rec_writer(key):
+        """Owns the blocking ffmpeg stdin.write() so a slow/stalled encoder
+        can never stall Isaac's main thread (which PX4's lockstep clock
+        depends on). Drains rec["queues"][key]; frames that arrive faster
+        than ffmpeg drains them are dropped upstream (queue.Full), never
+        buffered here without bound."""
+        q = rec["queues"][key]
+        proc = rec["procs"][key]
+        stop_evt = rec["stop_evts"][key]
+        while True:
+            try:
+                frame = q.get(timeout=0.5)
+            except queue.Empty:
+                if stop_evt.is_set():
+                    return
+                continue
+            try:
+                proc.stdin.write(frame.tobytes())
+            except Exception:
+                return
 
     def _ensure_rec_annots():
         if rec["annots"]:
@@ -522,6 +546,11 @@ def start_camera_streams(cam_paths):
                    "-preset", "veryfast", out]
             rec["procs"][key] = subprocess.Popen(cmd, stdin=subprocess.PIPE)
             rec["paths"][key] = out
+            rec["queues"][key] = queue.Queue(maxsize=REC_QUEUE_FRAMES)
+            rec["stop_evts"][key] = threading.Event()
+            t = threading.Thread(target=_rec_writer, args=(key,), daemon=True)
+            rec["writers"][key] = t
+            t.start()
         state["last_rec"] = 0.0
         rec["on"] = True
         print(f">>> RECORDING started -> {', '.join(rec['paths'].values())}")
@@ -530,6 +559,11 @@ def start_camera_streams(cam_paths):
         if not rec["on"] and not rec["procs"]:
             return
         rec["on"] = False
+        for evt in rec["stop_evts"].values():
+            evt.set()
+        for t in rec["writers"].values():
+            try: t.join(timeout=30)
+            except Exception: pass
         for key, p in list(rec["procs"].items()):
             try:
                 p.stdin.close(); p.wait(timeout=30)
@@ -538,6 +572,7 @@ def start_camera_streams(cam_paths):
                 except Exception: pass
         saved = list(rec["paths"].values())
         rec["procs"].clear(); rec["paths"].clear()
+        rec["queues"].clear(); rec["stop_evts"].clear(); rec["writers"].clear()
         print(f">>> RECORDING stopped. Saved MP4s: {saved}")
 
     state = {"last_stream": 0.0, "last_rec": 0.0}
@@ -564,8 +599,8 @@ def start_camera_streams(cam_paths):
         if rec["on"] and now - state["last_rec"] >= rec_dt:
             state["last_rec"] = now
             for key, a in rec["annots"].items():
-                proc = rec["procs"].get(key)
-                if proc is None:
+                q = rec["queues"].get(key)
+                if q is None:
                     continue
                 try:
                     data = a.get_data()
@@ -574,7 +609,10 @@ def start_camera_streams(cam_paths):
                     rgb = np.ascontiguousarray(np.asarray(data)[:, :, :3], dtype=np.uint8)
                     if rgb.shape[:2] != (REC_H, REC_W):
                         continue
-                    proc.stdin.write(rgb.tobytes())
+                    try:
+                        q.put_nowait(rgb)
+                    except queue.Full:
+                        pass  # ffmpeg/disk fell behind -- drop the frame, never block the sim thread
                 except Exception:
                     pass
 
@@ -599,6 +637,15 @@ def start_camera_streams(cam_paths):
 
         def do_GET(self):
             p = self.path.split("?")[0].strip("/")
+            # HTTP recording trigger: the RECORD_KEY keypress needs a focused OS
+            # window/WebRTC client, which a headless --no-window launch has
+            # neither of, so it's otherwise unreachable in this deployment.
+            if p in ("record/start", "record/stop"):
+                (_start_recording if p == "record/start" else _stop_recording)()
+                body = f"recording {'on' if rec['on'] else 'off'}\n".encode()
+                self.send_response(200); self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body))); self.end_headers()
+                self.wfile.write(body); return
             if p in ("", "index.html"):
                 imgs = "".join(
                     f"<div style='text-align:center'><div style='color:#ccc;font:14px sans-serif'>{c}</div>"
@@ -638,8 +685,10 @@ def start_camera_streams(cam_paths):
     print(f">>> Camera MJPEG server on http://0.0.0.0:{STREAM_PORT}/  "
           f"(open from the Mac at http://<box-ip>:{STREAM_PORT}/ ; "
           f"single feeds: {', '.join('/' + c for c in cams)})")
-    print(f">>> RECORD: focus a viewport and press '{RECORD_KEY}' to start/stop MP4 "
-          f"recording of all cams -> {rec_dir}/ ({REC_W}x{REC_H} @ {REC_FPS}fps)")
+    print(f">>> RECORD: focus a viewport and press '{RECORD_KEY}' (needs a real window/WebRTC "
+          f"client -- unreachable headless) OR hit http://<box-ip>:{STREAM_PORT}/record/start "
+          f"(.../record/stop) to start/stop MP4 recording of all cams -> {rec_dir}/ "
+          f"({REC_W}x{REC_H} @ {REC_FPS}fps)")
 
 
 def fix_ground_plane():

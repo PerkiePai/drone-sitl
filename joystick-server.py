@@ -368,6 +368,7 @@ class AgentRun:
         self._container_name = None
         self._phase = None         # arm | takeoff | offboard  (while arming)
         self._log = collections.deque(maxlen=40)
+        self._detections = []
         self._lock = threading.Lock()
 
     def snapshot(self):
@@ -375,7 +376,12 @@ class AgentRun:
             running = self.state in ("arming", "running")
             return {"state": self.state, "kind": self.kind, "file": self.file,
                     "camera": self.loop_thread.agent_camera if running else None,
-                    "log": list(self._log)}
+                    "log": list(self._log),
+                    "detections": self._detections if running else []}
+
+    def set_detections(self, boxes):
+        with self._lock:
+            self._detections = boxes
 
     def run(self, kind, identifier):
         if not self.loop_thread.telemetry().get("connected"):
@@ -402,6 +408,8 @@ class AgentRun:
             return
         self.kind = kind
         self.file = identifier
+        self.set_detections([])   # else a stale box from the previous run
+                                   # would flash as soon as state gates open
         self.state = "arming"
         self._phase = "arm"
         self._note(f"arming for {identifier}")
@@ -749,6 +757,8 @@ def build_app(loop_thread, state, video_port, mission_speed, agent_run,
                     ac.hold()
                 elif kind == "camera":
                     loop_thread.agent_camera = msg.get("camera", "nadir")
+                elif kind == "detections":
+                    agent_run.set_detections(msg.get("boxes", []))
         except (WebSocketDisconnect, json.JSONDecodeError, KeyError, ValueError):
             pass
         finally:

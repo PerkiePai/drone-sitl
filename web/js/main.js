@@ -7,6 +7,7 @@ import { updateMission, syncAltDefault, setMissionSpeed } from './route.js';
 import { resetSticks } from './controls.js';
 import { initAgent, paintAgent } from './agent.js';
 import { initHil } from './hil.js';
+import { paintDetections } from './detections.js';
 
 // The video comes from the Isaac MJPEG server on a different port, so derive
 // the host from the page rather than hard-coding an IP -- this has to work
@@ -35,6 +36,7 @@ connect({
     paintDrone(t);
     updateMission(t);
     paintAgent(t);
+    paintDetections(t);
   },
   onClose: () => {
     resetSticks();

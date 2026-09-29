@@ -40,6 +40,18 @@ ION_TOKEN     = os.environ.get("CESIUM_ION_TOKEN", "")
 SETTLE_FRAMES = int(os.environ.get("SITL_TILE_SETTLE_FRAMES", "240"))
 AUTOPLAY      = os.environ.get("SITL_AUTOPLAY", "1") != "0"
 
+# Isaac ships DLSS in Performance mode and leaves the render mode on whatever
+# Kit's install-wide/persisted default is -- neither is this repo's to control
+# from the shared Isaac install, so assert what we want at runtime instead.
+# RealTimePathTracing (RTX - Real-Time 2.0) + DLSS Quality is a real fidelity
+# bump over the stock preset while staying real-time for a moving chase/nadir
+# camera. Full offline PathTracing looks noisy/grainy on a moving camera (it
+# accumulates samples over static frames) -- use it only for a hovering shot:
+#   SITL_RENDER_MODE=PathTracing ./sim/launch-sitl.sh
+RENDER_MODE     = os.environ.get("SITL_RENDER_MODE", "RealTimePathTracing")
+DLSS_MODE       = int(os.environ.get("SITL_DLSS_MODE", "2"))    # 0 perf / 1 balanced / 2 quality / 3 auto
+PATHTRACING_SPP = int(os.environ.get("SITL_PATHTRACING_SPP", "64"))  # only used when RENDER_MODE=PathTracing
+
 # Extensions the builder and setup script import from. They live outside the
 # Isaac install, so the launcher adds them with --ext-folder/--enable and we
 # just wait for them to finish coming up.
@@ -105,6 +117,25 @@ async def _run_setup_script(site):
         await _frames(60)
 
 
+def _apply_render_settings():
+    """DLSS execMode is a no-op unless DLSS is also the active antialiasing
+    algorithm -- that's a separate setting (/rtx/post/aa/op), so hand-rolled
+    carb.settings.set("/rtx/rendermode", ...) alone silently changes nothing
+    visible. Go through Replicator's own set_render_rtx_realtime(), which sets
+    both /rtx/rendermode AND /rtx/post/aa/op=dlss together (that's the same
+    helper the RTX docs point at for exactly this)."""
+    import carb.settings
+    import omni.replicator.core as rep
+
+    if RENDER_MODE == "PathTracing":
+        rep.settings.set_render_pathtraced(samples_per_pixel=PATHTRACING_SPP)
+    else:
+        rep.settings.set_render_rtx_realtime(antialiasing="DLSS")
+        carb.settings.get_settings().set("/rtx/post/dlss/execMode", DLSS_MODE)
+    print(f">>> render settings: rendermode={RENDER_MODE} dlss.execMode={DLSS_MODE} "
+          f"aa.op={carb.settings.get_settings().get('/rtx/post/aa/op')}")
+
+
 def _advisory(label, fn):
     """Run a diagnostic without ever letting it stop the bring-up.
 
@@ -158,6 +189,7 @@ async def _bring_up():
 
     # Let the app finish its own startup before touching the stage.
     await _frames(10)
+    _advisory("render settings", _apply_render_settings)
     if not await _wait_for_extensions():
         return
 

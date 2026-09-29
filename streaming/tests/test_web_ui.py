@@ -584,6 +584,37 @@ def test_agent_control_detections_message_is_accepted(server):
     asyncio.run(exercise())
 
 
+def test_detector_boxes_post_appears_in_ws_telemetry_and_rejects_junk(server):
+    """The operator-side detector sidecar (detector/web_feed.py) posts here;
+    the boxes ride the normal /ws telemetry as t["detector"]."""
+    import urllib.error
+    import urllib.request
+    websockets = pytest.importorskip("websockets")
+    url = f"http://127.0.0.1:{WEB_PORT}/detector/boxes"
+    box = {"class_name": "Truck", "confidence": 0.9, "bbox": [1, 2, 3, 4]}
+
+    def post(body):
+        return urllib.request.urlopen(urllib.request.Request(
+            url, body, {"Content-Type": "application/json"}), timeout=5)
+
+    with pytest.raises(urllib.error.HTTPError) as e:
+        post(b'{"nope": 1}')
+    assert e.value.code == 400
+    post(json.dumps({"boxes": [box]}).encode())
+
+    async def exercise():
+        async with websockets.connect(f"ws://127.0.0.1:{WEB_PORT}/ws") as ws:
+            t = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            assert t["detector"] == [box]
+            await asyncio.sleep(1.3)          # TTL: a dead sidecar's boxes vanish
+            while True:
+                t = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if t["detector"] == []:
+                    return
+
+    asyncio.run(exercise())
+
+
 def test_agent_control_route_message_loads_and_flies_a_mission(server):
     websockets = pytest.importorskip("websockets")
 

@@ -1,0 +1,9 @@
+# Inference only. Versions = the ones this package was tested with (rfdetr 1.9.4 + supervision 0.30.1 are what
+# the checkpoint was trained/served with; keep rfdetr at 1.9.x). Install torch first for YOUR CUDA:
+#   https://pytorch.org/get-started/locally/   (tested: torch 2.11.0+cu128 and 2.13.0, RTX 5090)
+rfdetr==1.9.4
+supervision==0.30.1
+transformers==5.16.1
+numpy>=1.26,<3
+opencv-python-headless>=4.10
+pillow

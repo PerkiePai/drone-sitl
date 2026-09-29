@@ -1,0 +1,79 @@
+{
+  "model": "RFDETRMedium(num_classes=1, resolution=640)",
+  "train_kwargs": {
+    "dataset_dir": "/home/innovation/Tiger/DroneDetectionProject/datasets_rfdetr_group",
+    "output_dir": "/home/innovation/Tiger/DroneDetectionProject/runs_rfdetr/truck_group_quality_aug",
+    "class_names": [
+      "Truck"
+    ],
+    "epochs": 150,
+    "batch_size": 8,
+    "grad_accum_steps": 2,
+    "num_workers": 8,
+    "early_stopping": true,
+    "early_stopping_patience": 15,
+    "augmentation_backend": "cpu",
+    "device": "cuda",
+    "run_test": true
+  },
+  "aug_config": {
+    "HorizontalFlip": {
+      "p": 0.5
+    },
+    "Blur": {
+      "blur_limit": [
+        3,
+        9
+      ],
+      "p": 0.15
+    },
+    "MotionBlur": {
+      "blur_limit": [
+        3,
+        15
+      ],
+      "p": 0.15
+    },
+    "GaussNoise": {
+      "std_range": [
+        0.04,
+        0.15
+      ],
+      "p": 0.3
+    },
+    "ISONoise": {
+      "color_shift": [
+        0.01,
+        0.05
+      ],
+      "intensity": [
+        0.1,
+        0.5
+      ],
+      "p": 0.2
+    },
+    "ImageCompression": {
+      "quality_range": [
+        30,
+        85
+      ],
+      "p": 0.35
+    },
+    "RandomBrightnessContrast": {
+      "brightness_limit": 0.3,
+      "contrast_limit": 0.3,
+      "p": 0.4
+    },
+    "RandomGamma": {
+      "gamma_limit": [
+        70,
+        130
+      ],
+      "p": 0.2
+    },
+    "CLAHE": {
+      "p": 0.05
+    }
+  },
+  "note": "เหมือน train_rfdetr_medium.py ทุกอย่าง ยกเว้น dataset_dir + output_dir"
+}

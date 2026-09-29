@@ -1,0 +1,21 @@
+{
+ "note": "ground-truth COCO bbox [x,y,w,h] from the held-out group-test split",
+ "boxes": {
+  "truck_0005.png": [
+   [
+    546.0,
+    407.0,
+    288.0,
+    239.0
+   ]
+  ],
+  "truck_0014.png": [
+   [
+    459.0,
+    437.0,
+    318.0,
+    180.0
+   ]
+  ]
+ }
+}

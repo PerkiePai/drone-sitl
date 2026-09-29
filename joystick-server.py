@@ -510,6 +510,29 @@ class AgentRun:
         print(f">>> agent: {msg}")
 
 
+class OperatorDetections:
+    """Boxes from the operator-side detector sidecar (detector/web_feed.py),
+    independent of any agent run. Stale boxes expire on their own so a dead
+    sidecar cannot leave a box frozen on screen."""
+    TTL_S = 1.0
+
+    def __init__(self):
+        self._boxes, self._at = [], 0.0
+        self._lock = threading.Lock()
+
+    def set(self, boxes):
+        with self._lock:
+            self._boxes, self._at = boxes, time.monotonic()
+
+    def get(self):
+        with self._lock:
+            fresh = time.monotonic() - self._at < self.TTL_S
+            return self._boxes if fresh else []
+
+
+operator_detections = OperatorDetections()
+
+
 async def _push_telemetry(sock, loop_thread, agent_run=None,
                           agent_docker_build=None, hz=5.0):
     try:
@@ -521,6 +544,7 @@ async def _push_telemetry(sock, loop_thread, agent_run=None,
                 # pusher passes agent_run=None.
                 agent_run.tick()
                 t["agent"] = agent_run.snapshot()
+            t["detector"] = operator_detections.get()
             if agent_docker_build is not None:
                 t["docker_build"] = agent_docker_build.snapshot()
             await sock.send_text(json.dumps(t))
@@ -554,6 +578,17 @@ def build_app(loop_thread, state, video_port, mission_speed, agent_run,
     def config():
         return JSONResponse({"video_port": video_port,
                              "mission_speed": mission_speed})
+
+    @app.post("/detector/boxes")
+    async def detector_boxes(request: Request):
+        # Same box shape as the agent's: {class_name, confidence, bbox:[x1,y1,x2,y2]}
+        try:
+            boxes = (await request.json())["boxes"]
+            assert isinstance(boxes, list)
+        except Exception:
+            return JSONResponse({"error": "want {\"boxes\": [...]}"}, status_code=400)
+        operator_detections.set(boxes)
+        return JSONResponse({"ok": True})
 
     @app.post("/agent/upload")
     async def agent_upload(request: Request):

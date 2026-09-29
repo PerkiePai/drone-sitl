@@ -1,0 +1,31 @@
+{
+  "name": "rfdetr_truck_medium_ema",
+  "file": "rfdetr_truck_medium_ema.pth",
+  "source_checkpoint": "DroneDetectionProject/runs_rfdetr/truck_group_quality_aug/checkpoint_best_ema.pth",
+  "architecture": "RF-DETR Medium (DINOv2-windowed-small encoder), 1 class, input resolution 640 (square resize, multiple of 64)",
+  "framework": "rfdetr 1.9.4 (from_checkpoint), PyTorch",
+  "license_of_architecture": "Apache-2.0 (per checkpoint config)",
+  "classes": [
+    "Truck"
+  ],
+  "recommended_conf_threshold": 0.25,
+  "input": "RGB image, any size (resized internally); training frames were 1280x720",
+  "training": {
+    "data": "4,811 frames rendered in NVIDIA Isaac Sim (Replicator) - 50 gaussian-splat trucks orbited by a camera; split BY TRUCK: 40 train / 5 val / 5 test trucks",
+    "augmentation": "flip, blur, motion blur, gaussian/ISO noise, JPEG compression, brightness/contrast, gamma, CLAHE",
+    "epochs_configured": 150,
+    "early_stopping_patience": 15,
+    "batch": "8 x grad_accum 2"
+  },
+  "metrics_held_out_trucks": {
+    "note": "held-out group-test split (trucks never seen in training); synthetic renders only",
+    "test_mAP50": 0.9999,
+    "test_mAP50_95": 0.765,
+    "test_mAP75": 0.978,
+    "val_ema_mAP50_95_best": 0.774
+  },
+  "known_limitations": [
+    "Trained ONLY on synthetic Isaac Sim renders of one truck family from a drone-like viewpoint. Accuracy on real photos/other vehicle types is NOT measured.",
+    "Phase-0 study on this model family measured ~0.8-0.86 false positives per truck-free (negative) image across degradation conditions - the AP numbers above do not show this because every test image contains a truck. Raise conf and/or add a min-box-area filter and verify on your own negative images before production use."
+  ]
+}

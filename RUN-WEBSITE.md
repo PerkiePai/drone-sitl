@@ -808,3 +808,17 @@ hostname -I | awk '{print $1}'                                          # your I
 | Route | click map to add · click marker to delete · one `alt` for the whole route · starts at waypoint 1 |
 | Takeover | any pad press pauses · RESUME continues · never leaves OFFBOARD |
 | Tests | `conda run -n drone pytest streaming/tests/ -q` (88 pass) |
+
+## Truck detector on the page (optional)
+
+`detector/web_feed.py` reads the `:8080/detect` camera, runs the RF-DETR truck
+model, and POSTs boxes to `:8090/detector/boxes`; the detection view on the page
+draws them (an agent's own boxes win when it is running). It needs the rfdetr
+env, not `drone`:
+
+```bash
+/home/innovation/Tiger/.venv/bin/python detector/web_feed.py     # --conf 0.5 default
+```
+
+Weights (`detector/model/*.pth`, 129 MB) are gitignored -- restore them from
+`truck_detector_package_*.tar.gz`. Kill the script and the boxes vanish within 1 s.

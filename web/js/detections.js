@@ -11,7 +11,10 @@ let boxes = [];
 export function paintDetections(t) {
   const src = document.getElementById('video').src;
   if (src && img.src !== src) img.src = src;
-  boxes = (t.agent && t.agent.detections) || [];
+  // An agent's own boxes win; otherwise show the operator-side detector's
+  // (detector/web_feed.py), so hand-flying gets boxes too.
+  const agentBoxes = (t.agent && t.agent.detections) || [];
+  boxes = agentBoxes.length ? agentBoxes : (t.detector || []);
 }
 
 function draw() {

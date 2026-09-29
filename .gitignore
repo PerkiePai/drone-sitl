@@ -28,3 +28,6 @@ graphify-out/.graphify_root
 # Trained model weights — bring your own, don't commit (100MB+ checkpoints).
 # The Dockerfile COPYs this at build time; it just needs to be present on disk.
 examples/competition-submission/weights.pt
+
+# detector weights (129 MB) -- restore from truck_detector_package tarball
+detector/model/*.pth

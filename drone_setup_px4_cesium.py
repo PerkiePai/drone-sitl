@@ -465,7 +465,7 @@ def start_camera_streams(cam_paths):
     HTTP. View in any LAN browser at http://<box-ip>:STREAM_PORT/.
     Frame grab + JPEG encode happen on Isaac's main thread (app-update callback);
     HTTP worker threads only read the latest encoded bytes."""
-    import threading, time, io, os, subprocess, queue
+    import threading, time, io, os, subprocess, queue, json
     import numpy as np
     import omni.kit.app, omni.appwindow
     import carb, carb.input
@@ -554,6 +554,7 @@ def start_camera_streams(cam_paths):
         state["last_rec"] = 0.0
         rec["on"] = True
         print(f">>> RECORDING started -> {', '.join(rec['paths'].values())}")
+        rec["started_at"] = time.time()
 
     def _stop_recording():
         if not rec["on"] and not rec["procs"]:
@@ -577,11 +578,29 @@ def start_camera_streams(cam_paths):
 
     state = {"last_stream": 0.0, "last_rec": 0.0}
     stream_dt = 1.0 / max(1, STREAM_FPS)
+    # request handed from the HTTP thread to _on_update (main thread)
+    rec_req = {"want": None, "error": None, "done": threading.Event()}
     rec_dt = 1.0 / max(1, REC_FPS)
 
     def _on_update(e):
         now = time.time()
         # streaming (throttled to STREAM_FPS)
+        # HTTP /record/* requests are executed HERE, on Kit's main thread:
+        # creating render products from the HTTP handler thread raises
+        # "Operation not permitted" (same reason the R key works).
+        req = rec_req["want"]
+        if req is not None:
+            rec_req["want"] = None
+            try:
+                if req == "start" and not rec["on"]:
+                    _start_recording()
+                elif req == "stop" and rec["on"]:
+                    _stop_recording()
+                rec_req["error"] = None
+            except Exception as exc:
+                rec_req["error"] = repr(exc)
+                print(f">>> RECORDING {req} failed: {exc!r}")
+            rec_req["done"].set()
         if now - state["last_stream"] >= stream_dt:
             state["last_stream"] = now
             for key, a in annots.items():
@@ -636,16 +655,30 @@ def start_camera_streams(cam_paths):
             pass
 
         def do_GET(self):
+        def _json(self, code, obj):
+            body = json.dumps(obj).encode()
+            self.send_response(code); self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body))); self.end_headers()
+            self.wfile.write(body)
+
             p = self.path.split("?")[0].strip("/")
             # HTTP recording trigger: the RECORD_KEY keypress needs a focused OS
             # window/WebRTC client, which a headless --no-window launch has
             # neither of, so it's otherwise unreachable in this deployment.
-            if p in ("record/start", "record/stop"):
-                (_start_recording if p == "record/start" else _stop_recording)()
-                body = f"recording {'on' if rec['on'] else 'off'}\n".encode()
-                self.send_response(200); self.send_header("Content-Type", "text/plain")
-                self.send_header("Content-Length", str(len(body))); self.end_headers()
-                self.wfile.write(body); return
+            if p in ("record/start", "record/stop", "record/status"):
+                if p != "record/status":
+                    rec_req["done"].clear()
+                    rec_req["want"] = p.split("/")[1]
+                    if not rec_req["done"].wait(timeout=15):
+                        rec_req["want"] = None
+                        return self._json(504, {"ok": False, "detail":
+                                                "sim main loop did not act within 15 s"})
+                    if rec_req["error"]:
+                        return self._json(500, {"ok": False, "detail": rec_req["error"]})
+                return self._json(200, {"ok": True, "on": rec["on"],
+                                        "paths": list(rec["paths"].values()),
+                                        "started_at": rec.get("started_at") if rec["on"] else None,
+                                        "now": time.time()})
             if p in ("", "index.html"):
                 imgs = "".join(
                     f"<div style='text-align:center'><div style='color:#ccc;font:14px sans-serif'>{c}</div>"

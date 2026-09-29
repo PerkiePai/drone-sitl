@@ -94,6 +94,7 @@ button:active:not(:disabled) { transform:translateY(1px); filter:brightness(1.5)
 /* FREEZE SIM is a sim-debug action, not a flight command -- deliberately
    not green like .sent, so it never reads as "command acknowledged". */
 #c-freeze.frozen { background:#48c; border-color:#8cf; }
+#c-rec.recording { background:#b22; border-color:#f66; color:#fff; }
 /* Raw hil_tap.py stream readout -- exact per-second counts, not a chart. */
 #hil-stream { font:12px/1.4 ui-monospace, monospace; color:#888;
               text-align:center; min-height:1.3em; }

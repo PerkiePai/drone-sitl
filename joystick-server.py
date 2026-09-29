@@ -681,6 +681,36 @@ def build_app(loop_thread, state, video_port, mission_speed, agent_run,
         snapshot["up"] = True
         return JSONResponse(snapshot)
 
+    # Recording is run by Isaac (drone_setup_px4_cesium.py, camera server on
+    # :8080). These proxy so the browser only ever talks to this server.
+    def _record_proxy(action):
+        import urllib.request
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:8080/record/{action}", timeout=20) as r:
+                return JSONResponse(json.load(r))
+        except urllib.error.HTTPError as e:
+            try:
+                detail = json.load(e).get("detail", str(e))
+            except Exception:
+                detail = str(e)
+            return JSONResponse({"ok": False, "detail": detail}, status_code=502)
+        except Exception as e:
+            return JSONResponse({"ok": False, "detail": f"sim unreachable: {e}"},
+                                status_code=502)
+
+    @app.post("/record/start")
+    def record_start():
+        return _record_proxy("start")
+
+    @app.post("/record/stop")
+    def record_stop():
+        return _record_proxy("stop")
+
+    @app.get("/record/status")
+    def record_status():
+        return _record_proxy("status")
+
     @app.get("/agent/list")
     def agent_list():
         try:

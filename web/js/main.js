@@ -7,6 +7,7 @@ import { updateMission, syncAltDefault, setMissionSpeed } from './route.js';
 import { resetSticks } from './controls.js';
 import { initAgent, paintAgent } from './agent.js';
 import { initHil } from './hil.js';
+import { initRecord } from './record.js';
 import { paintDetections } from './detections.js';
 
 // The video comes from the Isaac MJPEG server on a different port, so derive
@@ -27,6 +28,7 @@ fetch('/config').then(r => r.json()).then(c => {
 
 initAgent();
 initHil();
+initRecord();
 
 connect({
   onOpen: () => setStatus('connected to server', 'good'),

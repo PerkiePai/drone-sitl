@@ -49,3 +49,11 @@ def test_site_is_frozen():
     site = sites.get_site("bangkok-survey-040")
     with pytest.raises(dataclasses.FrozenInstanceError):
         site.latitude = 0.0
+
+
+def test_nt_testgs_stage_exists_and_matches_its_report():
+    site = sites.get_site("nt-testgs")
+    stage = site.resolved_stage_path()
+    assert stage is not None and stage.is_file(), f"missing {stage}"
+    assert 'cesium:georeferenceOrigin:latitude = %r' % site.latitude in stage.read_text()
+    assert site.spawn_z == pytest.approx(6.4826)

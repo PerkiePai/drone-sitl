@@ -148,3 +148,50 @@ of what the installed Pegasus defaults to next.
   `enable_lockstep`.
 - Both are set in one place: the `PX4MavlinkBackendConfig({...})` dict in
   `drone_setup_px4_cesium.py`, `_spawn_px4_keep_stage()`.
+
+---
+
+# Map-stage site `nt-testgs`, Cesium-free (2026-09-29, branch `feat/website-usd-map-testgs`)
+
+`run-website` now loads `/home/innovation/Tiger/map_setup_output_nt_testgs/drone_map.usda`
+by default. Uncommitted at time of writing.
+
+**What changed**
+- `sim/sites.py`: new `nt-testgs` site. `Site.stage_usd` (map stage layered in as a
+  sublayer of a fresh Z-up stage, so the source file is never edited),
+  `Site.uses_cesium` (False when `stage_usd` is set). Georeference
+  14.028519616, 100.43642032, -35.002; ground z 5.9826; spawn (4.7762, -19.3996),
+  +0.5 m AGL. Values come from `drone_map_report.json`.
+- `sim/stage_builder.py`: `cesium.*` imports are lazy (`_cesium()`); the stage path adds
+  no tileset, model, ion token or ground plane (the map has its own terrain collider).
+  `read_georeference()` reads plain prim attributes, so it works with Cesium unloaded.
+- `sim/launch-sitl.sh`: default `SITE=nt-testgs`; asks `sites.py` whether the site uses
+  Cesium and, if not, skips the Cesium ext folder, ion token check, tile cache and
+  `--enable cesium.omniverse`. Exports `SITL_USES_CESIUM`.
+- `sim/bootstrap.py`: waits for Cesium only if needed; 30 settle frames instead of 240.
+- `SITE=bangkok-survey-040 ./sim/run-website.sh` still gives the old Cesium map.
+
+**World position still works**: `drone_setup_px4_cesium.py` reads the
+`/CesiumGeoreference` prim's attributes (no Cesium API), PX4 GPS origin matches, and
+`/tmp/drone_truth.json` reports lat/lon/alt (alt = -35.002 + height above origin).
+
+**Gotchas found**
+- The Cesium extension still loads: the Isaac Streaming profile's `user.config.json`
+  has it enabled. With no tileset prims it fetches nothing (0 tile lines in the log).
+- `run-website` printed "Isaac Sim exited before coming up" while Isaac was up. Not
+  investigated.
+- Render mode: bootstrap reports `RealTimePathTracing` (RTX Real-Time 2.0) + DLSS
+  Quality. `SITL_RENDER_MODE=RaytracedLighting` does NOT take: `/rtx/rendermode` reads
+  back `RealTimePathTracing` even when set after the stage build. Unresolved. The
+  re-assert I added to `bootstrap.py` did not help.
+- The map is a 3D Gaussian splat (`ParticleField3DGaussianSb`). On the ground it looks
+  grainy/blobby (large splats up close, 640x400 stream, DLSS). At 20 m AGL it is clean
+  and sharp. Untested next step: `DRONE_SETUP_STREAM_W=1280 DRONE_SETUP_STREAM_H=800`
+  (`STREAM_W, STREAM_H` is a tuple assignment, so the env override may need care).
+
+**Scripted takeoff to 20 m AGL** over the web server's `/ws` (needs the `drone` conda
+env for `websockets`): `cmd arm` -> wait `armed` -> `cmd takeoff` -> wait alt>1,
+|vz|<0.2, `ready_for_offboard` -> `cmd offboard` (repeat until mode OFFBOARD) -> hold
+`stick left y=-1.0` (negative is UP; +1.0 descends) with a `ping` until `alt_m` >= 20.
+Arming takes ~3 s and PX4 auto-disarms if takeoff does not follow within ~10 s.
+Do not `pkill -f` a pattern that appears in your own command line.

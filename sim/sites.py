@@ -75,6 +75,13 @@ class Site:
     spawn_xy: tuple[float, float]      # local metres (x=East, y=North)
     spawn_agl_m: float                 # clearance ABOVE ground_z, not above origin
     heading_deg: float                 # compass: 0=N, 90=E
+    stage_usd: str | None = None
+    """A pre-authored map stage (map_setup_tool output) layered in as a sublayer
+    instead of building tilesets/models from this config. It brings its own
+    georeference, terrain collider and physics scene, so `tilesets`/`models` are
+    ignored and no ground plane is added. `latitude`/`longitude`/`height` must
+    still match the stage's CesiumGeoreference -- bootstrap reads it back and
+    warns on a mismatch. Relative to REPO_ROOT, or absolute."""
 
     """`ground_z` is the invisible collision plane the drone rests on. It must
     match the height of the map model the drone appears to be standing on --
@@ -82,6 +89,19 @@ class Site:
     model". Set it below anything and the drone falls; above, and it hovers on
     an invisible floor. `spawn_z` is derived from it so the two cannot drift.
     """
+
+    @property
+    def uses_cesium(self) -> bool:
+        """False for a map-stage site: nothing streams, so the Cesium extension,
+        ion token and tile cache are all unnecessary (and the tile fetching is
+        what made the sim laggy)."""
+        return self.stage_usd is None
+
+    def resolved_stage_path(self) -> Path | None:
+        if self.stage_usd is None:
+            return None
+        path = Path(self.stage_usd).expanduser()
+        return path if path.is_absolute() else (REPO_ROOT / path).resolve()
 
     @property
     def spawn_z(self) -> float:
@@ -117,7 +137,23 @@ BANGKOK_SURVEY_040 = Site(
     heading_deg=0.0,
 )
 
-SITES: dict[str, Site] = {BANGKOK_SURVEY_040.name: BANGKOK_SURVEY_040}
+# Values from drone_map_report.json (map_setup_tool): the stage's georeference,
+# and the auto-found spawn pad (ground_z 5.9826 -> spawn_enu z 6.4826).
+NT_TESTGS = Site(
+    name="nt-testgs",
+    latitude=14.028519616,
+    longitude=100.43642032,
+    height=-35.002,
+    tilesets=(),
+    models=(),
+    ground_z=5.9826,
+    spawn_xy=(4.7762, -19.3996),
+    spawn_agl_m=0.5,               # -> spawn_z = 6.4826
+    heading_deg=0.0,
+    stage_usd="/home/innovation/Tiger/map_setup_output_nt_testgs/drone_map.usda",
+)
+
+SITES: dict[str, Site] = {s.name: s for s in (BANGKOK_SURVEY_040, NT_TESTGS)}
 
 
 def get_site(name: str) -> Site:

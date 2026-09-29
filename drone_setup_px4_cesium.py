@@ -18,6 +18,7 @@
 #   PX4 only. Does NOT touch ArduPilot or configs.yaml.
 # ============================================================================
 import asyncio
+import os
 import time
 from scipy.spatial.transform import Rotation
 from isaacsim.core.api.world import World
@@ -86,7 +87,7 @@ CHASE_MAX_DIST     = 2.0               # hard leash (m): the damped lag can let 
                                        # further behind than CHASE_TRAIL_DIST while the drone
                                        # accelerates -- clamped back to this distance every
                                        # frame so it never drifts further than this from the drone.
-STREAM_CAMERAS     = True              # serve all feeds over HTTP (MJPEG) to any browser on the LAN
+STREAM_CAMERAS     = os.environ.get("SITL_SKIP_STREAM") != "1"  # TEMP diagnostic override; serve all feeds over HTTP (MJPEG) to any browser on the LAN
 STREAM_PORT        = 8080
 STREAM_W, STREAM_H = 640, 400          # streamed resolution (per camera)
 STREAM_FPS         = 20                # max encode/stream rate
@@ -553,8 +554,8 @@ def start_camera_streams(cam_paths):
             t.start()
         state["last_rec"] = 0.0
         rec["on"] = True
-        print(f">>> RECORDING started -> {', '.join(rec['paths'].values())}")
         rec["started_at"] = time.time()
+        print(f">>> RECORDING started -> {', '.join(rec['paths'].values())}")
 
     def _stop_recording():
         if not rec["on"] and not rec["procs"]:
@@ -577,14 +578,13 @@ def start_camera_streams(cam_paths):
         print(f">>> RECORDING stopped. Saved MP4s: {saved}")
 
     state = {"last_stream": 0.0, "last_rec": 0.0}
-    stream_dt = 1.0 / max(1, STREAM_FPS)
     # request handed from the HTTP thread to _on_update (main thread)
     rec_req = {"want": None, "error": None, "done": threading.Event()}
+    stream_dt = 1.0 / max(1, STREAM_FPS)
     rec_dt = 1.0 / max(1, REC_FPS)
 
     def _on_update(e):
         now = time.time()
-        # streaming (throttled to STREAM_FPS)
         # HTTP /record/* requests are executed HERE, on Kit's main thread:
         # creating render products from the HTTP handler thread raises
         # "Operation not permitted" (same reason the R key works).
@@ -601,6 +601,7 @@ def start_camera_streams(cam_paths):
                 rec_req["error"] = repr(exc)
                 print(f">>> RECORDING {req} failed: {exc!r}")
             rec_req["done"].set()
+        # streaming (throttled to STREAM_FPS)
         if now - state["last_stream"] >= stream_dt:
             state["last_stream"] = now
             for key, a in annots.items():
@@ -654,13 +655,13 @@ def start_camera_streams(cam_paths):
         def log_message(self, *a):   # silence per-request logging
             pass
 
-        def do_GET(self):
         def _json(self, code, obj):
             body = json.dumps(obj).encode()
             self.send_response(code); self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body))); self.end_headers()
             self.wfile.write(body)
 
+        def do_GET(self):
             p = self.path.split("?")[0].strip("/")
             # HTTP recording trigger: the RECORD_KEY keypress needs a focused OS
             # window/WebRTC client, which a headless --no-window launch has

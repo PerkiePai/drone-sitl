@@ -38,6 +38,7 @@ SITE_NAME     = os.environ.get("SITL_SITE", "")
 SETUP_SCRIPT  = os.environ.get("SITL_SETUP_SCRIPT", "")
 ION_TOKEN     = os.environ.get("CESIUM_ION_TOKEN", "")
 SETTLE_FRAMES = int(os.environ.get("SITL_TILE_SETTLE_FRAMES", "240"))
+USES_CESIUM   = os.environ.get("SITL_USES_CESIUM", "1") != "0"
 AUTOPLAY      = os.environ.get("SITL_AUTOPLAY", "1") != "0"
 
 # Isaac ships DLSS in Performance mode and leaves the render mode on whatever
@@ -55,7 +56,7 @@ PATHTRACING_SPP = int(os.environ.get("SITL_PATHTRACING_SPP", "64"))  # only used
 # Extensions the builder and setup script import from. They live outside the
 # Isaac install, so the launcher adds them with --ext-folder/--enable and we
 # just wait for them to finish coming up.
-REQUIRED_EXTS = ["pegasus.simulator", "cesium.omniverse"]
+REQUIRED_EXTS = ["pegasus.simulator"] + (["cesium.omniverse"] if USES_CESIUM else [])
 
 
 def _banner(*lines):
@@ -132,7 +133,11 @@ def _apply_render_settings():
     else:
         rep.settings.set_render_rtx_realtime(antialiasing="DLSS")
         carb.settings.get_settings().set("/rtx/post/dlss/execMode", DLSS_MODE)
-    print(f">>> render settings: rendermode={RENDER_MODE} dlss.execMode={DLSS_MODE} "
+        # The helper's own idea of "realtime" is not guaranteed to be the mode
+        # named here, so assert it: SITL_RENDER_MODE=RaytracedLighting is plain
+        # RTX Real-Time (no path-tracing noise), RealTimePathTracing is RT 2.0.
+        carb.settings.get_settings().set("/rtx/rendermode", RENDER_MODE)
+    print(f">>> render settings: rendermode={carb.settings.get_settings().get('/rtx/rendermode')} dlss.execMode={DLSS_MODE} "
           f"aa.op={carb.settings.get_settings().get('/rtx/post/aa/op')}")
 
 
@@ -183,7 +188,7 @@ async def _bring_up():
         _banner("SITL_SITE / SITL_SETUP_SCRIPT not set.",
                 "Launch through sim/launch-sitl.sh, not kit directly.")
         return
-    if not ION_TOKEN:
+    if USES_CESIUM and not ION_TOKEN:
         _banner("CESIUM_ION_TOKEN is not set -- tiles cannot stream.")
         return
 
@@ -199,8 +204,10 @@ async def _bring_up():
     site = sites.get_site(SITE_NAME)
     await stage_builder.build_stage(site, ION_TOKEN)
 
-    print(f">>> Settling {SETTLE_FRAMES} frames for Cesium tiles.")
-    await _frames(SETTLE_FRAMES)
+    # Nothing streams on a map-stage site, so a short settle is enough.
+    settle = SETTLE_FRAMES if USES_CESIUM else 30
+    print(f">>> Settling {settle} frames" + (" for Cesium tiles." if USES_CESIUM else "."))
+    await _frames(settle)
 
     # Cesium writes each model's transform from its globe anchor on its own
     # update tick, which lands after build_stage returns. Re-assert the
@@ -227,6 +234,11 @@ async def _bring_up():
     # which is a much worse outcome than a warned-about stage.
     _advisory("model transform override (post-spawn)",
               lambda: stage_builder.apply_model_overrides(site))
+    # The stage swap in build_stage resets render settings, so assert them again.
+    _advisory("render settings (post-build)", _apply_render_settings)
+    await _frames(10)
+    _advisory("render mode read-back", lambda: print(
+        ">>> render mode now:", __import__("carb.settings").settings.get_settings().get("/rtx/rendermode")))
     _advisory("up-axis check",
               lambda: stage_builder.assert_z_up("after drone_setup_px4_cesium.py"))
     _advisory("georeference check", lambda: _check_georeference(site))

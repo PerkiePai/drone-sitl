@@ -20,8 +20,8 @@ from pxr import Gf, Sdf, UsdGeom, UsdLux
 import isaacsim.core.experimental.utils.stage as stage_utils
 from isaacsim.core.api.objects import GroundPlane
 
-from cesium.omniverse.usdUtils import usdUtils
-from cesium.usd.plugins.CesiumUsdSchemas import IonServer as CesiumIonServer
+# cesium.* is imported lazily (_cesium()): a map-stage site runs without the
+# Cesium extension loaded at all, so a module-level import would kill it.
 
 from sites import ModelAnchor, Site
 
@@ -61,6 +61,25 @@ async def build_stage(site: Site, ion_token: str) -> None:
     stage.SetDefaultPrim(world.GetPrim())
 
     _add_lighting()
+
+    stage_path = site.resolved_stage_path()
+    if stage_path is not None:
+        # Sublayer into the fresh anonymous stage rather than opening the file:
+        # everything the sim authors (drone, lighting) stays out of the map
+        # file, and the stage is still authored Z-up by us.
+        if not stage_path.is_file():
+            raise FileNotFoundError(
+                f"map stage for site {site.name!r} not found at {stage_path} "
+                f"(configured as {site.stage_usd!r} in sim/sites.py)")
+        stage.GetRootLayer().subLayerPaths.append(str(stage_path))
+        print(f">>> map stage sublayered: {stage_path} (georeference, colliders "
+              f"and physics come from it; ground z={site.ground_z:.3f})")
+        assert_z_up("after build_stage")
+        print(f">>> stage built for site {site.name!r} at {site.latitude}, {site.longitude}")
+        report_stage()
+        return
+
+    usdUtils, _ = _cesium()
     _set_ion_token(ion_token)
     _set_georeference(site)
 
@@ -132,12 +151,14 @@ def assert_z_up(when: str) -> None:
 
 def read_georeference() -> tuple[float, float, float]:
     """Read back (lat, lon, height) as authored, for the bootstrap's check."""
-    georef = usdUtils.get_or_create_cesium_georeference()
-    return (
-        float(georef.GetGeoreferenceOriginLatitudeAttr().Get()),
-        float(georef.GetGeoreferenceOriginLongitudeAttr().Get()),
-        float(georef.GetGeoreferenceOriginHeightAttr().Get()),
-    )
+    stage = omni.usd.get_context().get_stage()
+    prim = stage.GetPrimAtPath("/CesiumGeoreference")
+    if not prim.IsValid():
+        raise RuntimeError("no /CesiumGeoreference prim on the stage")
+    # Plain attribute reads, not the Cesium schema API: this must work with the
+    # extension unloaded, where the prim is just an untyped bag of attributes.
+    return tuple(float(prim.GetAttribute(f"cesium:georeferenceOrigin:{n}").Get())
+                 for n in ("latitude", "longitude", "height"))
 
 
 def _set_ion_token(token: str) -> None:
@@ -147,6 +168,7 @@ def _set_ion_token(token: str) -> None:
     /CesiumServers/IonOfficial on stage events, but that is event-driven and its
     timing relative to a stage we just created is not guaranteed.
     """
+    usdUtils, CesiumIonServer = _cesium()
     stage = omni.usd.get_context().get_stage()
     usdUtils.get_or_create_cesium_data()
 
@@ -164,10 +186,18 @@ def _set_ion_token(token: str) -> None:
     print(">>> ion token applied to /CesiumServers/IonOfficial")
 
 
+def _cesium():
+    """Import the Cesium Python API on first use (Cesium sites only)."""
+    from cesium.omniverse.usdUtils import usdUtils
+    from cesium.usd.plugins.CesiumUsdSchemas import IonServer
+    return usdUtils, IonServer
+
+
 def _set_georeference(site: Site) -> None:
     """Set the georeference origin. drone_setup_px4_cesium.py's
     read_cesium_georeference() reads this back to set the PX4 GPS origin, which
     is what makes QGC and Isaac agree on where the drone is."""
+    usdUtils, _ = _cesium()
     georef = usdUtils.get_or_create_cesium_georeference()
     georef.GetGeoreferenceOriginLatitudeAttr().Set(site.latitude)
     georef.GetGeoreferenceOriginLongitudeAttr().Set(site.longitude)
@@ -184,6 +214,7 @@ def _add_model(model: ModelAnchor) -> None:
             f"(configured as {model.usd_path!r} in sim/sites.py)"
         )
 
+    usdUtils, _ = _cesium()
     stage = omni.usd.get_context().get_stage()
     prim_path = f"{WORLD_PATH}/{model.prim_name}"
     xform = UsdGeom.Xform.Define(stage, prim_path)

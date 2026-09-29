@@ -22,7 +22,8 @@
 # by you, on purpose.
 #
 # Per-flight overrides, no file editing needed:
-#   SITE=bangkok-survey-040 ./sim/launch-sitl.sh         # which site (this is the default)
+#   SITE=nt-testgs ./sim/launch-sitl.sh                 # which site (this is the default)
+#   SITE=bangkok-survey-040 ./sim/launch-sitl.sh         # the old survey-mesh site
 #   SPAWN_XYZ='[12.0, -4.0, -26.5]' ./sim/launch-sitl.sh # takeoff point (ABSOLUTE z)
 #   HEADING_DEG=90 ./sim/launch-sitl.sh                  # compass heading
 #   AUTOPLAY=0 ./sim/launch-sitl.sh                      # spawn but stay stopped
@@ -58,7 +59,7 @@ fi
 echo "launch-sitl: ion token  $TOKEN_SOURCE"
 
 ISAAC_DIR="${ISAAC_DIR:-$HOME/isaac-sim6}"
-SITE="${SITE:-bangkok-survey-040}"
+SITE="${SITE:-nt-testgs}"
 SETUP_SCRIPT="${SETUP_SCRIPT:-$REPO_DIR/drone_setup_px4_cesium.py}"
 PEGASUS_EXTS="${PEGASUS_EXTS:-$HOME/PegasusSimulator/extensions}"
 CESIUM_EXTS="${CESIUM_EXTS:-$HOME/cesium-omniverse-6.0-build/exts}"
@@ -70,15 +71,23 @@ die() { echo "launch-sitl: $*" >&2; exit 1; }
 [[ -x "$ISAAC_SH"        ]] || die "Isaac Sim launcher not found at $ISAAC_SH (set ISAAC_DIR=)"
 [[ -f "$SETUP_SCRIPT"    ]] || die "setup script not found at $SETUP_SCRIPT (set SETUP_SCRIPT=)"
 [[ -d "$PEGASUS_EXTS"    ]] || die "Pegasus extensions not found at $PEGASUS_EXTS (set PEGASUS_EXTS=)"
+# Does this site stream Cesium tiles at all? Map-stage sites (stage_usd) do not.
+USES_CESIUM="$(PYTHONPATH="$REPO_DIR/sim" python3 -c \
+    'import sys, sites; print(int(sites.get_site(sys.argv[1]).uses_cesium))' "$SITE")" \
+    || die "unknown site '$SITE' (see sim/sites.py)"
+
+if [[ "$USES_CESIUM" == 1 ]]; then
 [[ -d "$CESIUM_EXTS"     ]] || die "Cesium extensions not found at $CESIUM_EXTS (set CESIUM_EXTS=)"
 [[ -n "${CESIUM_ION_TOKEN:-}" ]] || die "CESIUM_ION_TOKEN is not set.
   Cesium cannot stream tiles without it. Put it in a gitignored secrets file:
     cp sim/secrets.env.example sim/secrets.env && chmod 600 sim/secrets.env
     \$EDITOR sim/secrets.env
   Get one at https://ion.cesium.com/tokens"
+fi
 
 # --- consumed by sim/bootstrap.py -------------------------------------------
 export SITL_SITE="$SITE"
+export SITL_USES_CESIUM="$USES_CESIUM"
 export SITL_SETUP_SCRIPT="$SETUP_SCRIPT"
 export SITL_AUTOPLAY="${AUTOPLAY:-1}"
 export SITL_TILE_SETTLE_FRAMES="${TILE_SETTLE_FRAMES:-240}"
@@ -117,7 +126,9 @@ echo "launch-sitl: spawn      ${SPAWN_XYZ:-from sim/sites.py}  heading ${HEADING
 # Isaac instance is running. We seed the private cache from the global one on
 # first use (a one-off ~10 GB copy) so startup does not hang.
 ISAAC_CACHE_ARGS=()
-if [[ -n "${OMNI_CACHE_DIR:-}" ]]; then
+if [[ "$USES_CESIUM" != 1 ]]; then
+    echo "launch-sitl: cesium     off (site $SITE is a map stage -- no tile fetching)"
+elif [[ -n "${OMNI_CACHE_DIR:-}" ]]; then
     mkdir -p "$OMNI_CACHE_DIR"
     _global_cesium="$HOME/.cache/ov/cesium-request-cache.sqlite"
     _private_cesium="$OMNI_CACHE_DIR/cesium-request-cache.sqlite"
@@ -131,11 +142,15 @@ else
     echo "launch-sitl: tile cache ~/.cache/ov (shared + warm; set OMNI_CACHE_DIR only if a second Isaac instance is up)"
 fi
 
+CESIUM_ARGS=()
+if [[ "$USES_CESIUM" == 1 ]]; then
+    CESIUM_ARGS=(--ext-folder "$CESIUM_EXTS" --enable cesium.omniverse)
+fi
+
 exec "$ISAAC_SH" \
     --ext-folder "$PEGASUS_EXTS" \
-    --ext-folder "$CESIUM_EXTS" \
+    ${CESIUM_ARGS[@]+"${CESIUM_ARGS[@]}"} \
     --enable pegasus.simulator \
-    --enable cesium.omniverse \
     --exec "$REPO_DIR/sim/bootstrap.py" \
     ${ISAAC_CACHE_ARGS[@]+"${ISAAC_CACHE_ARGS[@]}"} \
     "$@"
